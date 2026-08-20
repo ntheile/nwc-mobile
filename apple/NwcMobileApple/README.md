@@ -74,6 +74,16 @@ Choose an execution budget below the NSE window and retain enough time for Rust
 to checkpoint and for the completion handler to run. The application and NSE
 must open the same app-group ledger and use the same Keychain access group.
 
+## Foreground and background maintenance
+
+`NwcMaintenanceCoordinator` serializes one bounded payment-reconciliation pass
+and one wake-registration outbox pass. The wallet supplies an
+`NwcMaintenanceExecutor` that maps generated `MobileNwcEngine` reports into the
+package's aggregate report types. Call `cancel()` when an iOS background task
+expires or before suspension; the coordinator cancels the shared Rust scope,
+ignores late completion races, and completes exactly once without surfacing
+wallet or provider error text.
+
 Run the package tests with:
 
 ```sh

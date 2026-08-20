@@ -181,8 +181,14 @@ wallet supplies a small `NwcWakeExecutor` that maps `NwcWakePayload` into
 hint. See [`apple/NwcMobileApple/README.md`](apple/NwcMobileApple/README.md) for
 the NSE wiring contract and payload keys.
 
-The containing app uses the same ledger and calls `resume_pending()` when it is
-launched or foregrounded.
+The containing app uses the same ledger and resubmits queued wake envelopes from
+its wallet-owned inbox when it is launched or foregrounded.
+
+For maintenance outside the NSE, `NwcMaintenanceCoordinator` serializes bounded
+payment reconciliation and wake-registration processing, prevents overlapping
+runs, and propagates iOS task expiration into the shared Rust cancellation
+scope. It returns aggregate retry guidance without exposing wallet or provider
+error text.
 
 Swift and Kotlin source is generated from the compiled UniFFI library with the
 workspace-pinned `nwc-mobile-uniffi-bindgen` tool. CI regenerates both languages
