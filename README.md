@@ -215,6 +215,15 @@ pass should be scheduled. This remains safe after connection revocation because
 revocation blocks new authorization while the reconciler only accounts for
 payments that were durably reserved earlier.
 
+The Rust facade exposes these operations as `reconcile_payments` and
+`process_wake_registrations`; generated Swift and Kotlin bindings expose them as
+`reconcilePayments` and `processWakeRegistrations`. Registration processing
+drains a bounded batch of durable enable/disable changes through a
+wallet-supplied `MobileWakeRegistrationTransport`. Both calls use request-scoped
+cancellation, hard batch limits, and explicit execution budgets. Provider
+response bodies and transport diagnostics never enter the Rust result or durable
+ledger.
+
 ## Nostr Wallet Auth notes
 
 Nostr Wallet Auth (NWA) is the connection authorization flow. It is distinct
