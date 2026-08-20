@@ -37,6 +37,8 @@ pub enum QueueReason {
 pub enum RetryReason {
     /// A relay could not be reached within the current attempt budget.
     RelayUnavailable,
+    /// A read-only wallet capability was temporarily unavailable.
+    WalletUnavailable,
     /// Publishing a response failed after the result was persisted.
     ResponsePublishFailed,
     /// A wake-provider registration operation failed transiently.
@@ -57,6 +59,8 @@ pub enum RejectionCode {
     EventMismatch,
     /// The event signature or recipient is invalid.
     InvalidEvent,
+    /// The decrypted NIP-47 request is malformed or unsupported.
+    InvalidRequest,
     /// The event is too old or too far in the future.
     EventOutsideFreshnessWindow,
     /// The client is not authorized to call the requested method.

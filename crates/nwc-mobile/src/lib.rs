@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod connection_registry;
+mod engine;
 mod error;
 mod host;
 mod ledger;
@@ -20,6 +21,7 @@ mod types;
 pub use connection_registry::{
     ActiveConnection, ConnectionTombstone, NewConnection, RegistryError, StoredConnection,
 };
+pub use engine::ReadOnlyWakeEngine;
 pub use error::DomainError;
 pub use host::{
     AmountMsat, AmountSat, CancellationSignal, CreatedInvoice, HostError, HostErrorKind,
