@@ -19,6 +19,7 @@ mod payment_reconciliation;
 mod policy;
 mod time;
 mod types;
+mod wake_registration;
 
 pub use connection_registry::{
     ActiveConnection, ConnectionTombstone, NewConnection, RegistryError, StoredConnection,
@@ -51,4 +52,7 @@ pub use time::{BackgroundBudget, Clock, SystemClock, UnixTimestamp};
 pub use types::{
     ConnectionId, ConnectionRevision, EventId, NwcMethod, PaymentHash, PaymentPreimage, PublicKey,
     WakeInput,
+};
+pub use wake_registration::{
+    WakeRegistrationChange, WakeRegistrationError, MAX_WAKE_REGISTRATION_BATCH,
 };

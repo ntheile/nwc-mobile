@@ -246,11 +246,19 @@ identifier, installation identifier, and APNs/FCM destination.
 
 Registration is a durable lifecycle, not a fire-and-forget side effect:
 
-- persist the approved connection before sending `enabled: true`;
-- keep failed registrations in a retryable outbox;
-- tombstone a connection before sending `enabled: false`;
+- persist the approved connection and queue `enabled: true` in one transaction;
+- keep failed registrations in a bounded, retryable SQLite outbox;
+- tombstone a connection and queue `enabled: false` in one transaction before
+  scrubbing relay and method metadata;
 - retry unregistration until acknowledged or explicitly abandoned; and
 - never allow an in-flight wake or registration result to resurrect a tombstone.
+
+Each outbox change carries the connection's monotonic revision. The native
+transport must use that tuple as an idempotency key, the wake provider must
+reject older revisions after seeing a newer one, and native code must call
+`acknowledge_wake_registration` only after the provider durably applies the
+change. Failed sends use `retry_wake_registration`; a stale enable completion
+cannot delete or defer a newer disable.
 
 ## Security invariants
 
