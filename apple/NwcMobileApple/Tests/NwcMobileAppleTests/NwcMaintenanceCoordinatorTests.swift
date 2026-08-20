@@ -5,6 +5,8 @@ import XCTest
 
 private enum MaintenanceTestError: Error {
   case unavailable
+  case paymentCallTimedOut
+  case registrationCallTimedOut
 }
 
 private actor ControlledMaintenanceExecutor: NwcMaintenanceExecutor {
@@ -35,8 +37,13 @@ private actor ControlledMaintenanceExecutor: NwcMaintenanceExecutor {
     paymentContinuation = nil
   }
 
-  func waitForPaymentCall() async {
+  func waitForPaymentCall() async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(1))
     while paymentContinuation == nil {
+      guard clock.now < deadline else {
+        throw MaintenanceTestError.paymentCallTimedOut
+      }
       await Task.yield()
     }
   }
@@ -51,8 +58,13 @@ private actor ControlledMaintenanceExecutor: NwcMaintenanceExecutor {
     registrationContinuation = nil
   }
 
-  func waitForRegistrationCall() async {
+  func waitForRegistrationCall() async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(1))
     while registrationContinuation == nil {
+      guard clock.now < deadline else {
+        throw MaintenanceTestError.registrationCallTimedOut
+      }
       await Task.yield()
     }
   }
@@ -77,7 +89,7 @@ final class NwcMaintenanceCoordinatorTests: XCTestCase {
     needsRetry: false
   )
 
-  func testRunsBothPassesAndAggregatesRetryState() async {
+  func testRunsBothPassesAndAggregatesRetryState() async throws {
     let executor = ControlledMaintenanceExecutor()
     let cancellation = TestCancellation()
     let coordinator = makeCoordinator(executor: executor, cancellation: cancellation)
@@ -89,9 +101,9 @@ final class NwcMaintenanceCoordinatorTests: XCTestCase {
         result.set(disposition)
         completed.fulfill()
       })
-    await executor.waitForPaymentCall()
+    try await executor.waitForPaymentCall()
     await executor.resolvePayments(paymentReport)
-    await executor.waitForRegistrationCall()
+    try await executor.waitForRegistrationCall()
     await executor.resolveRegistrations(registrationReport)
     await fulfillment(of: [completed], timeout: 1)
 
@@ -103,7 +115,7 @@ final class NwcMaintenanceCoordinatorTests: XCTestCase {
     XCTAssertFalse(cancellation.isCancelled)
   }
 
-  func testFailureRequestsRetryWithoutStartingRegistration() async {
+  func testFailureRequestsRetryWithoutStartingRegistration() async throws {
     let executor = ControlledMaintenanceExecutor()
     let coordinator = makeCoordinator(executor: executor, cancellation: TestCancellation())
     let completed = expectation(description: "retry completion")
@@ -114,7 +126,7 @@ final class NwcMaintenanceCoordinatorTests: XCTestCase {
         result.set(disposition)
         completed.fulfill()
       })
-    await executor.waitForPaymentCall()
+    try await executor.waitForPaymentCall()
     await executor.failPayments()
     await fulfillment(of: [completed], timeout: 1)
 
@@ -123,7 +135,7 @@ final class NwcMaintenanceCoordinatorTests: XCTestCase {
     XCTAssertEqual(registrationCallCount, 0)
   }
 
-  func testCancellationWinsRaceWithLateResult() async {
+  func testCancellationWinsRaceWithLateResult() async throws {
     let executor = ControlledMaintenanceExecutor()
     let cancellation = TestCancellation()
     let coordinator = makeCoordinator(executor: executor, cancellation: cancellation)
@@ -136,7 +148,7 @@ final class NwcMaintenanceCoordinatorTests: XCTestCase {
         result.set(disposition)
         completed.fulfill()
       })
-    await executor.waitForPaymentCall()
+    try await executor.waitForPaymentCall()
     coordinator.cancel()
     await executor.resolvePayments(paymentReport)
     await fulfillment(of: [completed], timeout: 1)
