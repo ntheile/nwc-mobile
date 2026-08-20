@@ -208,6 +208,8 @@ pub enum LedgerError {
     RandomnessUnavailable,
     /// An existing event id was associated with different connection metadata.
     ClaimMetadataMismatch,
+    /// The connection revision associated with a completion is no longer active.
+    ConnectionUnavailable,
     /// A completion or retry attempted to use an expired or replaced lease.
     LostLease,
     /// A persisted encrypted response exceeded the storage policy bound.
@@ -226,6 +228,7 @@ impl fmt::Display for LedgerError {
             Self::InvalidLease => "wake ledger lease is invalid",
             Self::RandomnessUnavailable => "wake ledger randomness is unavailable",
             Self::ClaimMetadataMismatch => "wake event metadata does not match its durable claim",
+            Self::ConnectionUnavailable => "wake connection revision is no longer active",
             Self::LostLease => "wake event lease is no longer owned",
             Self::ResponseTooLarge => "wake response exceeds the durable storage bound",
             Self::InvalidPruneBatch => "wake ledger prune batch is invalid",
@@ -595,6 +598,75 @@ impl WakeLedger {
             ],
         )?;
         require_owned_lease(updated)
+    }
+
+    /// Commits a successful response only while its exact connection revision is active.
+    ///
+    /// The connection predicate and terminal update execute in one immediate
+    /// transaction, preventing revocation from committing between the final
+    /// authorization check and durable completion.
+    pub fn complete_event_for_active_connection(
+        &self,
+        lease: &EventLease,
+        connection_id: &ConnectionId,
+        connection_revision: ConnectionRevision,
+        response_event_json: &str,
+        now: UnixTimestamp,
+    ) -> Result<(), LedgerError> {
+        if response_event_json.len() > MAX_RESPONSE_EVENT_BYTES {
+            return Err(LedgerError::ResponseTooLarge);
+        }
+        let now = sqlite_timestamp(now)?;
+        let revision = sqlite_revision(connection_revision)?;
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let updated = transaction.execute(
+            "UPDATE wake_events
+             SET state = 'terminal', claim_token = NULL, available_at = NULL,
+                 updated_at = ?5, terminal_kind = 'completed', response_event_json = ?6
+             WHERE event_id = ?1 AND state = 'claimed' AND claim_token = ?2
+               AND connection_id = ?3 AND connection_revision = ?4
+               AND available_at > ?5
+               AND EXISTS (
+                   SELECT 1 FROM connections
+                   WHERE connection_id = ?3 AND revision = ?4 AND status = 'active'
+               )",
+            params![
+                lease.event_id.as_bytes().as_slice(),
+                lease.token.as_slice(),
+                connection_id.as_str(),
+                revision,
+                now,
+                response_event_json
+            ],
+        )?;
+        if updated == 1 {
+            transaction.commit()?;
+            return Ok(());
+        }
+
+        let still_owns_matching_lease = transaction
+            .query_row(
+                "SELECT 1 FROM wake_events
+                 WHERE event_id = ?1 AND state = 'claimed' AND claim_token = ?2
+                   AND connection_id = ?3 AND connection_revision = ?4
+                   AND available_at > ?5",
+                params![
+                    lease.event_id.as_bytes().as_slice(),
+                    lease.token.as_slice(),
+                    connection_id.as_str(),
+                    revision,
+                    now
+                ],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if still_owns_matching_lease {
+            Err(LedgerError::ConnectionUnavailable)
+        } else {
+            Err(LedgerError::LostLease)
+        }
     }
 
     /// Deletes a bounded batch of terminal entries older than the retention cutoff.
