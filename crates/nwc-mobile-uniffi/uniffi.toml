@@ -1,0 +1,9 @@
+[bindings.swift]
+module_name = "NwcMobile"
+ffi_module_name = "NwcMobileFFI"
+ffi_module_filename = "NwcMobileFFI"
+generate_immutable_records = true
+
+[bindings.kotlin]
+package_name = "org.nwc.mobile"
+generate_immutable_records = true

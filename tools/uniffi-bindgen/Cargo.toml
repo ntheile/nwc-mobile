@@ -1,0 +1,19 @@
+[package]
+name = "nwc-mobile-uniffi-bindgen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+# Clap 4.6 uses Edition 2024 manifests and requires Rust 1.85. Keep the
+# workspace tool compatible with the repository's Rust 1.84 minimum.
+clap = { version = "=4.5.61", default-features = false }
+clap_lex = "=1.0.0"
+smawk = "=0.3.2"
+uniffi = { version = "=0.29.4", features = ["cli"] }
+
+[lints]
+workspace = true
