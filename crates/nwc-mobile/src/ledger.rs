@@ -7,7 +7,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBeha
 
 use crate::{ConnectionId, ConnectionRevision, EventId, UnixTimestamp};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const CLAIM_TOKEN_BYTES: usize = 16;
 const MAX_RESPONSE_EVENT_BYTES: usize = 128 * 1024;
 const MAX_PRUNE_BATCH: usize = 1_000;
@@ -95,6 +95,55 @@ CREATE TABLE connection_relays (
     PRIMARY KEY(connection_id, position),
     UNIQUE(connection_id, relay_url)
 ) STRICT;
+"#;
+
+pub(crate) const CREATE_PAYMENT_SCHEMA: &str = r#"
+CREATE TABLE budget_periods (
+    connection_id    TEXT NOT NULL REFERENCES connections(connection_id) ON DELETE RESTRICT,
+    period_started_at INTEGER NOT NULL CHECK(period_started_at >= 0),
+    limit_sat        INTEGER NOT NULL CHECK(limit_sat >= 0),
+    used_sat         INTEGER NOT NULL CHECK(used_sat >= 0),
+    updated_at       INTEGER NOT NULL CHECK(updated_at >= period_started_at),
+    PRIMARY KEY(connection_id, period_started_at)
+) STRICT;
+
+CREATE TABLE payment_attempts (
+    event_id            BLOB PRIMARY KEY NOT NULL
+                        CHECK(typeof(event_id) = 'blob' AND length(event_id) = 32),
+    payment_hash        BLOB NOT NULL UNIQUE
+                        CHECK(typeof(payment_hash) = 'blob' AND length(payment_hash) = 32),
+    connection_id       TEXT NOT NULL,
+    connection_revision INTEGER NOT NULL CHECK(connection_revision >= 0),
+    period_started_at   INTEGER NOT NULL CHECK(period_started_at >= 0),
+    principal_sat       INTEGER NOT NULL CHECK(principal_sat >= 0),
+    fee_reserve_sat     INTEGER NOT NULL CHECK(fee_reserve_sat >= 0),
+    reserved_sat        INTEGER NOT NULL CHECK(
+                            reserved_sat >= principal_sat AND
+                            fee_reserve_sat = reserved_sat - principal_sat
+                        ),
+    state               TEXT NOT NULL
+                        CHECK(state IN ('reserved', 'pending', 'succeeded', 'failed')),
+    actual_principal_sat INTEGER CHECK(actual_principal_sat >= 0),
+    actual_fee_sat       INTEGER CHECK(actual_fee_sat >= 0),
+    charged_sat          INTEGER CHECK(charged_sat >= 0),
+    authorization_exceeded INTEGER NOT NULL DEFAULT 0
+                           CHECK(authorization_exceeded IN (0, 1)),
+    created_at           INTEGER NOT NULL CHECK(created_at >= period_started_at),
+    updated_at           INTEGER NOT NULL CHECK(updated_at >= created_at),
+    FOREIGN KEY(connection_id, period_started_at)
+        REFERENCES budget_periods(connection_id, period_started_at) ON DELETE RESTRICT,
+    CHECK(
+        (state IN ('reserved', 'pending') AND actual_principal_sat IS NULL AND
+         actual_fee_sat IS NULL AND charged_sat IS NULL AND authorization_exceeded = 0) OR
+        (state = 'succeeded' AND actual_principal_sat IS NOT NULL AND
+         actual_fee_sat IS NOT NULL AND charged_sat IS NOT NULL) OR
+        (state = 'failed' AND actual_principal_sat IS NULL AND
+         actual_fee_sat IS NULL AND charged_sat IS NULL AND authorization_exceeded = 0)
+    )
+) STRICT;
+
+CREATE INDEX payment_attempts_connection_state
+    ON payment_attempts(connection_id, state, updated_at);
 "#;
 
 /// A stable, non-sensitive durable-ledger error.
@@ -554,6 +603,10 @@ fn migrate(connection: &mut Connection) -> Result<(), LedgerError> {
     if version == 1 {
         transaction.execute_batch(CREATE_CONNECTION_SCHEMA)?;
         version = 2;
+    }
+    if version == 2 {
+        transaction.execute_batch(CREATE_PAYMENT_SCHEMA)?;
+        version = 3;
     }
     if version != SCHEMA_VERSION {
         return Err(LedgerError::UnsupportedSchema);

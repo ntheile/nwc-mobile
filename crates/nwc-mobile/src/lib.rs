@@ -14,6 +14,7 @@ mod ledger;
 mod nostr_validation;
 mod nwa;
 mod outcome;
+mod payment_accounting;
 mod policy;
 mod time;
 mod types;
@@ -37,6 +38,9 @@ pub use nostr_validation::{
 };
 pub use nwa::{NwaCallback, NwaError, NwaParsePolicy, NwaRequest, NwaRequestId};
 pub use outcome::{NotificationHint, QueueReason, RejectionCode, RetryReason, WakeDisposition};
+pub use payment_accounting::{
+    DurablePaymentState, PaymentAccountingError, PaymentAttempt, PaymentReservationOutcome,
+};
 pub use policy::{BudgetInterval, BudgetPolicy, ConnectionPolicy, FeePolicy, WakePolicy};
 pub use time::{BackgroundBudget, Clock, SystemClock, UnixTimestamp};
 pub use types::{
