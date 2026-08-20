@@ -274,10 +274,13 @@ The repository is a Cargo workspace. Run the baseline checks with:
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
 ```
+
+Dependency changes must also pass the review and CI controls documented in
+[`SUPPLY_CHAIN.md`](SUPPLY_CHAIN.md).
 
 Future validation will include Rust unit and property tests, SQLite concurrency
 tests, process-kill recovery tests, UniFFI binding checks, Swift NSE tests,
