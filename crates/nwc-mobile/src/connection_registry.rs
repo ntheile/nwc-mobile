@@ -277,7 +277,41 @@ impl WakeLedger {
         new_connection: NewConnection,
         now: UnixTimestamp,
     ) -> Result<ActiveConnection, RegistryError> {
+        self.insert_connection_state(new_connection, now, 0, now)
+    }
+
+    /// Atomically imports a trusted legacy authorization and its current
+    /// budget usage without temporarily restoring already-consumed authority.
+    ///
+    /// `created_at` remains the renewal anchor used by the payment ledger.
+    /// Callers must only use this during a one-time migration from wallet-owned
+    /// durable state, before the mobile engine starts processing the connection.
+    pub fn import_connection(
+        &self,
+        new_connection: NewConnection,
+        created_at: UnixTimestamp,
+        budget_used_sat: u64,
+        now: UnixTimestamp,
+    ) -> Result<ActiveConnection, RegistryError> {
+        let budget = new_connection.policy.budget();
+        if created_at > now
+            || budget_used_sat > budget.limit_sat()
+            || (budget_used_sat > 0 && !new_connection.policy.allows(NwcMethod::PayInvoice))
+        {
+            return Err(RegistryError::InvalidConnection);
+        }
+        self.insert_connection_state(new_connection, created_at, budget_used_sat, now)
+    }
+
+    fn insert_connection_state(
+        &self,
+        new_connection: NewConnection,
+        created_at: UnixTimestamp,
+        budget_used_sat: u64,
+        now: UnixTimestamp,
+    ) -> Result<ActiveConnection, RegistryError> {
         let now_sql = sqlite_u64(now.as_secs())?;
+        let created_at_sql = sqlite_u64(created_at.as_secs())?;
         let budget = new_connection.policy.budget();
         let budget_limit = sqlite_u64(budget.limit_sat())?;
         let (fee_policy, maximum_fee) = encode_fee_policy(budget.fee_policy())?;
@@ -315,7 +349,7 @@ impl WakeLedger {
                 connection_id, revision, status, client_pubkey, wallet_service_pubkey,
                 encryption, budget_limit_sat, budget_interval, fee_policy,
                 maximum_fee_sat, created_at, updated_at, tombstoned_at
-             ) VALUES (?1, 0, 'active', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, NULL)",
+             ) VALUES (?1, 0, 'active', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL)",
             params![
                 new_connection.id.as_str(),
                 new_connection.client_pubkey.as_bytes().as_slice(),
@@ -325,6 +359,7 @@ impl WakeLedger {
                 interval_to_str(budget.interval()),
                 fee_policy,
                 maximum_fee,
+                created_at_sql,
                 now_sql,
             ],
         )?;
@@ -342,6 +377,25 @@ impl WakeLedger {
                     new_connection.id.as_str(),
                     i64::try_from(position).map_err(|_| RegistryError::ValueOutOfRange)?,
                     relay.as_str()
+                ],
+            )?;
+        }
+        if budget_used_sat > 0 {
+            let period_started_at = imported_budget_period_start(
+                budget.interval(),
+                created_at.as_secs(),
+                now.as_secs(),
+            )?;
+            transaction.execute(
+                "INSERT INTO budget_periods (
+                    connection_id, period_started_at, limit_sat, used_sat, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    new_connection.id.as_str(),
+                    sqlite_u64(period_started_at)?,
+                    budget_limit,
+                    sqlite_u64(budget_used_sat)?,
+                    now_sql,
                 ],
             )?;
         }
@@ -373,7 +427,7 @@ impl WakeLedger {
             relays: new_connection.relays,
             policy: new_connection.policy,
             encryption: new_connection.encryption,
-            created_at: now,
+            created_at,
             updated_at: now,
         })
     }
@@ -723,6 +777,27 @@ fn decode_public_key(value: Vec<u8>) -> Result<PublicKey, RegistryError> {
     Ok(PublicKey::from_bytes(bytes))
 }
 
+fn imported_budget_period_start(
+    interval: BudgetInterval,
+    created_at: u64,
+    now: u64,
+) -> Result<u64, RegistryError> {
+    if now < created_at {
+        return Err(RegistryError::InvalidConnection);
+    }
+    let Some(duration) = interval.duration() else {
+        return Ok(created_at);
+    };
+    let periods = (now - created_at) / duration.as_secs();
+    created_at
+        .checked_add(
+            periods
+                .checked_mul(duration.as_secs())
+                .ok_or(RegistryError::ValueOutOfRange)?,
+        )
+        .ok_or(RegistryError::ValueOutOfRange)
+}
+
 fn sqlite_u64(value: u64) -> Result<i64, RegistryError> {
     i64::try_from(value).map_err(|_| RegistryError::ValueOutOfRange)
 }
@@ -853,6 +928,13 @@ mod tests {
     }
 
     fn new_connection(id: ConnectionId) -> NewConnection {
+        new_connection_with_methods(id, [NwcMethod::GetInfo, NwcMethod::GetBalance])
+    }
+
+    fn new_connection_with_methods(
+        id: ConnectionId,
+        methods: impl IntoIterator<Item = NwcMethod>,
+    ) -> NewConnection {
         NewConnection::new(
             id,
             PublicKey::from_hex(CLIENT).expect("client key"),
@@ -862,7 +944,7 @@ mod tests {
                 SecureRelayUrl::parse("wss://two.example.com").expect("relay"),
             ],
             ConnectionPolicy::new(
-                [NwcMethod::GetInfo, NwcMethod::GetBalance],
+                methods,
                 BudgetPolicy::new(
                     1_000,
                     BudgetInterval::Daily,
@@ -903,6 +985,65 @@ mod tests {
         assert_eq!(active.policy().budget().limit_sat(), 1_000);
         assert_eq!(active.encryption(), NwcEncryption::Nip44V2);
         assert_eq!(active.created_at(), UnixTimestamp::from_secs(100));
+    }
+
+    #[test]
+    fn legacy_import_preserves_renewal_anchor_and_current_usage_atomically() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        let now = 100 + (24 * 60 * 60) + 5;
+        let active = ledger
+            .import_connection(
+                new_connection_with_methods(
+                    connection_id(),
+                    [NwcMethod::GetInfo, NwcMethod::PayInvoice],
+                ),
+                UnixTimestamp::from_secs(100),
+                400,
+                UnixTimestamp::from_secs(now),
+            )
+            .expect("import connection");
+
+        assert_eq!(active.created_at(), UnixTimestamp::from_secs(100));
+        assert_eq!(active.updated_at(), UnixTimestamp::from_secs(now));
+        let connection = ledger.lock_connection().expect("database lock");
+        let (period_started_at, limit_sat, used_sat): (i64, i64, i64) = connection
+            .query_row(
+                "SELECT period_started_at, limit_sat, used_sat FROM budget_periods
+                 WHERE connection_id = ?1",
+                params![active.id().as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("budget period");
+        assert_eq!(period_started_at, 100 + (24 * 60 * 60));
+        assert_eq!(limit_sat, 1_000);
+        assert_eq!(used_sat, 400);
+    }
+
+    #[test]
+    fn legacy_import_rejects_restored_or_unaccountable_authority() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        assert_eq!(
+            ledger.import_connection(
+                new_connection(connection_id()),
+                UnixTimestamp::from_secs(100),
+                1,
+                UnixTimestamp::from_secs(200),
+            ),
+            Err(RegistryError::InvalidConnection)
+        );
+
+        let second = ConnectionId::parse("connection:future").expect("connection id");
+        assert_eq!(
+            ledger.import_connection(
+                new_connection_with_methods(second, [NwcMethod::PayInvoice]),
+                UnixTimestamp::from_secs(201),
+                0,
+                UnixTimestamp::from_secs(200),
+            ),
+            Err(RegistryError::InvalidConnection)
+        );
     }
 
     #[test]
