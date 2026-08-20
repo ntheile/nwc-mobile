@@ -15,6 +15,7 @@ mod nostr_validation;
 mod nwa;
 mod outcome;
 mod payment_accounting;
+mod payment_reconciliation;
 mod policy;
 mod time;
 mod types;
@@ -40,6 +41,10 @@ pub use nwa::{NwaCallback, NwaError, NwaParsePolicy, NwaRequest, NwaRequestId};
 pub use outcome::{NotificationHint, QueueReason, RejectionCode, RetryReason, WakeDisposition};
 pub use payment_accounting::{
     DurablePaymentState, PaymentAccountingError, PaymentAttempt, PaymentReservationOutcome,
+};
+pub use payment_reconciliation::{
+    PaymentReconciler, PaymentReconciliationError, PaymentReconciliationReport,
+    MAX_PAYMENT_RECONCILIATION_BATCH,
 };
 pub use policy::{BudgetInterval, BudgetPolicy, ConnectionPolicy, FeePolicy, WakePolicy};
 pub use time::{BackgroundBudget, Clock, SystemClock, UnixTimestamp};

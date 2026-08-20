@@ -19,8 +19,9 @@ Native code remains a thin operating-system adapter. Swift and Kotlin receive
 pushes, supply secure-storage and wallet capabilities, schedule background work,
 and render generic notification content; they do not duplicate NWC policy.
 
-> **Status:** Early development. The public API and storage schema are not stable
-> yet, and payment execution has not been implemented.
+> **Status:** Early development. The Rust engine now supports durable read and
+> payment execution, but its public API, storage schema, and native bindings are
+> not yet stable.
 
 ## How a wake request works
 
@@ -161,6 +162,15 @@ ledger and calls `resume_pending()`.
 The native layer maps Rust outcomes to successful, retriable, or terminal
 WorkManager results and applies OS network/battery constraints. Security policy
 and payment retry decisions remain in Rust.
+
+Both native adapters can run `PaymentReconciler::reconcile` during foreground or
+background maintenance. A pass checks a caller-selected batch of at most 100
+unresolved payment hashes within the supplied deadline. It never quotes or
+starts a payment. The returned aggregate report tells native code whether the
+pass was interrupted, how many attempts settled or failed, and whether another
+pass should be scheduled. This remains safe after connection revocation because
+revocation blocks new authorization while the reconciler only accounts for
+payments that were durably reserved earlier.
 
 ## Nostr Wallet Auth notes
 

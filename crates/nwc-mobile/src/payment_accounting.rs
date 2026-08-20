@@ -493,6 +493,32 @@ impl WakeLedger {
         load_attempt_by_hash(&database, payment_hash)
     }
 
+    pub(crate) fn load_unresolved_payment_attempts(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<PaymentAttempt>, PaymentAccountingError> {
+        let limit = i64::try_from(limit).map_err(|_| PaymentAccountingError::ValueOutOfRange)?;
+        let database = self
+            .lock_connection()
+            .map_err(|_| PaymentAccountingError::DatabaseUnavailable)?;
+        let mut statement = database.prepare(
+            "SELECT event_id, payment_hash, connection_id, connection_revision,
+                    period_started_at, principal_sat, fee_reserve_sat, state,
+                    actual_principal_sat, actual_fee_sat, charged_sat,
+                    authorization_exceeded, created_at, updated_at
+             FROM payment_attempts
+             WHERE state IN ('reserved', 'pending')
+             ORDER BY updated_at ASC, event_id ASC
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map(params![limit], decode_attempt_row)?;
+        let mut attempts = Vec::new();
+        for row in rows {
+            attempts.push(hydrate_attempt(row?)?);
+        }
+        Ok(attempts)
+    }
+
     fn transition_nonterminal(
         &self,
         payment_hash: &PaymentHash,
