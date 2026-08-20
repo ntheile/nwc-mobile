@@ -70,6 +70,17 @@ The worker calls it both when its future is cancelled and when WorkManager calls
 the unique WorkManager name is only a scheduling optimization, not replay
 protection.
 
+## Durable maintenance
+
+`NwcWorkManagerMaintenanceScheduler` enqueues one unique, network-constrained
+maintenance pass without putting wallet or routing data into WorkManager state.
+A wallet subclasses `NwcMaintenanceWorker` and supplies a
+`NwcMaintenanceExecutor` backed by the generated engine's
+`reconcilePayments` and `processWakeRegistrations` methods. The worker runs both
+bounded passes in sequence, requests retry when either report has durable work
+remaining, and immediately cancels the shared Rust scope when WorkManager stops
+the future.
+
 ## Build integrity
 
 Versions are exact, dependency locking is enabled, and Gradle verifies committed
