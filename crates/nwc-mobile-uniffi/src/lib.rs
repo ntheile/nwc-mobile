@@ -17,6 +17,7 @@ use nwc_mobile::{
 };
 
 mod host_bridge;
+mod mobile_engine;
 
 pub use host_bridge::{
     MobileCancellation, MobileCreatedInvoice, MobileHostBridge, MobileHostError,
@@ -24,6 +25,10 @@ pub use host_bridge::{
     MobilePayInvoiceRequest, MobilePaymentFailure, MobilePaymentQuote, MobilePaymentStatus,
     MobileRelayTransport, MobileSecretProvider, MobileTransactionDirection, MobileWalletBackend,
     MobileWalletInfo, MobileWalletTransaction,
+};
+pub use mobile_engine::{
+    MobileBudgetInterval, MobileConnectionRequest, MobileConnectionState, MobileEngineError,
+    MobileFeePolicy, MobileNwcEncryption, MobileNwcEngine,
 };
 
 const MAX_EMBEDDED_EVENT_BYTES: usize = 64 * 1024;

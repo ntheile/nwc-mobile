@@ -20,9 +20,10 @@ pushes, supply secure-storage and wallet capabilities, schedule background work,
 and render generic notification content; they do not duplicate NWC policy.
 
 > **Status:** Early development. The Rust engine supports durable read and
-> payment execution, and the first UniFFI lifecycle contract validates native
-> wake envelopes and exposes stable, non-sensitive outcomes. Its public API,
-> storage schema, and generated native bindings are not yet stable.
+> payment execution. The UniFFI layer validates native wake envelopes, owns the
+> shared engine ledger and connection lifecycle, and exposes stable,
+> non-sensitive outcomes. Its public API, storage schema, and generated native
+> bindings are not yet stable.
 
 ## How a wake request works
 
@@ -147,6 +148,15 @@ material only for one bounded cryptographic operation. It must return a fresh
 32-byte buffer from Keychain or Android Keystore-backed storage. Rust validates
 and zeroizes its received copies immediately; native code must likewise avoid
 caching or logging the temporary buffer.
+
+`MobileNwcEngine` opens the shared SQLite ledger at an absolute app-owned path.
+The containing application persists a fully approved connection through
+`add_connection`, retains its returned revision, and uses that revision for
+permanent compare-and-revoke. Approval and revocation timestamps come from the
+Rust system clock rather than caller-provided values. Each `execute_wake` call
+receives its own execution budget and `MobileCancellation`, so an NSE or Android
+worker can cancel one background attempt without poisoning later foreground
+work.
 
 ## Native background helpers
 
