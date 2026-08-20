@@ -260,6 +260,16 @@ reject older revisions after seeing a newer one, and native code must call
 change. Failed sends use `retry_wake_registration`; a stale enable completion
 cannot delete or defer a newer disable.
 
+`WakeRegistrationWorker` wraps that protocol for iOS background tasks and
+Android workers. It stops at the supplied deadline or cancellation signal,
+acknowledges only successful provider calls, and applies an exponential retry
+delay capped at one hour. Its transport capability returns only stable host
+error classes, so a compromised provider cannot inject response text into the
+wallet UI or durable state. The worker accepts a `SecureWakeServerUrl`, which
+rejects plaintext HTTP, embedded credentials, fragments, malformed hosts, and
+oversized endpoints before native networking begins; transports must also
+disable redirects.
+
 ## Security invariants
 
 The initial implementation should make these properties directly testable:

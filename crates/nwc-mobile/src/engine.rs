@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use nostr::nips::nip47::{
     self, ErrorCode, GetBalanceResponse, GetInfoResponse, LookupInvoiceResponse, Method,
@@ -7,6 +7,7 @@ use nostr::nips::nip47::{
 };
 use nostr::{JsonUtil, Timestamp};
 
+use crate::time::OperationDeadline;
 use crate::{
     ActiveConnection, AmountMsat, AmountSat, CancellationSignal, ClaimOutcome, Clock, EventLease,
     HostError, HostErrorKind, InvoiceLookup, ListTransactionsRequest, NotificationHint,
@@ -63,7 +64,7 @@ impl<'a> WakeEngine<'a> {
         budget: OperationBudget,
         cancellation: &dyn CancellationSignal,
     ) -> WakeDisposition {
-        let deadline = ExecutionDeadline::new(budget);
+        let deadline = OperationDeadline::new(budget);
         if cancellation.is_cancelled() {
             return queued(QueueReason::Deadline);
         }
@@ -291,7 +292,7 @@ impl<'a> WakeEngine<'a> {
         validated: &crate::ValidatedNwcEvent,
         relay: &SecureRelayUrl,
         payment: nip47::PayInvoiceRequest,
-        deadline: &ExecutionDeadline,
+        deadline: &OperationDeadline,
         cancellation: &dyn CancellationSignal,
     ) -> WakeDisposition {
         if payment.invoice.is_empty() || payment.invoice.len() > 16_384 {
@@ -504,7 +505,7 @@ impl<'a> WakeEngine<'a> {
         relay: &SecureRelayUrl,
         payment_hash: &PaymentHash,
         status: PaymentStatus,
-        deadline: &ExecutionDeadline,
+        deadline: &OperationDeadline,
         cancellation: &dyn CancellationSignal,
     ) -> WakeDisposition {
         match status {
@@ -591,7 +592,7 @@ impl<'a> WakeEngine<'a> {
         relay: &SecureRelayUrl,
         error_code: ErrorCode,
         rejection: RejectionCode,
-        deadline: &ExecutionDeadline,
+        deadline: &OperationDeadline,
         cancellation: &dyn CancellationSignal,
     ) -> WakeDisposition {
         self.respond_with_error(
@@ -685,7 +686,7 @@ impl<'a> WakeEngine<'a> {
         method: Method,
         error_code: ErrorCode,
         rejection: RejectionCode,
-        deadline: &ExecutionDeadline,
+        deadline: &OperationDeadline,
         cancellation: &dyn CancellationSignal,
     ) -> WakeDisposition {
         if let Err(disposition) = self.ensure_claim_connection_active(connection, lease) {
@@ -724,7 +725,7 @@ impl<'a> WakeEngine<'a> {
         validated: &crate::ValidatedNwcEvent,
         relay: &SecureRelayUrl,
         response: Response,
-        deadline: &ExecutionDeadline,
+        deadline: &OperationDeadline,
         cancellation: &dyn CancellationSignal,
     ) -> WakeDisposition {
         let response_json = response.as_json();
@@ -761,7 +762,7 @@ impl<'a> WakeEngine<'a> {
         connection: &ActiveConnection,
         relay: &SecureRelayUrl,
         event_json: Option<&str>,
-        deadline: &ExecutionDeadline,
+        deadline: &OperationDeadline,
         cancellation: &dyn CancellationSignal,
     ) -> WakeDisposition {
         let Some(event_json) = event_json else {
@@ -838,36 +839,6 @@ pub type ReadOnlyWakeEngine<'a> = WakeEngine<'a>;
 struct ReadOnlyRequestResult {
     method: Method,
     result: ResponseResult,
-}
-
-struct ExecutionDeadline {
-    started: Instant,
-    budget: OperationBudget,
-}
-
-impl ExecutionDeadline {
-    fn new(budget: OperationBudget) -> Self {
-        Self {
-            started: Instant::now(),
-            budget,
-        }
-    }
-
-    fn remaining(&self) -> Duration {
-        self.budget.timeout().saturating_sub(self.started.elapsed())
-    }
-
-    fn context<'a>(
-        &self,
-        cancellation: &'a dyn CancellationSignal,
-    ) -> Option<OperationContext<'a>> {
-        if cancellation.is_cancelled() {
-            return None;
-        }
-        OperationBudget::new(self.remaining())
-            .ok()
-            .map(|budget| OperationContext::new(budget, cancellation))
-    }
 }
 
 fn parse_lookup_request(

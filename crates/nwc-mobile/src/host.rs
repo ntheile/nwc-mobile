@@ -12,6 +12,7 @@ use crate::{
 };
 
 const MAX_RELAY_URL_BYTES: usize = 2_048;
+const MAX_WAKE_SERVER_URL_BYTES: usize = 2_048;
 
 /// A boxed asynchronous operation returned by a host capability.
 ///
@@ -234,6 +235,41 @@ impl SecureRelayUrl {
 impl fmt::Debug for SecureRelayUrl {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("SecureRelayUrl([redacted])")
+    }
+}
+
+/// A syntactically valid HTTPS wake-provider endpoint.
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SecureWakeServerUrl(String);
+
+impl SecureWakeServerUrl {
+    /// Parses and canonicalizes a bounded `https://` URL without credentials.
+    pub fn parse(value: &str) -> Result<Self, DomainError> {
+        if value.is_empty() || value.len() > MAX_WAKE_SERVER_URL_BYTES {
+            return Err(DomainError::InvalidWakeServerUrl);
+        }
+        let endpoint = Url::parse(value).map_err(|_| DomainError::InvalidWakeServerUrl)?;
+        if endpoint.scheme() != "https"
+            || endpoint.host_str().is_none()
+            || !endpoint.username().is_empty()
+            || endpoint.password().is_some()
+            || endpoint.fragment().is_some()
+        {
+            return Err(DomainError::InvalidWakeServerUrl);
+        }
+        Ok(Self(endpoint.to_string()))
+    }
+
+    /// Returns the canonical HTTPS endpoint.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SecureWakeServerUrl {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SecureWakeServerUrl([redacted])")
     }
 }
 
@@ -724,14 +760,33 @@ mod tests {
             Duration::from_secs(60),
         );
         let relay = SecureRelayUrl::parse("wss://private.example.com").expect("relay");
+        let wake_server = SecureWakeServerUrl::parse("https://wake.private.example.com/register")
+            .expect("wake server");
 
         let request_debug = format!("{request:?}");
         let make_invoice_debug = format!("{make_invoice:?}");
         let relay_debug = format!("{relay:?}");
+        let wake_server_debug = format!("{wake_server:?}");
         assert!(!request_debug.contains("secret-invoice"));
         assert!(!request_debug.contains(HEX));
         assert!(!make_invoice_debug.contains("attacker-controlled"));
         assert!(!relay_debug.contains("private.example.com"));
+        assert!(!wake_server_debug.contains("private.example.com"));
+    }
+
+    #[test]
+    fn wake_server_requires_bounded_https_without_credentials_or_fragment() {
+        assert!(SecureWakeServerUrl::parse("https://wake.example.com/v1/register").is_ok());
+        for invalid in [
+            "http://wake.example.com/v1/register",
+            "https://secret@wake.example.com/v1/register",
+            "https://wake.example.com/v1/register#fragment",
+        ] {
+            assert_eq!(
+                SecureWakeServerUrl::parse(invalid),
+                Err(DomainError::InvalidWakeServerUrl)
+            );
+        }
     }
 
     #[test]
