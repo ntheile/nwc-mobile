@@ -12,9 +12,10 @@ use nwc_mobile::{
     SecureRelayUrl, StoredConnection, SystemClock, WakeEngine, WakeLedger, WakePolicy,
 };
 
+use crate::host_bridge::MobileHostBridge;
 use crate::{
-    MobileCancellation, MobileHostBridge, MobileNwcMethod, MobileRelayTransport,
-    MobileSecretProvider, MobileWakeDisposition, MobileWalletBackend, ValidatedMobileWake,
+    MobileCancellation, MobileNwcMethod, MobileRelayTransport, MobileSecretProvider,
+    MobileWakeDisposition, MobileWalletBackend, ValidatedMobileWake,
 };
 
 const MAX_DATABASE_PATH_BYTES: usize = 4_096;
