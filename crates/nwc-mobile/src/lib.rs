@@ -22,14 +22,14 @@ mod types;
 pub use connection_registry::{
     ActiveConnection, ConnectionTombstone, NewConnection, RegistryError, StoredConnection,
 };
-pub use engine::ReadOnlyWakeEngine;
+pub use engine::{ReadOnlyWakeEngine, WakeEngine};
 pub use error::DomainError;
 pub use host::{
     AmountMsat, AmountSat, CancellationSignal, CreatedInvoice, HostError, HostErrorKind,
     HostFuture, InvoiceLookup, ListTransactionsRequest, MakeInvoiceRequest, NeverCancelled,
-    OperationBudget, OperationContext, PayInvoiceRequest, PaymentFailure, PaymentStatus,
-    RelayTransport, SecretProvider, SecureRelayUrl, TransactionDirection, WalletBackend,
-    WalletInfo, WalletTransaction,
+    OperationBudget, OperationContext, PayInvoiceRequest, PaymentFailure, PaymentQuote,
+    PaymentStatus, RelayTransport, SecretProvider, SecureRelayUrl, TransactionDirection,
+    WalletBackend, WalletInfo, WalletTransaction,
 };
 pub use ledger::{ClaimOutcome, EventLease, LedgerError, TerminalEvent, TerminalKind, WakeLedger};
 pub use nostr_validation::{
