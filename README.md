@@ -1,0 +1,280 @@
+# nwc-mobile
+
+`nwc-mobile` is a Rust library for safely running Nostr Wallet Connect (NWC)
+inside mobile wallets. It is intended for wallets that may be suspended or
+terminated when an NIP-47 request arrives and need APNs, FCM, an iOS Notification
+Service Extension (NSE), or Android background work to wake them.
+
+The library owns the security-sensitive, platform-independent behavior:
+
+- NIP-47 request validation, authorization, decryption, and response building
+- durable event claims and replay protection
+- payment budget reservation and crash-safe reconciliation
+- connection revisions, revocation tombstones, and request freshness
+- Nostr relay validation and short-lived request handling
+- Nostr Wallet Auth (NWA) request parsing and approval binding
+- wake registration state and retry decisions
+
+Native code remains a thin operating-system adapter. Swift and Kotlin receive
+pushes, supply secure-storage and wallet capabilities, schedule background work,
+and render generic notification content; they do not duplicate NWC policy.
+
+> **Status:** Pre-implementation architecture. The public API and storage schema
+> are not stable yet.
+
+## How a wake request works
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as NWC Client
+    participant R as Nostr Relay
+    participant P as Wallet Wake Provider
+    participant N as Native Wake Adapter<br/>(iOS NSE / Android Worker)
+    participant E as nwc-mobile Engine
+    participant L as Shared Wake Ledger
+    participant W as WalletBackend
+
+    C->>R: Publish encrypted kind 23194 request
+    P->>R: Observe registered client and wallet pubkeys
+    P->>N: Send APNs / FCM wake payload
+    N->>E: Ingest typed wake payload and OS deadline
+    E->>E: Validate wallet, relay, event id, kind, signature, and freshness
+    E->>L: Atomically claim event id
+
+    alt Event already claimed or completed
+        L-->>E: Existing durable result
+        E-->>N: AlreadyProcessed / republish-safe result
+    else Claim acquired
+        opt Encrypted event was not embedded in the push
+            E->>R: Fetch exact event id from an allowed relay
+            R-->>E: Encrypted NIP-47 event
+        end
+
+        E->>E: Decrypt and enforce connection permissions
+
+        alt Request can move funds
+            E->>L: Reserve budget by event id and payment hash
+            E->>W: Inspect existing payment state
+            alt Payment is already paid
+                W-->>E: Paid result
+            else Payment is in progress
+                W-->>E: Pending result
+            else Payment is new
+                E->>W: Start payment
+                W-->>E: Paid, pending, or definite failure
+            end
+            E->>L: Finalize or retain conservative pending reservation
+        else Read-only request
+            E->>W: Execute allowed wallet operation
+            W-->>E: Result
+        end
+
+        E->>R: Publish encrypted kind 23195 response
+        E->>L: Store terminal result and response metadata
+        E-->>N: Completed / RetryAfter / QueuedForApplication
+    end
+
+    N-->>N: Finish NSE callback or schedule/reschedule background work
+```
+
+The payment side effect and local database cannot be one distributed
+transaction. `nwc-mobile` therefore reserves budget before initiating payment
+and reconciles retries by payment hash. A timeout or process termination leaves
+a conservative pending reservation instead of silently restoring spendable
+budget.
+
+## Planned repository structure
+
+```text
+nwc-mobile/
+├── crates/
+│   ├── nwc-mobile/             # Rust engine, protocol, ledger, and policy
+│   └── nwc-mobile-uniffi/      # Swift/Kotlin lifecycle API
+├── apple/
+│   └── NwcMobileApple/         # NSE and app lifecycle coordinator
+└── android/
+    └── nwc-mobile/             # FCM ingestion and WorkManager coordinator
+```
+
+The first implementation may keep the Rust modules in one crate while the API
+settles. The native companion packages should stay small and optional.
+
+## Host integration
+
+A wallet supplies an implementation of a narrow Rust capability interface:
+
+```rust,ignore
+pub trait WalletBackend: Send + Sync {
+    async fn balance(&self) -> Result<u64, WalletError>;
+    async fn make_invoice(&self, request: MakeInvoice) -> Result<Invoice, WalletError>;
+    async fn payment_state(&self, hash: PaymentHash) -> Result<PaymentState, WalletError>;
+    async fn start_payment(&self, request: PaymentRequest) -> Result<PaymentAttempt, WalletError>;
+    async fn lookup_invoice(&self, request: LookupRequest) -> Result<Transaction, WalletError>;
+    async fn list_transactions(
+        &self,
+        request: ListTransactions,
+    ) -> Result<Vec<Transaction>, WalletError>;
+}
+```
+
+Wallet implementations such as Bark, LDK, or a custodial API remain outside
+`nwc-mobile`. The engine does not create or delete a wallet database and does not
+own application navigation or UI state.
+
+The native host also supplies:
+
+- the app-group or application data directory used by the shared ledger
+- scoped access to Keychain or Android Keystore-backed secrets
+- the APNs or FCM token and platform registration metadata
+- the OS background deadline and cancellation signal
+- localized notification presentation
+
+Secrets are requested only for the operation that needs them. They are not
+carried in a mutable JSON snapshot or returned in wake results.
+
+## Native background helpers
+
+### Apple
+
+The planned `NwcMobileApple` package will provide an
+`NwcNotificationServiceCoordinator` used by a wallet's small
+`UNNotificationServiceExtension` subclass. It will:
+
+1. convert the APNs dictionary into a typed wake payload;
+2. durably ingest the request before beginning network or payment work;
+3. invoke the Rust engine with a deadline safely below the NSE limit;
+4. cancel and checkpoint when `serviceExtensionTimeWillExpire()` is called;
+5. invoke Apple's completion handler exactly once; and
+6. use generic notification text without payment details or remote error bodies.
+
+The containing app uses the same ledger and calls `resume_pending()` when it is
+launched or foregrounded.
+
+### Android
+
+The planned Android package will provide helpers for a wallet-owned
+`FirebaseMessagingService` and a `CoroutineWorker`. The FCM callback performs
+only bounded ingestion and schedules WorkManager; the worker opens the same Rust
+ledger and calls `resume_pending()`.
+
+The native layer maps Rust outcomes to successful, retriable, or terminal
+WorkManager results and applies OS network/battery constraints. Security policy
+and payment retry decisions remain in Rust.
+
+## Nostr Wallet Auth notes
+
+Nostr Wallet Auth (NWA) is the connection authorization flow. It is distinct
+from NWC Wake: NWA creates and approves an NWC connection; NWC Wake later helps
+deliver requests for that connection when the wallet is offline.
+
+This project targets the client-created-secret NIP-47 flow proposed in
+[nostr-protocol/nips#1818](https://github.com/nostr-protocol/nips/pull/1818).
+The proposal is still under review, so compatibility must be tied to an explicit
+upstream revision until it is merged.
+
+### Secret ownership
+
+- The requesting app generates and securely stores a fresh NWC client secret.
+- The authorization URI contains the client **public key**, never the secret.
+- The wallet stores the approved public key and wallet-side policy.
+- The wallet publishes a targeted `kind:13194` info event with a `p` tag for the
+  requesting client's public key.
+- The requesting app combines its retained secret with the wallet service public
+  key and relay to construct the final `nostr+walletconnect://` URI locally.
+- Complete NWC URIs and client secrets must never enter callbacks, push payloads,
+  wake-provider registrations, logs, or analytics.
+
+### Request validation and approval
+
+Before displaying an approval request, `nwc-mobile` should validate:
+
+- request size, version, and duplicate single-value parameters;
+- the 32-byte hexadecimal client public key;
+- at least one bounded, secure relay URL;
+- request expiration and an implementation-defined maximum lifetime;
+- requested methods, budget, and renewal interval; and
+- callback URL and correlation state, when present.
+
+Approval is bound to a cryptographically random internal request id, not only a
+client public key or display name. A new inbound request must not replace one
+that is currently being approved. Async registration and completion results must
+carry the same request id so the user can never approve different parameters
+from those shown on screen.
+
+Requester names, icons, descriptions, and claimed domains are untrusted display
+metadata. Hosts should label them as unverified, remove control and bidirectional
+formatting characters, bound their length, and show the effective methods,
+budget, renewal interval, expiration, relays, and callback target.
+
+The planned conservative policy is for omitted payment permission to remain
+disabled and for an omitted budget to authorize no spend. A wallet UI may let
+the user explicitly grant more access, but it must not silently expand a
+request.
+
+### Verified mobile callbacks
+
+If `return_to` is present:
+
+- it must be an HTTPS iOS Universal Link or verified Android App Link;
+- `state` must be fresh and contain at least 128 bits of entropy;
+- callback results belong in the URL fragment;
+- callback fields contain public completion metadata only; and
+- failure to open the callback does not undo a successful Nostr authorization.
+
+On iOS, the native helper must use universal-link-only opening without browser or
+custom-scheme fallback. Android should require an app-only verified handler.
+Custom URI schemes may carry the public authorization request into a wallet, but
+they are not a verified return channel.
+
+### Wake registration after NWA
+
+After approval, the wallet may register the connection with its wake provider.
+Registration contains only public connection identifiers and provider-private
+platform metadata: client pubkey, wallet service pubkey, approved relays, app
+identifier, installation identifier, and APNs/FCM destination.
+
+Registration is a durable lifecycle, not a fire-and-forget side effect:
+
+- persist the approved connection before sending `enabled: true`;
+- keep failed registrations in a retryable outbox;
+- tombstone a connection before sending `enabled: false`;
+- retry unregistration until acknowledged or explicitly abandoned; and
+- never allow an in-flight wake or registration result to resurrect a tombstone.
+
+## Security invariants
+
+The initial implementation should make these properties directly testable:
+
+- one durable active claim per Nostr request event id across all processes;
+- event id, kind, signature, recipient, freshness, and allowed relay are checked
+  before decryption or side effects;
+- payment budget is reserved before initiation and reconciled once by payment
+  hash;
+- ambiguous payment outcomes remain pending rather than being refunded;
+- connection tombstones beat stale completions and snapshots;
+- failed and completed events are retained for at least the accepted freshness
+  horizon;
+- wake is delivery, never user consent or payment authorization;
+- platform push tokens, payment details, secrets, and raw remote error bodies do
+  not appear in user-visible messages or logs; and
+- deadline expiration always leaves a recoverable durable state.
+
+## Non-goals
+
+- Implementing a Lightning wallet or custody system
+- Operating an APNs/FCM wake provider
+- Replacing ordinary NIP-47 clients or relays
+- Defining a new public Nostr authorization protocol
+- Hiding wallet-specific product policy inside native UI code
+
+## Development
+
+The project has not been scaffolded yet. Expected validation will include Rust
+unit and property tests, SQLite concurrency tests, process-kill recovery tests,
+UniFFI binding checks, Swift NSE tests, Android WorkManager tests, and physical
+device deadline/resource measurements.
+
+## License
+
+No license has been selected yet.
