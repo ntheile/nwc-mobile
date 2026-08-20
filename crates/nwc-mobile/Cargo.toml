@@ -11,11 +11,16 @@ categories = ["cryptography::cryptocurrencies"]
 publish = false
 
 [dependencies]
+# Pin optional transitive packages whose latest manifests exceed the workspace
+# MSRV; Cargo includes them when resolving the complete feature graph.
+base64ct = "=1.7.3"
 getrandom = "0.3.4"
 # Keep URL parsing compatible with the workspace's Rust 1.84 MSRV. Newer
 # idna_adapter releases use Edition 2024 manifests that Cargo 1.84 cannot parse.
 idna_adapter = "=1.1.0"
+nostr = { version = "=0.44.7", features = ["nip04", "nip44"] }
 url = "2.5.8"
+zeroize = "=1.8.2"
 
 [lints]
 workspace = true
