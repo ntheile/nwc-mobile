@@ -37,7 +37,7 @@ pub enum QueueReason {
 pub enum RetryReason {
     /// A relay could not be reached within the current attempt budget.
     RelayUnavailable,
-    /// A read-only wallet capability was temporarily unavailable.
+    /// A wallet capability or ambiguous payment state was temporarily unavailable.
     WalletUnavailable,
     /// Publishing a response failed after the result was persisted.
     ResponsePublishFailed,

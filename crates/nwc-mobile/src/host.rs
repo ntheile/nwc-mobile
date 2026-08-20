@@ -447,6 +447,36 @@ impl fmt::Debug for PayInvoiceRequest {
     }
 }
 
+/// A side-effect-free decode of the payment the wallet would initiate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentQuote {
+    payment_hash: PaymentHash,
+    principal: AmountMsat,
+}
+
+impl PaymentQuote {
+    /// Creates a quote from wallet-validated invoice metadata.
+    #[must_use]
+    pub const fn new(payment_hash: PaymentHash, principal: AmountMsat) -> Self {
+        Self {
+            payment_hash,
+            principal,
+        }
+    }
+
+    /// Returns the invoice payment hash used for global deduplication.
+    #[must_use]
+    pub const fn payment_hash(&self) -> &PaymentHash {
+        &self.payment_hash
+    }
+
+    /// Returns the exact millisatoshi principal the wallet would pay.
+    #[must_use]
+    pub const fn principal(&self) -> AmountMsat {
+        self.principal
+    }
+}
+
 /// A stable reason a Lightning payment definitively failed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -577,6 +607,14 @@ pub trait WalletBackend: Send + Sync {
         context: OperationContext<'a>,
     ) -> HostFuture<'a, Result<CreatedInvoice, HostError>>;
 
+    /// Parses and validates an invoice without initiating or persisting a payment.
+    fn quote_payment<'a>(
+        &'a self,
+        invoice: &'a str,
+        amount: Option<AmountMsat>,
+        context: OperationContext<'a>,
+    ) -> HostFuture<'a, Result<PaymentQuote, HostError>>;
+
     /// Reads durable payment state without initiating a payment.
     fn payment_status<'a>(
         &'a self,
@@ -585,6 +623,10 @@ pub trait WalletBackend: Send + Sync {
     ) -> HostFuture<'a, Result<PaymentStatus, HostError>>;
 
     /// Starts an idempotent payment after engine-side reservation.
+    ///
+    /// Any returned error is treated as an ambiguous initiation: the engine
+    /// retains the debit and queries `payment_status` on retry. Definitive
+    /// failures must be returned as `PaymentStatus::Failed`.
     fn start_payment<'a>(
         &'a self,
         request: PayInvoiceRequest,
