@@ -222,7 +222,11 @@ impl SecureRelayUrl {
         {
             return Err(DomainError::InvalidRelayUrl);
         }
-        Ok(Self(relay.to_string()))
+        let relay = relay.to_string();
+        if relay.len() > MAX_RELAY_URL_BYTES {
+            return Err(DomainError::InvalidRelayUrl);
+        }
+        Ok(Self(relay))
     }
 
     /// Returns the canonical secure relay URL.
@@ -257,7 +261,11 @@ impl SecureWakeServerUrl {
         {
             return Err(DomainError::InvalidWakeServerUrl);
         }
-        Ok(Self(endpoint.to_string()))
+        let endpoint = endpoint.to_string();
+        if endpoint.len() > MAX_WAKE_SERVER_URL_BYTES {
+            return Err(DomainError::InvalidWakeServerUrl);
+        }
+        Ok(Self(endpoint))
     }
 
     /// Returns the canonical HTTPS endpoint.
@@ -690,10 +698,16 @@ pub trait WalletBackend: Send + Sync {
 /// They must not follow redirects or silently substitute a different relay.
 pub trait RelayTransport: Send + Sync {
     /// Fetches the exact event id from one already-approved secure relay.
+    ///
+    /// Implementations must configure their WebSocket receive limit to
+    /// `maximum_event_bytes` before buffering a message. An over-limit message
+    /// must fail with [`HostErrorKind::Rejected`] instead of being allocated as
+    /// a `String`.
     fn fetch_event<'a>(
         &'a self,
         relay: &'a SecureRelayUrl,
         event_id: &'a EventId,
+        maximum_event_bytes: usize,
         context: OperationContext<'a>,
     ) -> HostFuture<'a, Result<Option<String>, HostError>>;
 
@@ -744,6 +758,12 @@ mod tests {
             SecureRelayUrl::parse("wss://relay.example.com/#fragment"),
             Err(DomainError::InvalidRelayUrl)
         );
+        let expanded_path = format!("wss://relay.example.com/{}", "é".repeat(500));
+        assert!(expanded_path.len() <= MAX_RELAY_URL_BYTES);
+        assert_eq!(
+            SecureRelayUrl::parse(&expanded_path),
+            Err(DomainError::InvalidRelayUrl)
+        );
     }
 
     #[test]
@@ -787,6 +807,12 @@ mod tests {
                 Err(DomainError::InvalidWakeServerUrl)
             );
         }
+        let expanded_path = format!("https://wake.example.com/{}", "é".repeat(500));
+        assert!(expanded_path.len() <= MAX_WAKE_SERVER_URL_BYTES);
+        assert_eq!(
+            SecureWakeServerUrl::parse(&expanded_path),
+            Err(DomainError::InvalidWakeServerUrl)
+        );
     }
 
     #[test]
