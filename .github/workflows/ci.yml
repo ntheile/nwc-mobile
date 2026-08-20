@@ -13,6 +13,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  apple:
+    name: Apple NSE package
+    runs-on: macos-15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check Swift formatting
+        run: >-
+          swift format lint --strict --recursive
+          apple/NwcMobileApple/Sources
+          apple/NwcMobileApple/Tests
+          apple/NwcMobileApple/Package.swift
+
+      - name: Test Swift package
+        run: swift test --package-path apple/NwcMobileApple
+
   quality:
     name: Format, lint, test, and document
     runs-on: ubuntu-latest

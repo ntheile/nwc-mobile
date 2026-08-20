@@ -87,13 +87,13 @@ and reconciles retries by payment hash. A timeout or process termination leaves
 a conservative pending reservation instead of silently restoring spendable
 budget.
 
-## Planned repository structure
+## Repository structure
 
 ```text
 nwc-mobile/
 ├── crates/
 │   ├── nwc-mobile/             # Rust engine, protocol, ledger, and policy
-│   └── nwc-mobile-uniffi/      # Swift/Kotlin lifecycle API (in progress)
+│   └── nwc-mobile-uniffi/      # Swift/Kotlin lifecycle API
 ├── apple/
 │   └── NwcMobileApple/         # NSE and app lifecycle coordinator
 └── android/
@@ -162,16 +162,24 @@ work.
 
 ### Apple
 
-The planned `NwcMobileApple` package will provide an
-`NwcNotificationServiceCoordinator` used by a wallet's small
-`UNNotificationServiceExtension` subclass. It will:
+The `NwcMobileApple` Swift package provides an
+`NwcNotificationServiceAdapter` and `NwcNotificationServiceCoordinator` for a
+wallet's small `UNNotificationServiceExtension` subclass. It:
 
-1. convert the APNs dictionary into a typed wake payload;
-2. durably ingest the request before beginning network or payment work;
-3. invoke the Rust engine with a deadline safely below the NSE limit;
-4. cancel and checkpoint when `serviceExtensionTimeWillExpire()` is called;
-5. invoke Apple's completion handler exactly once; and
-6. use generic notification text without payment details or remote error bodies.
+1. converts the APNs dictionary into a typed wake payload;
+2. delegates validation, durable claims, relay access, and payment policy to the
+   generated Rust API through a wallet-supplied executor;
+3. invokes that executor with a deadline safely below the NSE limit;
+4. cancels it when `serviceExtensionTimeWillExpire()` is called;
+5. invokes Apple's completion handler exactly once; and
+6. replaces untrusted presentation fields with wallet-localized generic text.
+
+The package deliberately does not link a particular generated framework. The
+wallet supplies a small `NwcWakeExecutor` that maps `NwcWakePayload` into
+`NwcMobile.MobileWakeEnvelope`, calls `validateWakeEnvelope` and
+`MobileNwcEngine.executeWake`, and returns only a non-sensitive presentation
+hint. See [`apple/NwcMobileApple/README.md`](apple/NwcMobileApple/README.md) for
+the NSE wiring contract and payload keys.
 
 The containing app uses the same ledger and calls `resume_pending()` when it is
 launched or foregrounded.
