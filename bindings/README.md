@@ -21,5 +21,6 @@ git diff -- bindings/abi.sha256
 ```
 
 The checker also asserts that both languages expose the engine, asynchronous
-wake execution, and native wallet callback interface. Generated source files
-are written only to a temporary directory and removed when the check exits.
+wake execution, payment reconciliation, wake-registration processing, and the
+native wallet and provider callback interfaces. Generated source files are
+written only to a temporary directory and removed when the check exits.
