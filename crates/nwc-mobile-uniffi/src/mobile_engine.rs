@@ -8,14 +8,17 @@ use std::time::Duration;
 
 use nwc_mobile::{
     BudgetInterval, BudgetPolicy, Clock, ConnectionId, ConnectionPolicy, FeePolicy, LedgerError,
-    NewConnection, NwcEncryption, NwcMethod, OperationBudget, PublicKey, RegistryError,
-    SecureRelayUrl, StoredConnection, SystemClock, WakeEngine, WakeLedger, WakePolicy,
+    NewConnection, NwcEncryption, NwcMethod, OperationBudget, PaymentAccountingError,
+    PaymentReconciler, PaymentReconciliationError, PublicKey, RegistryError, SecureRelayUrl,
+    SecureWakeServerUrl, StoredConnection, SystemClock, WakeEngine, WakeLedger, WakePolicy,
+    WakeRegistrationError, WakeRegistrationWorker, WakeRegistrationWorkerError,
 };
 
-use crate::host_bridge::MobileHostBridge;
+use crate::host_bridge::{MobileHostBridge, MobileWakeRegistrationBridge};
 use crate::{
     MobileCancellation, MobileNwcMethod, MobileRelayTransport, MobileSecretProvider,
-    MobileWakeDisposition, MobileWalletBackend, ValidatedMobileWake,
+    MobileWakeDisposition, MobileWakeRegistrationTransport, MobileWalletBackend,
+    ValidatedMobileWake,
 };
 
 const MAX_DATABASE_PATH_BYTES: usize = 4_096;
@@ -177,6 +180,42 @@ pub struct MobileConnectionState {
     pub active: bool,
 }
 
+/// Non-sensitive aggregate result of one payment reconciliation pass.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, uniffi::Record)]
+pub struct MobilePaymentReconciliationReport {
+    /// Wallet payment-status queries performed.
+    pub examined: u16,
+    /// Payments observed as settled.
+    pub succeeded: u16,
+    /// Payments observed as definitively failed and refunded.
+    pub failed: u16,
+    /// Queried payments that remain pending or ambiguous.
+    pub unresolved: u16,
+    /// Wallet queries deferred after a stable host failure.
+    pub deferred: u16,
+    /// Whether cancellation or the deadline interrupted the pass.
+    pub interrupted: bool,
+    /// Whether native code should schedule another pass.
+    pub needs_retry: bool,
+}
+
+/// Non-sensitive aggregate result of one wake-registration outbox pass.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, uniffi::Record)]
+pub struct MobileWakeRegistrationReport {
+    /// Provider calls performed.
+    pub examined: u16,
+    /// Changes applied and durably acknowledged.
+    pub applied: u16,
+    /// Provider failures durably deferred for retry.
+    pub deferred: u16,
+    /// Changes superseded by a newer revision while I/O was in flight.
+    pub superseded: u16,
+    /// Whether cancellation or the deadline interrupted the pass.
+    pub interrupted: bool,
+    /// Whether native code should schedule another pass.
+    pub needs_retry: bool,
+}
+
 impl fmt::Debug for MobileConnectionState {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -295,6 +334,70 @@ impl MobileNwcEngine {
             .await
             .into())
     }
+
+    /// Reconciles already-reserved payments without initiating new payments.
+    pub async fn reconcile_payments(
+        &self,
+        maximum_attempts: u16,
+        execution_milliseconds: u64,
+        cancellation: Arc<MobileCancellation>,
+    ) -> Result<MobilePaymentReconciliationReport, MobileEngineError> {
+        let budget = operation_budget(execution_milliseconds)?;
+        let host = MobileHostBridge::new(
+            self.wallet.clone(),
+            self.relays.clone(),
+            self.secrets.clone(),
+            cancellation.clone(),
+        );
+        let report = PaymentReconciler::new(&self.ledger, &host, &SystemClock)
+            .reconcile(maximum_attempts, budget, cancellation.as_ref())
+            .await
+            .map_err(MobileEngineError::from)?;
+        Ok(MobilePaymentReconciliationReport {
+            examined: report.examined(),
+            succeeded: report.succeeded(),
+            failed: report.failed(),
+            unresolved: report.unresolved(),
+            deferred: report.deferred(),
+            interrupted: report.interrupted(),
+            needs_retry: report.needs_retry(),
+        })
+    }
+
+    /// Applies a bounded batch of durable wake-provider registration changes.
+    pub async fn process_wake_registrations(
+        &self,
+        server_url: String,
+        maximum_changes: u16,
+        execution_milliseconds: u64,
+        transport: Arc<dyn MobileWakeRegistrationTransport>,
+        cancellation: Arc<MobileCancellation>,
+    ) -> Result<MobileWakeRegistrationReport, MobileEngineError> {
+        let server_url = SecureWakeServerUrl::parse(&server_url)
+            .map_err(|_| MobileEngineError::InvalidArgument)?;
+        let budget = operation_budget(execution_milliseconds)?;
+        let bridge = MobileWakeRegistrationBridge::new(transport, cancellation.clone());
+        let report = WakeRegistrationWorker::new(&self.ledger, &bridge, &server_url, &SystemClock)
+            .run(usize::from(maximum_changes), budget, cancellation.as_ref())
+            .await
+            .map_err(MobileEngineError::from)?;
+        Ok(MobileWakeRegistrationReport {
+            examined: u16::try_from(report.examined())
+                .map_err(|_| MobileEngineError::CorruptData)?,
+            applied: u16::try_from(report.applied()).map_err(|_| MobileEngineError::CorruptData)?,
+            deferred: u16::try_from(report.deferred())
+                .map_err(|_| MobileEngineError::CorruptData)?,
+            superseded: u16::try_from(report.superseded())
+                .map_err(|_| MobileEngineError::CorruptData)?,
+            interrupted: report.interrupted(),
+            needs_retry: report.needs_retry(),
+        })
+    }
+}
+
+fn operation_budget(execution_milliseconds: u64) -> Result<OperationBudget, MobileEngineError> {
+    OperationBudget::new(Duration::from_millis(execution_milliseconds))
+        .map_err(|_| MobileEngineError::InvalidArgument)
 }
 
 fn core_connection(
@@ -396,6 +499,34 @@ impl From<RegistryError> for MobileEngineError {
             RegistryError::NotFound => Self::NotFound,
             RegistryError::StaleRevision => Self::StaleRevision,
             RegistryError::AlreadyTombstoned => Self::AlreadyRevoked,
+            _ => Self::CorruptData,
+        }
+    }
+}
+
+impl From<PaymentReconciliationError> for MobileEngineError {
+    fn from(error: PaymentReconciliationError) -> Self {
+        match error {
+            PaymentReconciliationError::InvalidBatchSize => Self::InvalidArgument,
+            PaymentReconciliationError::Accounting(PaymentAccountingError::DatabaseUnavailable) => {
+                Self::DatabaseUnavailable
+            }
+            PaymentReconciliationError::Accounting(_) => Self::CorruptData,
+            _ => Self::CorruptData,
+        }
+    }
+}
+
+impl From<WakeRegistrationWorkerError> for MobileEngineError {
+    fn from(error: WakeRegistrationWorkerError) -> Self {
+        match error {
+            WakeRegistrationWorkerError::Outbox(WakeRegistrationError::InvalidBatchSize) => {
+                Self::InvalidArgument
+            }
+            WakeRegistrationWorkerError::Outbox(WakeRegistrationError::DatabaseUnavailable) => {
+                Self::DatabaseUnavailable
+            }
+            WakeRegistrationWorkerError::Outbox(_) => Self::CorruptData,
             _ => Self::CorruptData,
         }
     }
@@ -506,5 +637,26 @@ mod tests {
             core_connection(insecure, WakePolicy::default()),
             Err(MobileEngineError::InvalidArgument)
         ));
+    }
+
+    #[test]
+    fn maintenance_arguments_and_failures_have_stable_classifications() {
+        assert_eq!(operation_budget(0), Err(MobileEngineError::InvalidArgument));
+        assert_eq!(
+            MobileEngineError::from(PaymentReconciliationError::InvalidBatchSize),
+            MobileEngineError::InvalidArgument
+        );
+        assert_eq!(
+            MobileEngineError::from(PaymentReconciliationError::Accounting(
+                PaymentAccountingError::DatabaseUnavailable
+            )),
+            MobileEngineError::DatabaseUnavailable
+        );
+        assert_eq!(
+            MobileEngineError::from(WakeRegistrationWorkerError::Outbox(
+                WakeRegistrationError::InvalidBatchSize
+            )),
+            MobileEngineError::InvalidArgument
+        );
     }
 }
