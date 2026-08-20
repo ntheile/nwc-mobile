@@ -542,9 +542,9 @@ pub enum PaymentStatus {
         /// Payment preimage returned to the NWC client.
         preimage: PaymentPreimage,
         /// Principal amount paid.
-        amount: AmountSat,
+        amount: AmountMsat,
         /// Actual routing fee paid.
-        fee: AmountSat,
+        fee: AmountMsat,
     },
     /// The payment failed definitively and cannot later settle.
     Failed {

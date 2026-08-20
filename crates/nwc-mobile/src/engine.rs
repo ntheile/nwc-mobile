@@ -530,12 +530,7 @@ impl<'a> WakeEngine<'a> {
             } => {
                 if self
                     .ledger
-                    .mark_payment_succeeded(
-                        payment_hash,
-                        amount.as_sat(),
-                        fee.as_sat(),
-                        self.clock.now(),
-                    )
+                    .mark_payment_succeeded(payment_hash, amount, fee, self.clock.now())
                     .is_err()
                 {
                     return self.release_to_application(lease, QueueReason::LedgerBusy);
@@ -543,9 +538,6 @@ impl<'a> WakeEngine<'a> {
                 if let Err(disposition) = self.ensure_claim_connection_active(connection, lease) {
                     return disposition;
                 }
-                let Some(fees_paid) = fee.as_sat().checked_mul(1_000) else {
-                    return self.reject_claim(lease, RejectionCode::InvalidRequest);
-                };
                 self.commit_and_publish(
                     lease,
                     connection,
@@ -556,7 +548,7 @@ impl<'a> WakeEngine<'a> {
                         error: None,
                         result: Some(ResponseResult::PayInvoice(PayInvoiceResponse {
                             preimage: preimage.to_hex(),
-                            fees_paid: Some(fees_paid),
+                            fees_paid: Some(fee.as_msat()),
                         })),
                     },
                     deadline,
@@ -624,7 +616,9 @@ impl<'a> WakeEngine<'a> {
                 let info = self.wallet.get_info(context).await?;
                 let methods = info
                     .methods()
-                    .filter(|method| connection.policy().allows(*method) && is_read_only(*method))
+                    .filter(|method| {
+                        connection.policy().allows(*method) && is_engine_supported(*method)
+                    })
                     .map(protocol_method)
                     .collect();
                 Ok(ReadOnlyRequestResult {
@@ -967,6 +961,10 @@ fn is_read_only(method: NwcMethod) -> bool {
     )
 }
 
+fn is_engine_supported(method: NwcMethod) -> bool {
+    method == NwcMethod::PayInvoice || is_read_only(method)
+}
+
 fn event_rejection(error: crate::NostrEventError) -> RejectionCode {
     match error {
         crate::NostrEventError::InvalidCreatedAt => RejectionCode::EventOutsideFreshnessWindow,
@@ -1229,7 +1227,11 @@ mod tests {
             Box::pin(async {
                 Ok(WalletInfo::new(
                     None,
-                    [NwcMethod::GetInfo, NwcMethod::GetBalance],
+                    [
+                        NwcMethod::GetInfo,
+                        NwcMethod::GetBalance,
+                        NwcMethod::PayInvoice,
+                    ],
                 ))
             })
         }
@@ -1464,6 +1466,39 @@ mod tests {
     }
 
     #[test]
+    fn get_info_advertises_authorized_pay_invoice_support() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        insert_connection(&ledger);
+        let wallet = TestWallet::default();
+        let relay = TestRelay::default();
+        let secrets = TestSecrets::wallet();
+        let clock = FixedClock::new(100);
+        let engine = engine(&ledger, &wallet, &relay, &secrets, &clock);
+        let event = request_event(Request::get_info(), 100);
+
+        assert!(matches!(
+            execute(&engine, wake(&event, RELAY, true)),
+            WakeDisposition::Completed { .. }
+        ));
+        let published = relay.published.lock().expect("published lock");
+        let response_event = Event::from_json(&published[0]).expect("response event");
+        let plaintext = nostr::nips::nip44::decrypt(
+            client_keys().secret_key(),
+            &response_event.pubkey,
+            &response_event.content,
+        )
+        .expect("decrypt response");
+        let response = Response::from_json(plaintext).expect("NIP-47 response");
+
+        assert!(matches!(
+            response.result,
+            Some(ResponseResult::GetInfo(info))
+                if info.methods.contains(&Method::PayInvoice)
+        ));
+    }
+
+    #[test]
     fn publish_failure_reuses_terminal_response_after_freshness_expiry() {
         let database = TestDatabase::new();
         let ledger = WakeLedger::open(&database.path).expect("ledger");
@@ -1682,8 +1717,8 @@ mod tests {
                 Ok(PaymentStatus::Unknown),
                 Ok(PaymentStatus::Succeeded {
                     preimage: crate::PaymentPreimage::from_bytes([5_u8; 32]),
-                    amount: AmountSat::from_sat(600),
-                    fee: AmountSat::from_sat(10),
+                    amount: AmountMsat::from_msat(600_000),
+                    fee: AmountMsat::from_msat(500),
                 }),
             ]);
         wallet
@@ -1742,8 +1777,22 @@ mod tests {
             .expect("attempt")
             .expect("settled attempt");
         assert_eq!(settled.state(), crate::DurablePaymentState::Succeeded);
-        assert_eq!(settled.charged_sat(), Some(610));
-        assert_eq!(relay.published.lock().expect("published lock").len(), 2);
+        assert_eq!(settled.charged_sat(), Some(601));
+        let published = relay.published.lock().expect("published lock");
+        assert_eq!(published.len(), 2);
+        let response_event =
+            Event::from_json(published.last().expect("payment response")).expect("response event");
+        let plaintext = nostr::nips::nip44::decrypt(
+            client_keys().secret_key(),
+            &response_event.pubkey,
+            &response_event.content,
+        )
+        .expect("decrypt response");
+        let response = Response::from_json(plaintext).expect("NIP-47 response");
+        assert!(matches!(
+            response.result,
+            Some(ResponseResult::PayInvoice(result)) if result.fees_paid == Some(500)
+        ));
     }
 
     #[test]
@@ -1828,8 +1877,8 @@ mod tests {
             settled_at: Some(UnixTimestamp::from_secs(99)),
             status: PaymentStatus::Succeeded {
                 preimage: crate::PaymentPreimage::from_bytes([8_u8; 32]),
-                amount: crate::AmountSat::from_sat(25),
-                fee: crate::AmountSat::from_sat(1),
+                amount: AmountMsat::from_msat(25_000),
+                fee: AmountMsat::from_msat(500),
             },
         })
         .expect("transaction response");

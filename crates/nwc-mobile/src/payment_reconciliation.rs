@@ -141,13 +141,16 @@ impl<'a> PaymentReconciler<'a> {
             return Err(PaymentReconciliationError::InvalidBatchSize);
         }
 
-        let fetch_limit = usize::from(max_attempts) + 1;
-        let mut attempts = self.ledger.load_unresolved_payment_attempts(fetch_limit)?;
-        let has_additional_attempts = attempts.len() > usize::from(max_attempts);
-        attempts.truncate(usize::from(max_attempts));
-
         let deadline = OperationDeadline::new(budget);
         let mut report = PaymentReconciliationReport::default();
+        if deadline.context(cancellation).is_none() {
+            report.interrupted = true;
+            report.needs_retry = true;
+            return Ok(report);
+        }
+        let (attempts, has_additional_attempts) = self
+            .ledger
+            .load_unresolved_payment_attempts(usize::from(max_attempts))?;
         for attempt in attempts {
             let Some(context) = deadline.context(cancellation) else {
                 report.interrupted = true;
@@ -180,8 +183,8 @@ impl<'a> PaymentReconciler<'a> {
                 PaymentStatus::Succeeded { amount, fee, .. } => {
                     self.ledger.mark_payment_succeeded(
                         attempt.payment_hash(),
-                        amount.as_sat(),
-                        fee.as_sat(),
+                        amount,
+                        fee,
                         self.clock.now(),
                     )?;
                     report.succeeded += 1;
@@ -214,10 +217,10 @@ mod tests {
     use std::time::Duration;
 
     use crate::{
-        AmountMsat, AmountSat, BudgetInterval, BudgetPolicy, ConnectionId, ConnectionPolicy,
-        CreatedInvoice, DurablePaymentState, EventId, FeePolicy, HostError, HostErrorKind,
-        HostFuture, InvoiceLookup, ListTransactionsRequest, MakeInvoiceRequest, NewConnection,
-        NwcEncryption, NwcMethod, OperationContext, PayInvoiceRequest, PaymentFailure, PaymentHash,
+        AmountMsat, BudgetInterval, BudgetPolicy, ConnectionId, ConnectionPolicy, CreatedInvoice,
+        DurablePaymentState, EventId, FeePolicy, HostError, HostErrorKind, HostFuture,
+        InvoiceLookup, ListTransactionsRequest, MakeInvoiceRequest, NewConnection, NwcEncryption,
+        NwcMethod, OperationContext, PayInvoiceRequest, PaymentFailure, PaymentHash,
         PaymentPreimage, PaymentQuote, PublicKey, SecureRelayUrl, UnixTimestamp, WakePolicy,
         WalletInfo, WalletTransaction,
     };
@@ -267,6 +270,7 @@ mod tests {
     #[derive(Default)]
     struct TestWallet {
         statuses: Mutex<VecDeque<Result<PaymentStatus, HostError>>>,
+        queried_hashes: Mutex<Vec<PaymentHash>>,
         status_calls: AtomicUsize,
         start_calls: AtomicUsize,
     }
@@ -305,10 +309,14 @@ mod tests {
 
         fn payment_status<'a>(
             &'a self,
-            _payment_hash: &'a PaymentHash,
+            payment_hash: &'a PaymentHash,
             _context: OperationContext<'a>,
         ) -> HostFuture<'a, Result<PaymentStatus, HostError>> {
             self.status_calls.fetch_add(1, Ordering::SeqCst);
+            self.queried_hashes
+                .lock()
+                .expect("queried hashes lock")
+                .push(payment_hash.clone());
             let status = self
                 .statuses
                 .lock()
@@ -418,8 +426,8 @@ mod tests {
             .expect("status lock")
             .push_back(Ok(PaymentStatus::Succeeded {
                 preimage: PaymentPreimage::from_bytes([9; 32]),
-                amount: AmountSat::from_sat(500),
-                fee: AmountSat::from_sat(10),
+                amount: AmountMsat::from_msat(500_000),
+                fee: AmountMsat::from_msat(10_000),
             }));
         let clock = FixedClock(UnixTimestamp::from_secs(103));
         let report = block_on(PaymentReconciler::new(&ledger, &wallet, &clock).reconcile(
@@ -493,8 +501,8 @@ mod tests {
             .expect("status lock")
             .push_back(Ok(PaymentStatus::Succeeded {
                 preimage: PaymentPreimage::from_bytes([9; 32]),
-                amount: AmountSat::from_sat(500),
-                fee: AmountSat::from_sat(10),
+                amount: AmountMsat::from_msat(500_000),
+                fee: AmountMsat::from_msat(10_000),
             }));
         let clock = FixedClock(UnixTimestamp::from_secs(102));
 
@@ -515,6 +523,41 @@ mod tests {
                 .expect("second attempt")
                 .state(),
             DurablePaymentState::Reserved
+        );
+    }
+
+    #[test]
+    fn unresolved_oldest_batch_rotates_so_later_attempts_are_examined() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        let connection = insert_connection(&ledger);
+        reserve(&ledger, &connection, 1, 100);
+        reserve(&ledger, &connection, 2, 101);
+        reserve(&ledger, &connection, 3, 102);
+        let wallet = TestWallet::default();
+        wallet
+            .statuses
+            .lock()
+            .expect("status lock")
+            .extend(std::iter::repeat_n(Ok(PaymentStatus::Unknown), 4));
+        let clock = FixedClock(UnixTimestamp::from_secs(103));
+        let reconciler = PaymentReconciler::new(&ledger, &wallet, &clock);
+
+        let first = block_on(reconciler.reconcile(2, operation_budget(), &crate::NeverCancelled))
+            .expect("first reconciliation");
+        let second = block_on(reconciler.reconcile(2, operation_budget(), &crate::NeverCancelled))
+            .expect("second reconciliation");
+
+        assert_eq!(first.examined(), 2);
+        assert_eq!(second.examined(), 2);
+        assert_eq!(
+            *wallet.queried_hashes.lock().expect("queried hashes lock"),
+            vec![
+                PaymentHash::from_bytes([1; 32]),
+                PaymentHash::from_bytes([2; 32]),
+                PaymentHash::from_bytes([3; 32]),
+                PaymentHash::from_bytes([1; 32]),
+            ]
         );
     }
 
