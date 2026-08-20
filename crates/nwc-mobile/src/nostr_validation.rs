@@ -83,8 +83,11 @@ pub struct NwcSecretKey([u8; 32]);
 
 impl NwcSecretKey {
     /// Validates and wraps 32 bytes of wallet-service key material.
-    pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, NostrEventError> {
-        SecretKey::from_slice(&bytes).map_err(|_| NostrEventError::InvalidSecretKey)?;
+    pub fn from_bytes(mut bytes: [u8; 32]) -> Result<Self, NostrEventError> {
+        if SecretKey::from_slice(&bytes).is_err() {
+            bytes.zeroize();
+            return Err(NostrEventError::InvalidSecretKey);
+        }
         Ok(Self(bytes))
     }
 

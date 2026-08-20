@@ -16,7 +16,17 @@ use nwc_mobile::{
     RetryReason, SecureRelayUrl, UnixTimestamp, WakeDisposition, WakeInput,
 };
 
-const MAX_EMBEDDED_EVENT_BYTES: usize = 128 * 1024;
+mod host_bridge;
+
+pub use host_bridge::{
+    MobileCancellation, MobileCreatedInvoice, MobileHostBridge, MobileHostError,
+    MobileInvoiceLookup, MobileListTransactionsRequest, MobileMakeInvoiceRequest, MobileNwcMethod,
+    MobilePayInvoiceRequest, MobilePaymentFailure, MobilePaymentQuote, MobilePaymentStatus,
+    MobileRelayTransport, MobileSecretProvider, MobileTransactionDirection, MobileWalletBackend,
+    MobileWalletInfo, MobileWalletTransaction,
+};
+
+const MAX_EMBEDDED_EVENT_BYTES: usize = 64 * 1024;
 
 uniffi::setup_scaffolding!();
 

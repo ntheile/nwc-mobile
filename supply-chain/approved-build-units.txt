@@ -1,4 +1,5 @@
 anyhow	1.0.104	custom-build,proc-macro-dependency
+async-trait	0.1.92	proc-macro
 autocfg	1.5.1	build-dependency,proc-macro-dependency
 bitcoin-internals	0.6.0	custom-build
 bitcoin-io	0.1.101	custom-build

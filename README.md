@@ -135,6 +135,19 @@ The native host also supplies:
 Secrets are requested only for the operation that needs them. They are not
 carried in a mutable JSON snapshot or returned in wake results.
 
+The `nwc-mobile-uniffi` crate exposes these capabilities as foreign traits:
+`MobileWalletBackend`, `MobileRelayTransport`, and `MobileSecretProvider`.
+Wallet and relay methods are asynchronous and receive both a bounded timeout and
+a shared `MobileCancellation` object. Native implementations return only typed
+values or a stable `MobileHostError`; raw wallet diagnostics and remote response
+bodies stay in protected native logs.
+
+The secret provider is synchronous and on-demand because the engine needs key
+material only for one bounded cryptographic operation. It must return a fresh
+32-byte buffer from Keychain or Android Keystore-backed storage. Rust validates
+and zeroizes its received copies immediately; native code must likewise avoid
+caching or logging the temporary buffer.
+
 ## Native background helpers
 
 ### Apple
