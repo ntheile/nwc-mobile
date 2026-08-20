@@ -23,12 +23,14 @@ pub use host_bridge::{
     MobileCancellation, MobileCreatedInvoice, MobileHostError, MobileInvoiceLookup,
     MobileListTransactionsRequest, MobileMakeInvoiceRequest, MobileNwcMethod,
     MobilePayInvoiceRequest, MobilePaymentFailure, MobilePaymentQuote, MobilePaymentStatus,
-    MobileRelayTransport, MobileSecretProvider, MobileTransactionDirection, MobileWalletBackend,
+    MobileRelayTransport, MobileSecretProvider, MobileTransactionDirection,
+    MobileWakeRegistrationChange, MobileWakeRegistrationTransport, MobileWalletBackend,
     MobileWalletInfo, MobileWalletTransaction,
 };
 pub use mobile_engine::{
     MobileBudgetInterval, MobileConnectionRequest, MobileConnectionState, MobileEngineError,
-    MobileFeePolicy, MobileNwcEncryption, MobileNwcEngine,
+    MobileFeePolicy, MobileNwcEncryption, MobileNwcEngine, MobilePaymentReconciliationReport,
+    MobileWakeRegistrationReport,
 };
 
 const MAX_EMBEDDED_EVENT_BYTES: usize = 64 * 1024;

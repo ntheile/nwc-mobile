@@ -9,7 +9,8 @@ use nwc_mobile::{
     InvoiceLookup, ListTransactionsRequest, MakeInvoiceRequest, NwcMethod, NwcSecretKey,
     OperationContext, PayInvoiceRequest, PaymentFailure, PaymentHash, PaymentPreimage,
     PaymentQuote, PaymentStatus, PublicKey, RelayTransport, SecretProvider, SecureRelayUrl,
-    TransactionDirection, UnixTimestamp, WalletBackend, WalletInfo, WalletTransaction,
+    SecureWakeServerUrl, TransactionDirection, UnixTimestamp, WakeRegistrationChange,
+    WakeRegistrationTransport, WalletBackend, WalletInfo, WalletTransaction,
 };
 use zeroize::Zeroize;
 
@@ -485,6 +486,106 @@ pub trait MobileSecretProvider: Send + Sync {
     fn load_nwc_secret(&self, connection_id: String) -> Result<Vec<u8>, MobileHostError>;
 }
 
+/// Public, revision-bound wake-provider change passed to native networking.
+#[derive(Clone, Eq, PartialEq, uniffi::Record)]
+pub struct MobileWakeRegistrationChange {
+    /// Stable wallet-local connection identifier used for idempotency.
+    pub connection_id: String,
+    /// Monotonic connection revision; providers must reject older revisions.
+    pub connection_revision: u64,
+    /// Whether the provider should enable or disable delivery.
+    pub enabled: bool,
+    /// Approved NWC client's 32-byte hexadecimal public key.
+    pub client_public_key_hex: String,
+    /// Wallet service's 32-byte hexadecimal public key.
+    pub wallet_service_public_key_hex: String,
+    /// Exact secure relay set associated with this revision.
+    pub relay_urls: Vec<String>,
+}
+
+impl fmt::Debug for MobileWakeRegistrationChange {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MobileWakeRegistrationChange")
+            .field("connection_id", &"[redacted]")
+            .field("connection_revision", &self.connection_revision)
+            .field("enabled", &self.enabled)
+            .field("client_public_key_hex", &"[redacted]")
+            .field("wallet_service_public_key_hex", &"[redacted]")
+            .field("relay_count", &self.relay_urls.len())
+            .finish()
+    }
+}
+
+/// HTTPS wake-provider operation implemented by the containing mobile app.
+///
+/// Implementations must disable redirects and return only a stable error class;
+/// response bodies and transport diagnostics stay in protected native logs.
+#[allow(async_fn_in_trait)]
+#[uniffi::export(with_foreign)]
+#[async_trait::async_trait]
+pub trait MobileWakeRegistrationTransport: Send + Sync {
+    /// Applies one exact desired provider state within the supplied deadline.
+    async fn apply_wake_registration(
+        &self,
+        server_url: String,
+        change: MobileWakeRegistrationChange,
+        timeout_milliseconds: u64,
+        cancellation: Arc<MobileCancellation>,
+    ) -> Result<(), MobileHostError>;
+}
+
+/// Adapts the native wake-provider transport to the durable core worker.
+pub(crate) struct MobileWakeRegistrationBridge {
+    transport: Arc<dyn MobileWakeRegistrationTransport>,
+    cancellation: Arc<MobileCancellation>,
+}
+
+impl MobileWakeRegistrationBridge {
+    #[must_use]
+    pub(crate) fn new(
+        transport: Arc<dyn MobileWakeRegistrationTransport>,
+        cancellation: Arc<MobileCancellation>,
+    ) -> Self {
+        Self {
+            transport,
+            cancellation,
+        }
+    }
+}
+
+impl WakeRegistrationTransport for MobileWakeRegistrationBridge {
+    fn apply<'a>(
+        &'a self,
+        server_url: &'a SecureWakeServerUrl,
+        change: &'a WakeRegistrationChange,
+        context: OperationContext<'a>,
+    ) -> HostFuture<'a, Result<(), HostError>> {
+        Box::pin(async move {
+            self.transport
+                .apply_wake_registration(
+                    server_url.as_str().to_owned(),
+                    MobileWakeRegistrationChange {
+                        connection_id: change.connection_id().as_str().to_owned(),
+                        connection_revision: change.connection_revision().value(),
+                        enabled: change.enabled(),
+                        client_public_key_hex: change.client_pubkey().to_hex(),
+                        wallet_service_public_key_hex: change.wallet_service_pubkey().to_hex(),
+                        relay_urls: change
+                            .relays()
+                            .iter()
+                            .map(|relay| relay.as_str().to_owned())
+                            .collect(),
+                    },
+                    timeout_milliseconds(context),
+                    self.cancellation.clone(),
+                )
+                .await
+                .map_err(HostError::from)
+        })
+    }
+}
+
 /// Adapts FFI-safe native capabilities to the core engine traits.
 ///
 /// This adapter is crate-private so callers cannot pair it with an engine
@@ -862,6 +963,25 @@ mod tests {
     use std::time::Duration;
 
     const HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn registration_change_debug_redacts_provider_metadata() {
+        let change = MobileWakeRegistrationChange {
+            connection_id: "private-connection".to_owned(),
+            connection_revision: 7,
+            enabled: true,
+            client_public_key_hex: HEX.to_owned(),
+            wallet_service_public_key_hex: HEX.to_owned(),
+            relay_urls: vec!["wss://relay.example".to_owned()],
+        };
+        let debug = format!("{change:?}");
+
+        assert!(!debug.contains("private-connection"));
+        assert!(!debug.contains(HEX));
+        assert!(!debug.contains("relay.example"));
+        assert!(debug.contains("connection_revision: 7"));
+        assert!(debug.contains("relay_count: 1"));
+    }
 
     #[derive(Debug, Default)]
     struct TestWallet {
