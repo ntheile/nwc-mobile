@@ -176,6 +176,12 @@ The planned `NwcMobileApple` package will provide an
 The containing app uses the same ledger and calls `resume_pending()` when it is
 launched or foregrounded.
 
+Swift and Kotlin source is generated from the compiled UniFFI library with the
+workspace-pinned `nwc-mobile-uniffi-bindgen` tool. CI regenerates both languages
+and compares their complete content hashes with `bindings/abi.sha256`, making an
+FFI or generator change an explicit review event without committing thousands
+of lines of generated boilerplate.
+
 ### Android
 
 The planned Android package will provide helpers for a wallet-owned

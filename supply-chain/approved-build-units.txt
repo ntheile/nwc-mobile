@@ -1,6 +1,9 @@
 anyhow	1.0.104	custom-build,proc-macro-dependency
+askama_derive	0.13.1	proc-macro
+askama_parser	0.13.0	proc-macro-dependency
 async-trait	0.1.92	proc-macro
 autocfg	1.5.1	build-dependency,proc-macro-dependency
+basic-toml	0.1.10	proc-macro-dependency
 bitcoin-internals	0.6.0	custom-build
 bitcoin-io	0.1.101	custom-build
 bitflags	2.13.1	proc-macro-dependency
@@ -8,6 +11,7 @@ bumpalo	3.20.3	proc-macro-dependency
 camino	1.2.5	custom-build,proc-macro-dependency
 cc	1.4.3	build-dependency
 cfg-if	1.0.4	proc-macro-dependency
+clap_derive	4.5.61	proc-macro
 equivalent	1.0.2	proc-macro-dependency
 errno	0.3.14	proc-macro-dependency
 fastrand	2.5.0	proc-macro-dependency
@@ -21,13 +25,16 @@ indexmap	2.12.1	proc-macro-dependency
 libc	0.2.189	custom-build,proc-macro-dependency
 libsqlite3-sys	0.38.2	custom-build
 linux-raw-sys	0.12.1	proc-macro-dependency
+memchr	2.8.3	proc-macro-dependency
 once_cell	1.21.4	proc-macro-dependency
 pkg-config	0.3.33	build-dependency
 proc-macro2	1.0.107	custom-build,proc-macro-dependency
 quote	1.0.47	custom-build,proc-macro-dependency
 r-efi	5.3.0	proc-macro-dependency
+rustc-hash	2.1.3	proc-macro-dependency
 rustix	1.1.4	custom-build,proc-macro-dependency
 rustversion	1.0.23	build-dependency,custom-build,proc-macro
+scroll_derive	0.12.1	proc-macro
 secp256k1-sys	0.10.1	custom-build
 serde	1.0.229	custom-build,proc-macro-dependency
 serde_core	1.0.229	custom-build,proc-macro-dependency
@@ -38,6 +45,8 @@ siphasher	0.3.11	proc-macro-dependency
 syn	2.0.119	proc-macro-dependency
 syn	3.0.3	proc-macro-dependency
 tempfile	3.27.0	proc-macro-dependency
+thiserror	2.0.20	custom-build
+thiserror-impl	2.0.20	proc-macro
 toml	0.5.11	proc-macro-dependency
 unicode-ident	1.0.24	proc-macro-dependency
 unicode-joining-type	1.0.0	custom-build
@@ -54,6 +63,7 @@ wasm-bindgen-macro-support	0.2.127	proc-macro-dependency
 wasm-bindgen-shared	0.2.127	custom-build,proc-macro-dependency
 windows-link	0.2.1	proc-macro-dependency
 windows-sys	0.61.2	proc-macro-dependency
+winnow	0.7.15	proc-macro-dependency
 wit-bindgen	0.57.1	custom-build,proc-macro-dependency
 zerocopy	0.8.56	custom-build
 zerocopy-derive	0.8.56	proc-macro
