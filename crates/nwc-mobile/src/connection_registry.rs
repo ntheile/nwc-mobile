@@ -65,6 +65,7 @@ pub struct NewConnection {
     relays: Vec<SecureRelayUrl>,
     policy: ConnectionPolicy,
     encryption: NwcEncryption,
+    expires_at: Option<UnixTimestamp>,
 }
 
 impl NewConnection {
@@ -102,7 +103,15 @@ impl NewConnection {
             relays,
             policy,
             encryption,
+            expires_at: None,
         })
+    }
+
+    /// Attaches an optional authorization expiration to the connection.
+    #[must_use]
+    pub const fn with_expiration(mut self, expires_at: Option<UnixTimestamp>) -> Self {
+        self.expires_at = expires_at;
+        self
     }
 }
 
@@ -116,6 +125,7 @@ impl fmt::Debug for NewConnection {
             .field("relay_count", &self.relays.len())
             .field("method_count", &self.policy.methods().len())
             .field("encryption", &self.encryption)
+            .field("expires_at", &self.expires_at)
             .finish()
     }
 }
@@ -131,6 +141,7 @@ pub struct ActiveConnection {
     policy: ConnectionPolicy,
     encryption: NwcEncryption,
     created_at: UnixTimestamp,
+    expires_at: Option<UnixTimestamp>,
     updated_at: UnixTimestamp,
 }
 
@@ -183,6 +194,18 @@ impl ActiveConnection {
         self.created_at
     }
 
+    /// Returns when this authorization stops accepting new work.
+    #[must_use]
+    pub const fn expires_at(&self) -> Option<UnixTimestamp> {
+        self.expires_at
+    }
+
+    /// Returns whether the authorization has expired at `now`.
+    #[must_use]
+    pub fn is_expired_at(&self, now: UnixTimestamp) -> bool {
+        self.expires_at.is_some_and(|expires_at| expires_at <= now)
+    }
+
     /// Returns when this revision was last changed.
     #[must_use]
     pub const fn updated_at(&self) -> UnixTimestamp {
@@ -208,6 +231,7 @@ impl fmt::Debug for ActiveConnection {
             .field("method_count", &self.policy.methods().len())
             .field("encryption", &self.encryption)
             .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
             .field("updated_at", &self.updated_at)
             .finish()
     }
@@ -263,6 +287,7 @@ struct ConnectionRow {
     fee_policy: String,
     maximum_fee_sat: i64,
     created_at: i64,
+    expires_at: Option<i64>,
     updated_at: i64,
     tombstoned_at: Option<i64>,
 }
@@ -312,6 +337,16 @@ impl WakeLedger {
     ) -> Result<ActiveConnection, RegistryError> {
         let now_sql = sqlite_u64(now.as_secs())?;
         let created_at_sql = sqlite_u64(created_at.as_secs())?;
+        if new_connection
+            .expires_at
+            .is_some_and(|expires_at| expires_at <= created_at)
+        {
+            return Err(RegistryError::InvalidConnection);
+        }
+        let expires_at_sql = new_connection
+            .expires_at
+            .map(|expires_at| sqlite_u64(expires_at.as_secs()))
+            .transpose()?;
         let budget = new_connection.policy.budget();
         let budget_limit = sqlite_u64(budget.limit_sat())?;
         let (fee_policy, maximum_fee) = encode_fee_policy(budget.fee_policy())?;
@@ -348,8 +383,8 @@ impl WakeLedger {
             "INSERT INTO connections (
                 connection_id, revision, status, client_pubkey, wallet_service_pubkey,
                 encryption, budget_limit_sat, budget_interval, fee_policy,
-                maximum_fee_sat, created_at, updated_at, tombstoned_at
-             ) VALUES (?1, 0, 'active', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL)",
+                maximum_fee_sat, created_at, expires_at, updated_at, tombstoned_at
+             ) VALUES (?1, 0, 'active', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL)",
             params![
                 new_connection.id.as_str(),
                 new_connection.client_pubkey.as_bytes().as_slice(),
@@ -360,6 +395,7 @@ impl WakeLedger {
                 fee_policy,
                 maximum_fee,
                 created_at_sql,
+                expires_at_sql,
                 now_sql,
             ],
         )?;
@@ -428,6 +464,7 @@ impl WakeLedger {
             policy: new_connection.policy,
             encryption: new_connection.encryption,
             created_at,
+            expires_at: new_connection.expires_at,
             updated_at: now,
         })
     }
@@ -458,7 +495,7 @@ impl WakeLedger {
                 "SELECT connection_id, revision, status, client_pubkey,
                         wallet_service_pubkey, encryption, budget_limit_sat,
                         budget_interval, fee_policy, maximum_fee_sat,
-                        created_at, updated_at, tombstoned_at
+                        created_at, expires_at, updated_at, tombstoned_at
                  FROM connections
                  WHERE status = 'active' AND client_pubkey = ?1 AND wallet_service_pubkey = ?2",
                 params![
@@ -486,6 +523,7 @@ impl WakeLedger {
         &self,
         wallet_service_pubkey: &PublicKey,
         relay: &SecureRelayUrl,
+        now: UnixTimestamp,
     ) -> Result<bool, RegistryError> {
         let connection = self
             .lock_connection()
@@ -497,8 +535,13 @@ impl WakeLedger {
                  JOIN connection_relays AS r ON r.connection_id = c.connection_id
                  WHERE c.status = 'active' AND c.wallet_service_pubkey = ?1
                    AND r.relay_url = ?2
+                   AND (c.expires_at IS NULL OR c.expires_at > ?3)
                  LIMIT 1",
-                params![wallet_service_pubkey.as_bytes().as_slice(), relay.as_str()],
+                params![
+                    wallet_service_pubkey.as_bytes().as_slice(),
+                    relay.as_str(),
+                    sqlite_u64(now.as_secs())?
+                ],
                 |_| Ok(()),
             )
             .optional()
@@ -520,7 +563,7 @@ impl WakeLedger {
                 "SELECT connection_id, revision, status, client_pubkey,
                         wallet_service_pubkey, encryption, budget_limit_sat,
                         budget_interval, fee_policy, maximum_fee_sat,
-                        created_at, updated_at, tombstoned_at
+                        created_at, expires_at, updated_at, tombstoned_at
                  FROM connections WHERE connection_id = ?1",
                 params![id.as_str()],
                 decode_connection_row,
@@ -664,8 +707,9 @@ fn decode_connection_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Connection
         fee_policy: row.get(8)?,
         maximum_fee_sat: row.get(9)?,
         created_at: row.get(10)?,
-        updated_at: row.get(11)?,
-        tombstoned_at: row.get(12)?,
+        expires_at: row.get(11)?,
+        updated_at: row.get(12)?,
+        tombstoned_at: row.get(13)?,
     })
 }
 
@@ -676,8 +720,9 @@ fn hydrate_stored_connection(
     let id = ConnectionId::parse(row.id).map_err(|_| RegistryError::CorruptData)?;
     let revision = decode_revision(row.revision)?;
     let created_at = decode_timestamp(row.created_at)?;
+    let expires_at = row.expires_at.map(decode_timestamp).transpose()?;
     let updated_at = decode_timestamp(row.updated_at)?;
-    if row.updated_at < row.created_at {
+    if row.updated_at < row.created_at || expires_at.is_some_and(|value| value <= created_at) {
         return Err(RegistryError::CorruptData);
     }
     match row.status.as_str() {
@@ -728,6 +773,7 @@ fn hydrate_stored_connection(
         policy,
         encryption,
         created_at,
+        expires_at,
         updated_at,
     }))
 }
@@ -985,6 +1031,58 @@ mod tests {
         assert_eq!(active.policy().budget().limit_sat(), 1_000);
         assert_eq!(active.encryption(), NwcEncryption::Nip44V2);
         assert_eq!(active.created_at(), UnixTimestamp::from_secs(100));
+    }
+
+    #[test]
+    fn expiration_survives_reopen_and_stops_relay_authorization_at_boundary() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        let active = ledger
+            .insert_connection(
+                new_connection(connection_id())
+                    .with_expiration(Some(UnixTimestamp::from_secs(200))),
+                UnixTimestamp::from_secs(100),
+            )
+            .expect("insert connection");
+        let relay = active.relays()[0].clone();
+        assert!(!active.is_expired_at(UnixTimestamp::from_secs(199)));
+        assert!(active.is_expired_at(UnixTimestamp::from_secs(200)));
+        assert!(ledger
+            .is_relay_approved_for_wallet(
+                active.wallet_service_pubkey(),
+                &relay,
+                UnixTimestamp::from_secs(199),
+            )
+            .expect("relay before expiration"));
+        assert!(!ledger
+            .is_relay_approved_for_wallet(
+                active.wallet_service_pubkey(),
+                &relay,
+                UnixTimestamp::from_secs(200),
+            )
+            .expect("relay at expiration"));
+
+        drop(ledger);
+        let reopened = WakeLedger::open(&database.path).expect("reopen ledger");
+        let reloaded = reopened
+            .load_active_connection(&connection_id())
+            .expect("load")
+            .expect("active");
+        assert_eq!(reloaded.expires_at(), Some(UnixTimestamp::from_secs(200)));
+    }
+
+    #[test]
+    fn expiration_must_be_later_than_connection_creation() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        assert_eq!(
+            ledger.insert_connection(
+                new_connection(connection_id())
+                    .with_expiration(Some(UnixTimestamp::from_secs(100))),
+                UnixTimestamp::from_secs(100),
+            ),
+            Err(RegistryError::InvalidConnection)
+        );
     }
 
     #[test]

@@ -10,8 +10,8 @@ use nwc_mobile::{
     BudgetInterval, BudgetPolicy, Clock, ConnectionId, ConnectionPolicy, FeePolicy, LedgerError,
     NewConnection, NwcEncryption, NwcMethod, OperationBudget, PaymentAccountingError,
     PaymentReconciler, PaymentReconciliationError, PublicKey, RegistryError, SecureRelayUrl,
-    SecureWakeServerUrl, StoredConnection, SystemClock, WakeEngine, WakeLedger, WakePolicy,
-    WakeRegistrationError, WakeRegistrationWorker, WakeRegistrationWorkerError,
+    SecureWakeServerUrl, StoredConnection, SystemClock, UnixTimestamp, WakeEngine, WakeLedger,
+    WakePolicy, WakeRegistrationError, WakeRegistrationWorker, WakeRegistrationWorkerError,
 };
 
 use crate::host_bridge::{MobileHostBridge, MobileWakeRegistrationBridge};
@@ -150,6 +150,8 @@ pub struct MobileConnectionRequest {
     pub fee_policy: MobileFeePolicy,
     /// Negotiated NWC encryption.
     pub encryption: MobileNwcEncryption,
+    /// Optional Unix timestamp after which new work is rejected.
+    pub expires_at: Option<u64>,
 }
 
 impl fmt::Debug for MobileConnectionRequest {
@@ -165,6 +167,7 @@ impl fmt::Debug for MobileConnectionRequest {
             .field("budget_interval", &self.budget_interval)
             .field("fee_policy", &self.fee_policy)
             .field("encryption", &self.encryption)
+            .field("expires_at", &self.expires_at)
             .finish()
     }
 }
@@ -441,6 +444,7 @@ fn core_connection(
         request.encryption.into(),
         wake_policy,
     )
+    .map(|connection| connection.with_expiration(request.expires_at.map(UnixTimestamp::from_secs)))
     .map_err(MobileEngineError::from)
 }
 
@@ -553,6 +557,7 @@ mod tests {
                 maximum_fee_sat: 100,
             },
             encryption: MobileNwcEncryption::Nip44V2,
+            expires_at: None,
         }
     }
 
