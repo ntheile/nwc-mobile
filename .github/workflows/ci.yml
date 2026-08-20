@@ -29,15 +29,15 @@ jobs:
         run: cargo +stable fmt --all --check
 
       - name: Lint
-        run: cargo +stable clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo +stable clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: Test
-        run: cargo +stable test --workspace --all-features
+        run: cargo +stable test --locked --workspace --all-features
 
       - name: Check documentation
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo +stable doc --workspace --all-features --no-deps
+        run: cargo +stable doc --locked --workspace --all-features --no-deps
 
   msrv:
     name: Minimum supported Rust 1.84
@@ -52,4 +52,39 @@ jobs:
         run: rustup toolchain install 1.84.0 --profile minimal
 
       - name: Test with minimum supported Rust
-        run: cargo +1.84.0 test --workspace --all-features
+        run: cargo +1.84.0 test --locked --workspace --all-features
+
+  supply-chain:
+    name: Dependency policy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install verified cargo-deny
+        shell: bash
+        env:
+          CARGO_DENY_VERSION: 0.20.2
+          CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/cargo-deny.tar.gz"
+          install_dir="${RUNNER_TEMP}/cargo-deny"
+          release="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"
+
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --output "${archive}" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${release}.tar.gz"
+          printf '%s  %s\n' "${CARGO_DENY_SHA256}" "${archive}" | sha256sum --check
+          mkdir --parents "${install_dir}"
+          tar --extract --gzip --file "${archive}" --directory "${install_dir}" \
+            --strip-components=1
+          printf '%s\n' "${install_dir}" >> "${GITHUB_PATH}"
+
+      - name: Enforce dependency policy
+        run: cargo deny --locked --all-features check advisories bans licenses sources
+
+      - name: Check compile-time dependency allowlist
+        run: ./scripts/check-build-units.sh
