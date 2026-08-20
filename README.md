@@ -192,14 +192,19 @@ of lines of generated boilerplate.
 
 ### Android
 
-The planned Android package will provide helpers for a wallet-owned
-`FirebaseMessagingService` and a `CoroutineWorker`. The FCM callback performs
-only bounded ingestion and schedules WorkManager; the worker opens the same Rust
-ledger and calls `resume_pending()`.
+The `android/nwc-mobile` package provides an `NwcWorkManagerWakeScheduler` for a
+wallet-owned `FirebaseMessagingService` and an asynchronous `NwcWakeWorker`
+base class. The FCM callback performs only bounded transport decoding and
+schedules unique, network-constrained WorkManager work. It intentionally omits
+embedded event ciphertext from WorkManager storage, so the worker asks the Rust
+engine to fetch the exact event from an approved relay.
 
-The native layer maps Rust outcomes to successful, retriable, or terminal
-WorkManager results and applies OS network/battery constraints. Security policy
-and payment retry decisions remain in Rust.
+The worker creates request-scoped execution and cancellation bridges, maps only
+stable Rust outcomes to successful, retriable, or terminal WorkManager results,
+and cancels Rust work immediately when WorkManager stops it. Work names contain
+only a SHA-256 digest of the canonical event id; raw routing metadata is never
+placed in names or tags. Rust's durable ledger remains the replay authority.
+See [`android/nwc-mobile/README.md`](android/nwc-mobile/README.md) for wiring.
 
 Both native adapters can run `PaymentReconciler::reconcile` during foreground or
 background maintenance. A pass checks a caller-selected batch of at most 100

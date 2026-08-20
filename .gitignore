@@ -19,6 +19,7 @@ xcuserdata/
 
 # Android and Gradle
 .gradle/
+.kotlin/
 **/build/
 local.properties
 *.iml

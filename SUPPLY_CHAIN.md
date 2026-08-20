@@ -18,6 +18,10 @@ resolution and compile-time code as security-sensitive changes.
   when that execution surface changes.
 - GitHub Actions are pinned to full commit hashes, checkout credentials are not
   persisted, and CI has read-only repository permissions.
+- Android dependency versions are exact, `gradle.lockfile` freezes the resolved
+  graph, and `gradle/verification-metadata.xml` pins SHA-256 hashes for downloaded
+  plugin and library artifacts. CI installs an exact Gradle version through a
+  commit-pinned action instead of executing an unverified wrapper binary.
 
 These controls reduce risk and make dependency execution visible; they cannot
 prove that allowed code is benign.
@@ -44,6 +48,12 @@ Do not run broad, unaudited dependency updates. For an intended update:
 For emergency upgrades, document why the waiting period was bypassed and obtain
 an independent review of the dependency source and lockfile diff.
 
+The same review rules apply to Android dependencies. Regenerate Gradle locks and
+verification hashes only for an intended update, inspect every changed
+coordinate and repository, and treat new Gradle plugins or annotation processors
+as executable build code. Hash verification provides artifact identity, not
+maintainer trust.
+
 ## Local checks
 
 ```sh
@@ -51,4 +61,5 @@ cargo deny --locked --all-features check advisories bans licenses sources
 ./scripts/check-build-units.sh
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
+gradle --project-dir android/nwc-mobile --no-daemon build lint
 ```
