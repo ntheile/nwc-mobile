@@ -14,7 +14,7 @@ publish = false
 [dependencies]
 # Pin optional transitive packages whose latest manifests exceed the workspace
 # MSRV; Cargo includes them when resolving the complete feature graph.
-base64ct = "=1.7.3"
+base64ct = "=1.8.3"
 base64 = "=0.22.1"
 getrandom = "0.3.4"
 # Keep URL parsing compatible with the workspace's Rust 1.84 MSRV. Newer
