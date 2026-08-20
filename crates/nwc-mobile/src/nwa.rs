@@ -336,6 +336,9 @@ impl NwaRequest {
         ) {
             return Err(NwaError::UnsupportedScheme);
         }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(NwaError::SecretMaterialPresent);
+        }
 
         let client_hex = url.host_str().ok_or(NwaError::InvalidClientPublicKey)?;
         if client_hex.len() != CLIENT_PUBLIC_KEY_HEX_LENGTH {
@@ -523,7 +526,7 @@ fn parse_relays(query: &NwaQuery, policy: &NwaParsePolicy) -> Result<Vec<String>
             return Err(NwaError::InvalidRelay);
         }
         relay.set_fragment(None);
-        let normalized = relay.to_string().trim_end_matches('/').to_string();
+        let normalized = relay.to_string();
         if seen.insert(normalized.clone()) {
             relays.push(normalized);
         }
@@ -810,6 +813,12 @@ mod tests {
                 Err(NwaError::SecretMaterialPresent)
             );
         }
+        assert_eq!(
+            parse(&format!(
+                "nostr+walletauth://leaked-secret@{CLIENT}?relay=wss%3A%2F%2Frelay.example.com"
+            )),
+            Err(NwaError::SecretMaterialPresent)
+        );
     }
 
     #[test]
@@ -826,6 +835,16 @@ mod tests {
             )),
             Err(NwaError::TooManyRelays)
         );
+    }
+
+    #[test]
+    fn preserves_meaningful_trailing_slashes_on_relay_paths() {
+        let request = parse(&format!(
+            "nostr+walletauth://{CLIENT}?relay=wss%3A%2F%2Frelay.example.com%2Fnwc%2F"
+        ))
+        .expect("valid relay path");
+
+        assert_eq!(request.relays(), ["wss://relay.example.com/nwc/"]);
     }
 
     #[test]
