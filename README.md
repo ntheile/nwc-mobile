@@ -181,8 +181,14 @@ wallet supplies a small `NwcWakeExecutor` that maps `NwcWakePayload` into
 hint. See [`apple/NwcMobileApple/README.md`](apple/NwcMobileApple/README.md) for
 the NSE wiring contract and payload keys.
 
-The containing app uses the same ledger and calls `resume_pending()` when it is
-launched or foregrounded.
+The containing app uses the same ledger and resubmits queued wake envelopes from
+its wallet-owned inbox when it is launched or foregrounded.
+
+For maintenance outside the NSE, `NwcMaintenanceCoordinator` serializes bounded
+payment reconciliation and wake-registration processing, prevents overlapping
+runs, and propagates iOS task expiration into the shared Rust cancellation
+scope. It returns aggregate retry guidance without exposing wallet or provider
+error text.
 
 Swift and Kotlin source is generated from the compiled UniFFI library with the
 workspace-pinned `nwc-mobile-uniffi-bindgen` tool. CI regenerates both languages
@@ -206,6 +212,12 @@ only a SHA-256 digest of the canonical event id; raw routing metadata is never
 placed in names or tags. Rust's durable ledger remains the replay authority.
 See [`android/nwc-mobile/README.md`](android/nwc-mobile/README.md) for wiring.
 
+Android foreground and background recovery use
+`NwcWorkManagerMaintenanceScheduler` and `NwcMaintenanceWorker`. Maintenance is
+unique, network-constrained work with no input payload; the worker serializes
+payment reconciliation and registration processing and propagates every stop
+signal into request-scoped Rust cancellation.
+
 Both native adapters can run `PaymentReconciler::reconcile` during foreground or
 background maintenance. A pass checks a caller-selected batch of at most 100
 unresolved payment hashes within the supplied deadline. It never quotes or
@@ -214,6 +226,15 @@ pass was interrupted, how many attempts settled or failed, and whether another
 pass should be scheduled. This remains safe after connection revocation because
 revocation blocks new authorization while the reconciler only accounts for
 payments that were durably reserved earlier.
+
+The Rust facade exposes these operations as `reconcile_payments` and
+`process_wake_registrations`; generated Swift and Kotlin bindings expose them as
+`reconcilePayments` and `processWakeRegistrations`. Registration processing
+drains a bounded batch of durable enable/disable changes through a
+wallet-supplied `MobileWakeRegistrationTransport`. Both calls use request-scoped
+cancellation, hard batch limits, and explicit execution budgets. Provider
+response bodies and transport diagnostics never enter the Rust result or durable
+ledger.
 
 ## Nostr Wallet Auth notes
 
@@ -356,7 +377,12 @@ cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
+./scripts/check-native-contract.sh
 ```
+
+See [`RELEASING.md`](RELEASING.md) for the source-release verification and
+artifact-handling checklist. Crate and native artifact publishing remain
+disabled while the public API and storage schema are unstable.
 
 Dependency changes must also pass the review and CI controls documented in
 [`SUPPLY_CHAIN.md`](SUPPLY_CHAIN.md).
