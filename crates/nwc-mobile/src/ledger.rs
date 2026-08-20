@@ -7,7 +7,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBeha
 
 use crate::{ConnectionId, ConnectionRevision, EventId, UnixTimestamp};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const CLAIM_TOKEN_BYTES: usize = 16;
 const MAX_RESPONSE_EVENT_BYTES: usize = 128 * 1024;
 const MAX_PRUNE_BATCH: usize = 1_000;
@@ -42,6 +42,59 @@ CREATE TABLE wake_events (
 CREATE INDEX wake_events_terminal_updated
     ON wake_events(updated_at)
     WHERE state = 'terminal';
+"#;
+
+pub(crate) const CREATE_CONNECTION_SCHEMA: &str = r#"
+CREATE TABLE connections (
+    connection_id        TEXT PRIMARY KEY NOT NULL
+                         CHECK(length(connection_id) BETWEEN 1 AND 128),
+    revision             INTEGER NOT NULL CHECK(revision >= 0),
+    status               TEXT NOT NULL CHECK(status IN ('active', 'tombstoned')),
+    client_pubkey        BLOB NOT NULL
+                         CHECK(typeof(client_pubkey) = 'blob' AND length(client_pubkey) = 32),
+    wallet_service_pubkey BLOB NOT NULL
+                         CHECK(typeof(wallet_service_pubkey) = 'blob' AND
+                               length(wallet_service_pubkey) = 32),
+    encryption           TEXT NOT NULL CHECK(encryption IN ('nip44_v2', 'nip04')),
+    budget_limit_sat     INTEGER NOT NULL CHECK(budget_limit_sat >= 0),
+    budget_interval      TEXT NOT NULL
+                         CHECK(budget_interval IN
+                               ('never', 'hourly', 'daily', 'weekly', 'monthly', 'yearly')),
+    fee_policy           TEXT NOT NULL CHECK(fee_policy IN ('count', 'exclude')),
+    maximum_fee_sat      INTEGER NOT NULL CHECK(maximum_fee_sat >= 0),
+    created_at           INTEGER NOT NULL CHECK(created_at >= 0),
+    updated_at           INTEGER NOT NULL CHECK(updated_at >= created_at),
+    tombstoned_at        INTEGER,
+    CHECK(
+        (status = 'active' AND tombstoned_at IS NULL) OR
+        (status = 'tombstoned' AND tombstoned_at IS NOT NULL AND
+         tombstoned_at = updated_at)
+    ),
+    CHECK(
+        (fee_policy = 'count') OR
+        (fee_policy = 'exclude' AND maximum_fee_sat = 0)
+    )
+) STRICT;
+
+CREATE UNIQUE INDEX connections_permanent_keys
+    ON connections(client_pubkey, wallet_service_pubkey);
+
+CREATE TABLE connection_methods (
+    connection_id TEXT NOT NULL REFERENCES connections(connection_id) ON DELETE RESTRICT,
+    method        TEXT NOT NULL
+                  CHECK(method IN
+                        ('get_info', 'get_balance', 'make_invoice', 'pay_invoice',
+                         'lookup_invoice', 'list_transactions')),
+    PRIMARY KEY(connection_id, method)
+) STRICT;
+
+CREATE TABLE connection_relays (
+    connection_id TEXT NOT NULL REFERENCES connections(connection_id) ON DELETE RESTRICT,
+    position      INTEGER NOT NULL CHECK(position >= 0),
+    relay_url     TEXT NOT NULL,
+    PRIMARY KEY(connection_id, position),
+    UNIQUE(connection_id, relay_url)
+) STRICT;
 "#;
 
 /// A stable, non-sensitive durable-ledger error.
@@ -477,7 +530,7 @@ impl WakeLedger {
             .map_err(Into::into)
     }
 
-    fn lock_connection(&self) -> Result<MutexGuard<'_, Connection>, LedgerError> {
+    pub(crate) fn lock_connection(&self) -> Result<MutexGuard<'_, Connection>, LedgerError> {
         self.connection
             .lock()
             .map_err(|_| LedgerError::DatabaseUnavailable)
@@ -493,14 +546,19 @@ impl fmt::Debug for WakeLedger {
 fn migrate(connection: &mut Connection) -> Result<(), LedgerError> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    match version {
-        0 => {
-            transaction.execute_batch(CREATE_SCHEMA)?;
-            transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        }
-        SCHEMA_VERSION => {}
-        _ => return Err(LedgerError::UnsupportedSchema),
+    let mut version = version;
+    if version == 0 {
+        transaction.execute_batch(CREATE_SCHEMA)?;
+        version = 1;
     }
+    if version == 1 {
+        transaction.execute_batch(CREATE_CONNECTION_SCHEMA)?;
+        version = 2;
+    }
+    if version != SCHEMA_VERSION {
+        return Err(LedgerError::UnsupportedSchema);
+    }
+    transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     transaction.commit()?;
     Ok(())
 }
@@ -639,6 +697,44 @@ mod tests {
                 Duration::from_secs(10),
             )
             .expect("claim event")
+    }
+
+    #[test]
+    fn version_one_ledger_migrates_without_losing_replay_state() {
+        let database = TestDatabase::new();
+        {
+            let connection = Connection::open(&database.path).expect("create v1 database");
+            connection.execute_batch(CREATE_SCHEMA).expect("v1 schema");
+            connection
+                .pragma_update(None, "user_version", 1_i64)
+                .expect("v1 version");
+            connection
+                .execute(
+                    "INSERT INTO wake_events (
+                        event_id, connection_id, connection_revision, state,
+                        claim_token, available_at, updated_at, terminal_kind,
+                        response_event_json
+                     ) VALUES (?1, ?2, 0, 'terminal', NULL, NULL, 100, 'rejected', NULL)",
+                    params![event_id().as_bytes().as_slice(), connection_id().as_str()],
+                )
+                .expect("v1 replay state");
+        }
+
+        let ledger = WakeLedger::open(&database.path).expect("migrate v1 ledger");
+        assert!(matches!(claim(&ledger, 101), ClaimOutcome::Terminal(_)));
+        let connection = ledger.lock_connection().expect("database lock");
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("schema version");
+        let connection_table: String = connection
+            .query_row(
+                "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'connections'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("connection table");
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(connection_table, "connections");
     }
 
     #[test]
