@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+mod connection_registry;
 mod error;
 mod host;
 mod ledger;
@@ -16,6 +17,9 @@ mod policy;
 mod time;
 mod types;
 
+pub use connection_registry::{
+    ActiveConnection, ConnectionTombstone, NewConnection, RegistryError, StoredConnection,
+};
 pub use error::DomainError;
 pub use host::{
     AmountMsat, AmountSat, CancellationSignal, CreatedInvoice, HostError, HostErrorKind,
