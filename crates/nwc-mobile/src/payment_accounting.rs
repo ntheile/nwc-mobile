@@ -3,8 +3,8 @@ use std::fmt;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::{
-    ActiveConnection, ConnectionId, ConnectionRevision, EventId, PaymentHash, UnixTimestamp,
-    WakeLedger,
+    ActiveConnection, AmountMsat, ConnectionId, ConnectionRevision, EventId, PaymentHash,
+    UnixTimestamp, WakeLedger,
 };
 
 /// A stable, non-sensitive payment-accounting failure.
@@ -408,10 +408,12 @@ impl WakeLedger {
     pub fn mark_payment_succeeded(
         &self,
         payment_hash: &PaymentHash,
-        actual_principal_sat: u64,
-        actual_fee_sat: u64,
+        actual_principal: AmountMsat,
+        actual_fee: AmountMsat,
         now: UnixTimestamp,
     ) -> Result<PaymentAttempt, PaymentAccountingError> {
+        let actual_principal_sat = msat_to_sat_ceil(actual_principal)?;
+        let actual_fee_sat = msat_to_sat_ceil(actual_fee)?;
         let now_sql = sqlite_u64(now.as_secs())?;
         let actual_principal_sql = sqlite_u64(actual_principal_sat)?;
         let actual_fee_sql = sqlite_u64(actual_fee_sat)?;
@@ -455,7 +457,7 @@ impl WakeLedger {
             charged_sat,
             now_sql,
         )?;
-        let authorization_exceeded = actual_principal_sat != attempt.principal_sat
+        let authorization_exceeded = actual_principal_sat > attempt.principal_sat
             || (count_fees && actual_fee_sat > attempt.fee_reserve_sat);
         transaction.execute(
             "UPDATE payment_attempts
@@ -496,27 +498,66 @@ impl WakeLedger {
     pub(crate) fn load_unresolved_payment_attempts(
         &self,
         limit: usize,
-    ) -> Result<Vec<PaymentAttempt>, PaymentAccountingError> {
-        let limit = i64::try_from(limit).map_err(|_| PaymentAccountingError::ValueOutOfRange)?;
-        let database = self
+    ) -> Result<(Vec<PaymentAttempt>, bool), PaymentAccountingError> {
+        let fetch_limit = limit
+            .checked_add(1)
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or(PaymentAccountingError::ValueOutOfRange)?;
+        let limit_sql =
+            i64::try_from(limit).map_err(|_| PaymentAccountingError::ValueOutOfRange)?;
+        let mut database = self
             .lock_connection()
             .map_err(|_| PaymentAccountingError::DatabaseUnavailable)?;
-        let mut statement = database.prepare(
-            "SELECT event_id, payment_hash, connection_id, connection_revision,
-                    period_started_at, principal_sat, fee_reserve_sat, state,
-                    actual_principal_sat, actual_fee_sat, charged_sat,
-                    authorization_exceeded, created_at, updated_at
-             FROM payment_attempts
-             WHERE state IN ('reserved', 'pending')
-             ORDER BY updated_at ASC, event_id ASC
-             LIMIT ?1",
+        let transaction = database.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut maximum_sequence: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(reconciliation_sequence), 0)
+             FROM payment_attempts WHERE state IN ('reserved', 'pending')",
+            [],
+            |row| row.get(0),
         )?;
-        let rows = statement.query_map(params![limit], decode_attempt_row)?;
-        let mut attempts = Vec::new();
-        for row in rows {
-            attempts.push(hydrate_attempt(row?)?);
+        if maximum_sequence > i64::MAX - limit_sql {
+            transaction.execute(
+                "UPDATE payment_attempts SET reconciliation_sequence = 0
+                 WHERE state IN ('reserved', 'pending')",
+                [],
+            )?;
+            maximum_sequence = 0;
         }
-        Ok(attempts)
+        let mut attempts = {
+            let mut statement = transaction.prepare(
+                "SELECT event_id, payment_hash, connection_id, connection_revision,
+                        period_started_at, principal_sat, fee_reserve_sat, state,
+                        actual_principal_sat, actual_fee_sat, charged_sat,
+                        authorization_exceeded, created_at, updated_at
+                 FROM payment_attempts
+                 WHERE state IN ('reserved', 'pending')
+                 ORDER BY reconciliation_sequence ASC, event_id ASC
+                 LIMIT ?1",
+            )?;
+            let rows = statement.query_map(params![fetch_limit], decode_attempt_row)?;
+            let mut attempts = Vec::new();
+            for row in rows {
+                attempts.push(hydrate_attempt(row?)?);
+            }
+            attempts
+        };
+        let has_additional = attempts.len() > limit;
+        attempts.truncate(limit);
+        for (position, attempt) in attempts.iter().enumerate() {
+            let sequence = maximum_sequence
+                .checked_add(
+                    i64::try_from(position + 1)
+                        .map_err(|_| PaymentAccountingError::ValueOutOfRange)?,
+                )
+                .ok_or(PaymentAccountingError::ValueOutOfRange)?;
+            transaction.execute(
+                "UPDATE payment_attempts SET reconciliation_sequence = ?2
+                 WHERE payment_hash = ?1 AND state IN ('reserved', 'pending')",
+                params![attempt.payment_hash().as_bytes().as_slice(), sequence],
+            )?;
+        }
+        transaction.commit()?;
+        Ok((attempts, has_additional))
     }
 
     fn transition_nonterminal(
@@ -814,6 +855,14 @@ fn sqlite_u64(value: u64) -> Result<i64, PaymentAccountingError> {
     i64::try_from(value).map_err(|_| PaymentAccountingError::ValueOutOfRange)
 }
 
+fn msat_to_sat_ceil(amount: AmountMsat) -> Result<u64, PaymentAccountingError> {
+    amount
+        .as_msat()
+        .checked_add(999)
+        .map(|value| value / 1_000)
+        .ok_or(PaymentAccountingError::ValueOutOfRange)
+}
+
 fn decode_u64(value: i64) -> Result<u64, PaymentAccountingError> {
     u64::try_from(value).map_err(|_| PaymentAccountingError::CorruptData)
 }
@@ -1017,7 +1066,12 @@ mod tests {
 
         let reopened = WakeLedger::open(&database.path).expect("reopen ledger");
         let settled = reopened
-            .mark_payment_succeeded(&hash(1), 600, 10, UnixTimestamp::from_secs(500))
+            .mark_payment_succeeded(
+                &hash(1),
+                AmountMsat::from_msat(600_000),
+                AmountMsat::from_msat(10_000),
+                UnixTimestamp::from_secs(500),
+            )
             .expect("late settlement");
         assert_eq!(settled.state(), DurablePaymentState::Succeeded);
         assert_eq!(settled.charged_sat(), Some(610));
@@ -1043,7 +1097,12 @@ mod tests {
             .is_ok());
         assert_eq!(
             reopened
-                .mark_payment_succeeded(&hash(1), 600, 10, UnixTimestamp::from_secs(502))
+                .mark_payment_succeeded(
+                    &hash(1),
+                    AmountMsat::from_msat(600_000),
+                    AmountMsat::from_msat(10_000),
+                    UnixTimestamp::from_secs(502),
+                )
                 .expect("idempotent settlement"),
             settled
         );
@@ -1105,7 +1164,12 @@ mod tests {
             )
             .expect("reserve");
         let settled = ledger
-            .mark_payment_succeeded(&hash(1), 500, 50, UnixTimestamp::from_secs(101))
+            .mark_payment_succeeded(
+                &hash(1),
+                AmountMsat::from_msat(500_000),
+                AmountMsat::from_msat(50_000),
+                UnixTimestamp::from_secs(101),
+            )
             .expect("settle beyond fee reserve");
         assert_eq!(settled.charged_sat(), Some(550));
         assert!(settled.authorization_exceeded());
@@ -1128,6 +1192,36 @@ mod tests {
                 UnixTimestamp::from_secs(102),
             )
             .is_ok());
+    }
+
+    #[test]
+    fn lower_actual_principal_refunds_reserve_without_false_authorization_alarm() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        let connection = insert_connection(&ledger, BudgetInterval::Never);
+        ledger
+            .reserve_payment(
+                &event(1),
+                &hash(1),
+                &connection,
+                500,
+                UnixTimestamp::from_secs(100),
+            )
+            .expect("reserve");
+
+        let settled = ledger
+            .mark_payment_succeeded(
+                &hash(1),
+                AmountMsat::from_msat(499_000),
+                AmountMsat::from_msat(500),
+                UnixTimestamp::from_secs(101),
+            )
+            .expect("settle below authorized principal");
+
+        assert_eq!(settled.actual_principal_sat(), Some(499));
+        assert_eq!(settled.actual_fee_sat(), Some(1));
+        assert_eq!(settled.charged_sat(), Some(500));
+        assert!(!settled.authorization_exceeded());
     }
 
     #[test]
@@ -1163,7 +1257,12 @@ mod tests {
         assert_ne!(first.period_started_at(), second.period_started_at());
 
         ledger
-            .mark_payment_succeeded(&hash(1), 900, 10, UnixTimestamp::from_secs(86_501))
+            .mark_payment_succeeded(
+                &hash(1),
+                AmountMsat::from_msat(900_000),
+                AmountMsat::from_msat(10_000),
+                UnixTimestamp::from_secs(86_501),
+            )
             .expect("late first-period settlement");
         assert_eq!(
             ledger.reserve_payment(
