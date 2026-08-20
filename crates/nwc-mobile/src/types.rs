@@ -163,6 +163,7 @@ macro_rules! hex_32_type {
 hex_32_type!(EventId, "A Nostr event identifier.");
 hex_32_type!(PublicKey, "A Nostr public key.");
 hex_32_type!(PaymentHash, "A Lightning payment hash.");
+hex_32_type!(PaymentPreimage, "A Lightning payment preimage.");
 
 /// An NIP-47 method understood by the mobile engine.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

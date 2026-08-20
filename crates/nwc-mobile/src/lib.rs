@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod error;
+mod host;
 mod nostr_validation;
 mod nwa;
 mod outcome;
@@ -15,6 +16,13 @@ mod time;
 mod types;
 
 pub use error::DomainError;
+pub use host::{
+    AmountMsat, AmountSat, CancellationSignal, CreatedInvoice, HostError, HostErrorKind,
+    HostFuture, InvoiceLookup, ListTransactionsRequest, MakeInvoiceRequest, NeverCancelled,
+    OperationBudget, OperationContext, PayInvoiceRequest, PaymentFailure, PaymentStatus,
+    RelayTransport, SecretProvider, SecureRelayUrl, TransactionDirection, WalletBackend,
+    WalletInfo, WalletTransaction,
+};
 pub use nostr_validation::{
     DecryptedNwcRequest, NostrEventError, NwcEncryption, NwcEventValidator, NwcSecretKey,
     ValidatedNwcEvent,
@@ -24,5 +32,6 @@ pub use outcome::{NotificationHint, QueueReason, RejectionCode, RetryReason, Wak
 pub use policy::{BudgetInterval, BudgetPolicy, ConnectionPolicy, FeePolicy, WakePolicy};
 pub use time::{BackgroundBudget, Clock, SystemClock, UnixTimestamp};
 pub use types::{
-    ConnectionId, ConnectionRevision, EventId, NwcMethod, PaymentHash, PublicKey, WakeInput,
+    ConnectionId, ConnectionRevision, EventId, NwcMethod, PaymentHash, PaymentPreimage, PublicKey,
+    WakeInput,
 };

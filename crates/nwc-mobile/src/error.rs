@@ -29,6 +29,10 @@ pub enum DomainError {
     RevisionOverflow,
     /// A background budget was empty or left no cleanup reserve.
     InvalidBackgroundBudget,
+    /// A host operation was given no execution time.
+    InvalidOperationBudget,
+    /// A relay URL was malformed or did not use secure WebSockets.
+    InvalidRelayUrl,
     /// A wake policy contained incompatible bounds.
     InvalidWakePolicy,
     /// Adding the fee reserve to a payment principal would overflow.
@@ -54,6 +58,10 @@ impl fmt::Display for DomainError {
             Self::InvalidBackgroundBudget => {
                 formatter.write_str("background budget must leave time for cleanup")
             }
+            Self::InvalidOperationBudget => {
+                formatter.write_str("host operation budget must be non-zero")
+            }
+            Self::InvalidRelayUrl => formatter.write_str("relay URL is invalid or insecure"),
             Self::InvalidWakePolicy => formatter.write_str("wake policy bounds are inconsistent"),
             Self::PaymentAmountOverflow => {
                 formatter.write_str("payment amount and fee reserve overflowed")
