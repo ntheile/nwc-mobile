@@ -70,14 +70,16 @@ impl<'a> WakeEngine<'a> {
         if cancellation.is_cancelled() {
             return queued(QueueReason::Deadline);
         }
+        let authorization_time = self.clock.now();
         let relay = match SecureRelayUrl::parse(wake.relay()) {
             Ok(relay) => relay,
             Err(_) => return rejected(RejectionCode::InvalidWakePayload),
         };
-        match self
-            .ledger
-            .is_relay_approved_for_wallet(wake.wallet_service_pubkey(), &relay)
-        {
+        match self.ledger.is_relay_approved_for_wallet(
+            wake.wallet_service_pubkey(),
+            &relay,
+            authorization_time,
+        ) {
             Ok(true) => {}
             Ok(false) => return rejected(RejectionCode::RelayNotAllowed),
             Err(_) => return queued(QueueReason::LedgerBusy),
@@ -116,6 +118,9 @@ impl<'a> WakeEngine<'a> {
             Ok(None) => return rejected(RejectionCode::ConnectionUnavailable),
             Err(_) => return queued(QueueReason::LedgerBusy),
         };
+        if connection.is_expired_at(authorization_time) {
+            return rejected(RejectionCode::ConnectionUnavailable);
+        }
         if !connection.allows_relay(&relay) {
             return rejected(RejectionCode::RelayNotAllowed);
         }

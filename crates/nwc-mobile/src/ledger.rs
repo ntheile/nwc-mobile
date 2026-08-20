@@ -7,7 +7,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBeha
 
 use crate::{ConnectionId, ConnectionRevision, EventId, UnixTimestamp};
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 const CLAIM_TOKEN_BYTES: usize = 16;
 const MAX_RESPONSE_EVENT_BYTES: usize = 128 * 1024;
 const MAX_PRUNE_BATCH: usize = 1_000;
@@ -198,6 +198,11 @@ ALTER TABLE payment_attempts
 CREATE INDEX payment_attempts_reconciliation_queue
     ON payment_attempts(reconciliation_sequence, event_id)
     WHERE state IN ('reserved', 'pending');
+"#;
+
+const ADD_CONNECTION_EXPIRATION: &str = r#"
+ALTER TABLE connections ADD COLUMN expires_at INTEGER
+    CHECK(expires_at IS NULL OR expires_at > created_at);
 "#;
 
 /// A stable, non-sensitive durable-ledger error.
@@ -742,6 +747,10 @@ fn migrate(connection: &mut Connection) -> Result<(), LedgerError> {
         transaction.execute_batch(CREATE_PAYMENT_RECONCILIATION_ORDER)?;
         version = 5;
     }
+    if version == 5 {
+        transaction.execute_batch(ADD_CONNECTION_EXPIRATION)?;
+        version = 6;
+    }
     if version != SCHEMA_VERSION {
         return Err(LedgerError::UnsupportedSchema);
     }
@@ -979,6 +988,45 @@ mod tests {
         assert_eq!(change.connection_id(), &connection_id());
         assert_eq!(change.connection_revision(), ConnectionRevision::INITIAL);
         assert_eq!(change.relays().len(), 1);
+    }
+
+    #[test]
+    fn version_five_migration_adds_connection_expiration_without_rebuilding_state() {
+        let database = TestDatabase::new();
+        {
+            let connection = Connection::open(&database.path).expect("create v5 database");
+            connection.execute_batch(CREATE_SCHEMA).expect("v1 schema");
+            connection
+                .execute_batch(CREATE_CONNECTION_SCHEMA)
+                .expect("v2 schema");
+            connection
+                .execute_batch(CREATE_PAYMENT_SCHEMA)
+                .expect("v3 schema");
+            connection
+                .execute_batch(CREATE_WAKE_REGISTRATION_SCHEMA)
+                .expect("v4 schema");
+            connection
+                .execute_batch(CREATE_PAYMENT_RECONCILIATION_ORDER)
+                .expect("v5 schema");
+            connection
+                .pragma_update(None, "user_version", 5_i64)
+                .expect("v5 version");
+        }
+
+        let ledger = WakeLedger::open(&database.path).expect("migrate v5 ledger");
+        let connection = ledger.lock_connection().expect("database lock");
+        let expiration_columns: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('connections') WHERE name = 'expires_at'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("expiration column");
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("schema version");
+        assert_eq!(expiration_columns, 1);
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]
