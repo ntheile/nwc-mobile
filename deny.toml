@@ -28,6 +28,7 @@ deny = [
 
 [bans.build]
 allow-build-scripts = [
+  "ahash@0.8.12",
   "anyhow@1.0.104",
   "bitcoin-internals@0.6.0",
   "bitcoin-io@0.1.101",
@@ -36,7 +37,7 @@ allow-build-scripts = [
   "generic-array@0.14.7",
   "getrandom@0.3.4",
   "libc@0.2.189",
-  "libsqlite3-sys@0.38.2",
+  "libsqlite3-sys@0.28.0",
   "proc-macro2@1.0.107",
   "quote@1.0.47",
   "rustix@1.1.4",

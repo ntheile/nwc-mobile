@@ -678,6 +678,7 @@ fn hydrate_stored_connection(
     }))
 }
 
+#[allow(clippy::let_and_return)] // rusqlite 0.31 needs the iterator dropped before `statement`.
 fn load_methods(
     connection: &Connection,
     id: &ConnectionId,
@@ -696,6 +697,7 @@ fn load_methods(
     methods
 }
 
+#[allow(clippy::let_and_return)] // rusqlite 0.31 needs the iterator dropped before `statement`.
 fn load_relays(
     connection: &Connection,
     id: &ConnectionId,
@@ -825,10 +827,11 @@ mod tests {
         fn new() -> Self {
             let mut random = [0_u8; 8];
             getrandom::fill(&mut random).expect("test randomness");
-            let suffix = random
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>();
+            use std::fmt::Write as _;
+            let suffix = random.iter().fold(String::new(), |mut suffix, byte| {
+                write!(&mut suffix, "{byte:02x}").expect("write suffix");
+                suffix
+            });
             let directory = std::env::temp_dir().join(format!(
                 "nwc-mobile-connections-{}-{suffix}",
                 std::process::id()
