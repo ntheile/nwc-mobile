@@ -408,6 +408,32 @@ impl WakeLedger {
         Ok(result)
     }
 
+    /// Checks whether a wake relay belongs to any active connection for a
+    /// wallet key before the engine performs network I/O.
+    pub(crate) fn is_relay_approved_for_wallet(
+        &self,
+        wallet_service_pubkey: &PublicKey,
+        relay: &SecureRelayUrl,
+    ) -> Result<bool, RegistryError> {
+        let connection = self
+            .lock_connection()
+            .map_err(|_| RegistryError::DatabaseUnavailable)?;
+        connection
+            .query_row(
+                "SELECT 1
+                 FROM connections AS c
+                 JOIN connection_relays AS r ON r.connection_id = c.connection_id
+                 WHERE c.status = 'active' AND c.wallet_service_pubkey = ?1
+                   AND r.relay_url = ?2
+                 LIMIT 1",
+                params![wallet_service_pubkey.as_bytes().as_slice(), relay.as_str()],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|value| value.is_some())
+            .map_err(Into::into)
+    }
+
     /// Loads either the active authorization or permanent tombstone for an id.
     pub fn load_connection(
         &self,

@@ -1,6 +1,9 @@
 use std::fmt;
 
-use nostr::{Event, JsonUtil, Kind, PublicKey as NostrPublicKey, SecretKey, TagKind};
+use nostr::{
+    Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey as NostrPublicKey, SecretKey, Tag,
+    TagKind, Timestamp,
+};
 use zeroize::Zeroize;
 
 use crate::{EventId, PublicKey, UnixTimestamp, WakePolicy};
@@ -29,10 +32,14 @@ pub enum NostrEventError {
     InvalidCiphertext,
     /// The supplied wallet secret is not a valid secp256k1 secret key.
     InvalidSecretKey,
+    /// The supplied wallet secret does not match the authorized service key.
+    SecretKeyMismatch,
     /// Authenticated decryption failed.
     DecryptionFailed,
     /// The decrypted request exceeds the configured payload bound.
     PlaintextTooLarge,
+    /// Encrypting or signing the response event failed.
+    ResponseBuildFailed,
 }
 
 impl fmt::Display for NostrEventError {
@@ -48,8 +55,10 @@ impl fmt::Display for NostrEventError {
             Self::InvalidCreatedAt => "Nostr event timestamp is outside the accepted window",
             Self::InvalidCiphertext => "Nostr event ciphertext is invalid",
             Self::InvalidSecretKey => "wallet service secret key is invalid",
+            Self::SecretKeyMismatch => "wallet service secret key does not match the connection",
             Self::DecryptionFailed => "NWC request decryption failed",
             Self::PlaintextTooLarge => "decrypted NWC request exceeds the payload limit",
+            Self::ResponseBuildFailed => "NWC response event could not be built",
         })
     }
 }
@@ -124,6 +133,7 @@ impl Drop for DecryptedNwcRequest {
 pub struct ValidatedNwcEvent {
     id: EventId,
     author: PublicKey,
+    wallet_service_pubkey: PublicKey,
     created_at: UnixTimestamp,
     encryption: NwcEncryption,
     ciphertext: String,
@@ -161,6 +171,10 @@ impl ValidatedNwcEvent {
         wallet_secret: &NwcSecretKey,
     ) -> Result<DecryptedNwcRequest, NostrEventError> {
         let secret = wallet_secret.nostr_secret()?;
+        let keys = Keys::new(secret.clone());
+        if keys.public_key().as_bytes() != self.wallet_service_pubkey.as_bytes() {
+            return Err(NostrEventError::SecretKeyMismatch);
+        }
         let author = NostrPublicKey::from_byte_array(*self.author.as_bytes());
         let mut plaintext = match self.encryption {
             NwcEncryption::Nip44V2 => {
@@ -177,6 +191,44 @@ impl ValidatedNwcEvent {
             return Err(NostrEventError::PlaintextTooLarge);
         }
         Ok(DecryptedNwcRequest(plaintext))
+    }
+
+    /// Encrypts, binds, and signs a response for this exact request event.
+    pub fn build_response_event(
+        &self,
+        wallet_secret: &NwcSecretKey,
+        response_json: &str,
+        created_at: UnixTimestamp,
+    ) -> Result<String, NostrEventError> {
+        if response_json.len() > self.maximum_plaintext_bytes {
+            return Err(NostrEventError::PlaintextTooLarge);
+        }
+        let secret = wallet_secret.nostr_secret()?;
+        let keys = Keys::new(secret.clone());
+        if keys.public_key().as_bytes() != self.wallet_service_pubkey.as_bytes() {
+            return Err(NostrEventError::SecretKeyMismatch);
+        }
+        let author = NostrPublicKey::from_byte_array(*self.author.as_bytes());
+        let encrypted = match self.encryption {
+            NwcEncryption::Nip44V2 => nostr::nips::nip44::encrypt(
+                &secret,
+                &author,
+                response_json,
+                nostr::nips::nip44::Version::V2,
+            )
+            .map_err(|_| NostrEventError::ResponseBuildFailed)?,
+            NwcEncryption::LegacyNip04 => {
+                nostr::nips::nip04::encrypt(&secret, &author, response_json)
+                    .map_err(|_| NostrEventError::ResponseBuildFailed)?
+            }
+        };
+        let request_id = nostr::EventId::from_byte_array(*self.id.as_bytes());
+        EventBuilder::new(Kind::WalletConnectResponse, encrypted)
+            .tags([Tag::public_key(author), Tag::event(request_id)])
+            .custom_created_at(Timestamp::from(created_at.as_secs()))
+            .sign_with_keys(&keys)
+            .map(|event| event.as_json())
+            .map_err(|_| NostrEventError::ResponseBuildFailed)
     }
 }
 
@@ -204,6 +256,18 @@ impl NwcEventValidator {
     #[must_use]
     pub const fn new(policy: WakePolicy) -> Self {
         Self { policy }
+    }
+
+    /// Extracts only the claimed author needed for a registry lookup.
+    ///
+    /// This value is untrusted until `validate_request` succeeds and must never
+    /// authorize decryption or a host call by itself.
+    pub(crate) fn candidate_author(&self, event_json: &str) -> Result<PublicKey, NostrEventError> {
+        if event_json.len() > self.policy.maximum_payload_bytes() {
+            return Err(NostrEventError::PayloadTooLarge);
+        }
+        let event = Event::from_json(event_json).map_err(|_| NostrEventError::MalformedEvent)?;
+        Ok(PublicKey::from_bytes(*event.pubkey.as_bytes()))
     }
 
     /// Parses, verifies, and binds an NWC request event to its wake and
@@ -249,6 +313,7 @@ impl NwcEventValidator {
         Ok(ValidatedNwcEvent {
             id: EventId::from_bytes(*event.id.as_bytes()),
             author: PublicKey::from_bytes(*event.pubkey.as_bytes()),
+            wallet_service_pubkey: expected_wallet_service_pubkey.clone(),
             created_at,
             encryption,
             ciphertext: event.content,
@@ -421,6 +486,73 @@ mod tests {
             NOW,
         )
         .is_ok());
+    }
+
+    #[test]
+    fn response_events_use_negotiated_encryption_and_bind_request() {
+        let client = keys(CLIENT_SECRET);
+        let wallet = keys(WALLET_SECRET);
+        let wallet_secret = NwcSecretKey::from_bytes(
+            wallet
+                .secret_key()
+                .as_secret_bytes()
+                .try_into()
+                .expect("32-byte secret"),
+        )
+        .expect("wallet secret");
+
+        for encryption in [NwcEncryption::Nip44V2, NwcEncryption::LegacyNip04] {
+            let request = signed_request(encryption, NOW, wallet.public_key(), &client);
+            let request_id = EventId::from_bytes(*request.id.as_bytes());
+            let validated = validate(
+                &request,
+                &request_id,
+                &domain_public_key(client.public_key()),
+                &domain_public_key(wallet.public_key()),
+                encryption,
+                NOW,
+            )
+            .expect("validated request");
+            let response = validated
+                .build_response_event(
+                    &wallet_secret,
+                    r#"{"result_type":"get_info","result":{"methods":[]}}"#,
+                    UnixTimestamp::from_secs(NOW + 1),
+                )
+                .expect("response event");
+            let response = Event::from_json(response).expect("response JSON");
+
+            response.verify().expect("response signature");
+            assert_eq!(response.kind, Kind::WalletConnectResponse);
+            assert_eq!(response.pubkey, wallet.public_key());
+            assert!(has_exact_recipient(
+                &response,
+                &domain_public_key(client.public_key())
+            ));
+            let event_tags = response
+                .tags
+                .iter()
+                .filter(|tag| tag.kind() == TagKind::e())
+                .collect::<Vec<_>>();
+            assert_eq!(event_tags.len(), 1);
+            let request_id_hex = request.id.to_hex();
+            assert_eq!(event_tags[0].content(), Some(request_id_hex.as_str()));
+            let plaintext = match encryption {
+                NwcEncryption::Nip44V2 => nostr::nips::nip44::decrypt(
+                    client.secret_key(),
+                    &wallet.public_key(),
+                    &response.content,
+                )
+                .expect("decrypt NIP-44 response"),
+                NwcEncryption::LegacyNip04 => nostr::nips::nip04::decrypt(
+                    client.secret_key(),
+                    &wallet.public_key(),
+                    &response.content,
+                )
+                .expect("decrypt NIP-04 response"),
+            };
+            assert!(plaintext.contains("get_info"));
+        }
     }
 
     #[test]
