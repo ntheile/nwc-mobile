@@ -81,6 +81,9 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo +stable doc --locked --workspace --all-features --no-deps
 
+      - name: Check shared native contract fixture
+        run: ./scripts/check-native-contract.sh
+
       - name: Check generated Swift and Kotlin contract
         run: ./scripts/check-generated-bindings.sh
 

@@ -13,6 +13,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+./scripts/check-native-contract.sh
 ```
 
 The CI workflow also runs the test suite with the minimum supported Rust
