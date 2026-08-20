@@ -37,6 +37,7 @@ final class NwcNotificationServiceAdapterTests: XCTestCase {
     original.summaryArgument = "remote summary"
     original.summaryArgumentCount = 3
     #if os(iOS)
+      original.filterCriteria = "remote-focus-filter"
       original.launchImageName = "remote-image"
     #endif
     original.userInfo = payload()
@@ -68,6 +69,7 @@ final class NwcNotificationServiceAdapterTests: XCTestCase {
     XCTAssertEqual(content.summaryArgument, "")
     XCTAssertEqual(content.summaryArgumentCount, 0)
     #if os(iOS)
+      XCTAssertNil(content.filterCriteria)
       XCTAssertEqual(content.launchImageName, "")
     #endif
     XCTAssertTrue(content.attachments.isEmpty)
