@@ -19,9 +19,10 @@ Native code remains a thin operating-system adapter. Swift and Kotlin receive
 pushes, supply secure-storage and wallet capabilities, schedule background work,
 and render generic notification content; they do not duplicate NWC policy.
 
-> **Status:** Early development. The Rust engine now supports durable read and
-> payment execution, but its public API, storage schema, and native bindings are
-> not yet stable.
+> **Status:** Early development. The Rust engine supports durable read and
+> payment execution, and the first UniFFI lifecycle contract validates native
+> wake envelopes and exposes stable, non-sensitive outcomes. Its public API,
+> storage schema, and generated native bindings are not yet stable.
 
 ## How a wake request works
 
@@ -91,7 +92,7 @@ budget.
 nwc-mobile/
 ├── crates/
 │   ├── nwc-mobile/             # Rust engine, protocol, ledger, and policy
-│   └── nwc-mobile-uniffi/      # Swift/Kotlin lifecycle API
+│   └── nwc-mobile-uniffi/      # Swift/Kotlin lifecycle API (in progress)
 ├── apple/
 │   └── NwcMobileApple/         # NSE and app lifecycle coordinator
 └── android/

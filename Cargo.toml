@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/nwc-mobile"]
+members = ["crates/nwc-mobile", "crates/nwc-mobile-uniffi"]
 resolver = "2"
 
 [workspace.package]
