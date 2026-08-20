@@ -174,6 +174,12 @@ wallet's small `UNNotificationServiceExtension` subclass. It:
 5. invokes Apple's completion handler exactly once; and
 6. replaces untrusted presentation fields with wallet-localized generic text.
 
+Add `https://github.com/ntheile/nwc-mobile` as a Swift package dependency and
+select the `NwcMobileApple` product. Until the API reaches a stable release,
+pin the dependency to a reviewed commit instead of following a moving branch.
+The repository-root package manifest makes this work in Xcode while the nested
+manifest remains available for development within `apple/NwcMobileApple`.
+
 The package deliberately does not link a particular generated framework. The
 wallet supplies a small `NwcWakeExecutor` that maps `NwcWakePayload` into
 `NwcMobile.MobileWakeEnvelope`, calls `validateWakeEnvelope` and

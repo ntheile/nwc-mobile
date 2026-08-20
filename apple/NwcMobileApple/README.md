@@ -8,6 +8,10 @@ payment policy.
 The package supports iOS 15 and newer. Its macOS target exists so the package's
 platform-neutral lifecycle behavior can be tested in CI.
 
+Wallet applications can add `https://github.com/ntheile/nwc-mobile` in Xcode
+and select the `NwcMobileApple` library product. Pin an audited commit revision
+while the package is pre-1.0; do not follow a mutable branch in production.
+
 ## Responsibilities
 
 The package:
