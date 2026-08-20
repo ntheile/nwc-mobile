@@ -486,7 +486,12 @@ pub trait MobileSecretProvider: Send + Sync {
 }
 
 /// Adapts FFI-safe native capabilities to the core engine traits.
-pub struct MobileHostBridge {
+///
+/// This adapter is crate-private so callers cannot pair it with an engine
+/// context backed by a different cancellation object. [`crate::MobileNwcEngine`]
+/// constructs a fresh bridge for each execution and supplies the same
+/// [`MobileCancellation`] to both sides of the boundary.
+pub(crate) struct MobileHostBridge {
     wallet: Arc<dyn MobileWalletBackend>,
     relays: Arc<dyn MobileRelayTransport>,
     secrets: Arc<dyn MobileSecretProvider>,
@@ -496,7 +501,7 @@ pub struct MobileHostBridge {
 impl MobileHostBridge {
     /// Creates an adapter for one engine execution and cancellation scope.
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         wallet: Arc<dyn MobileWalletBackend>,
         relays: Arc<dyn MobileRelayTransport>,
         secrets: Arc<dyn MobileSecretProvider>,
@@ -994,12 +999,12 @@ mod tests {
         }
     }
 
-    fn bridge() -> MobileHostBridge {
+    fn bridge(cancellation: Arc<MobileCancellation>) -> MobileHostBridge {
         MobileHostBridge::new(
             Arc::new(TestWallet::default()),
             Arc::new(TestRelay),
             Arc::new(TestSecrets),
-            MobileCancellation::new(),
+            cancellation,
         )
     }
 
@@ -1030,8 +1035,8 @@ mod tests {
 
     #[test]
     fn wallet_bridge_converts_typed_values_and_budget() {
-        let bridge = bridge();
         let cancellation = MobileCancellation::new();
+        let bridge = bridge(cancellation.clone());
         let info = block_on(bridge.get_info(context(&cancellation))).expect("wallet info");
 
         assert_eq!(info.public_key().expect("public key").to_hex(), HEX);
