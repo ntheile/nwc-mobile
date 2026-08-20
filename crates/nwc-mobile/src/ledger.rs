@@ -7,7 +7,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBeha
 
 use crate::{ConnectionId, ConnectionRevision, EventId, UnixTimestamp};
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 const CLAIM_TOKEN_BYTES: usize = 16;
 const MAX_RESPONSE_EVENT_BYTES: usize = 128 * 1024;
 const MAX_PRUNE_BATCH: usize = 1_000;
@@ -188,6 +188,16 @@ INSERT INTO wake_registration_relays (connection_id, position, relay_url)
 SELECT r.connection_id, r.position, r.relay_url
 FROM connection_relays AS r
 JOIN wake_registration_outbox AS o ON o.connection_id = r.connection_id;
+"#;
+
+const CREATE_PAYMENT_RECONCILIATION_ORDER: &str = r#"
+ALTER TABLE payment_attempts
+    ADD COLUMN reconciliation_sequence INTEGER NOT NULL DEFAULT 0
+               CHECK(reconciliation_sequence >= 0);
+
+CREATE INDEX payment_attempts_reconciliation_queue
+    ON payment_attempts(reconciliation_sequence, event_id)
+    WHERE state IN ('reserved', 'pending');
 "#;
 
 /// A stable, non-sensitive durable-ledger error.
@@ -655,6 +665,10 @@ fn migrate(connection: &mut Connection) -> Result<(), LedgerError> {
     if version == 3 {
         transaction.execute_batch(CREATE_WAKE_REGISTRATION_SCHEMA)?;
         version = 4;
+    }
+    if version == 4 {
+        transaction.execute_batch(CREATE_PAYMENT_RECONCILIATION_ORDER)?;
+        version = 5;
     }
     if version != SCHEMA_VERSION {
         return Err(LedgerError::UnsupportedSchema);
