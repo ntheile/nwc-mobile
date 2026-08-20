@@ -212,6 +212,12 @@ only a SHA-256 digest of the canonical event id; raw routing metadata is never
 placed in names or tags. Rust's durable ledger remains the replay authority.
 See [`android/nwc-mobile/README.md`](android/nwc-mobile/README.md) for wiring.
 
+Android foreground and background recovery use
+`NwcWorkManagerMaintenanceScheduler` and `NwcMaintenanceWorker`. Maintenance is
+unique, network-constrained work with no input payload; the worker serializes
+payment reconciliation and registration processing and propagates every stop
+signal into request-scoped Rust cancellation.
+
 Both native adapters can run `PaymentReconciler::reconcile` during foreground or
 background maintenance. A pass checks a caller-selected batch of at most 100
 unresolved payment hashes within the supplied deadline. It never quotes or
