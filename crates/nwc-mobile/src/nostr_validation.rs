@@ -238,7 +238,7 @@ impl NwcEventValidator {
             return Err(NostrEventError::UnexpectedRecipient);
         }
 
-        let created_at = UnixTimestamp::from_secs(event.created_at.as_u64());
+        let created_at = UnixTimestamp::from_secs(event.created_at.as_secs());
         if !self.policy.accepts_event_time(created_at, now) {
             return Err(NostrEventError::InvalidCreatedAt);
         }

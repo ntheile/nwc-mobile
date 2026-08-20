@@ -18,7 +18,7 @@ getrandom = "0.3.4"
 # Keep URL parsing compatible with the workspace's Rust 1.84 MSRV. Newer
 # idna_adapter releases use Edition 2024 manifests that Cargo 1.84 cannot parse.
 idna_adapter = "=1.1.0"
-nostr = { version = "=0.43.1", features = ["nip04", "nip44"] }
+nostr = { version = "=0.44.7", features = ["nip04", "nip44"] }
 url = "2.5.8"
 zeroize = "=1.8.2"
 
