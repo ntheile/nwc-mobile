@@ -11,7 +11,7 @@ publish = false
 # Clap 4.6 uses Edition 2024 manifests and requires Rust 1.85. Keep the
 # workspace tool compatible with the repository's Rust 1.84 minimum.
 clap = { version = "=4.5.61", default-features = false }
-clap_lex = "=1.0.0"
+clap_lex = "=1.1.0"
 smawk = "=0.3.2"
 uniffi = { version = "=0.29.4", features = ["cli"] }
 
