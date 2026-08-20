@@ -46,10 +46,9 @@ done
 grep -F 'open class MobileNwcEngine' "${swift_source}" >/dev/null
 grep -F 'public protocol MobileWalletBackend' "${swift_source}" >/dev/null
 grep -F 'func executeWake' "${swift_source}" >/dev/null
-grep -F 'func reconcilePayments' "${swift_source}" >/dev/null
-grep -F 'func processWakeRegistrations' "${swift_source}" >/dev/null
+grep -E 'func reconcilePayments\(.*async throws' "${swift_source}" >/dev/null
+grep -E 'func processWakeRegistrations\(.*async throws' "${swift_source}" >/dev/null
 grep -F 'public protocol MobileWakeRegistrationTransport' "${swift_source}" >/dev/null
-grep -F 'async throws' "${swift_source}" >/dev/null
 grep -F 'package org.nwc.mobile' "${kotlin_source}" >/dev/null
 grep -F 'open class MobileNwcEngine' "${kotlin_source}" >/dev/null
 grep -F 'public interface MobileWalletBackend' "${kotlin_source}" >/dev/null
