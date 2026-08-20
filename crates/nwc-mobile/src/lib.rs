@@ -7,12 +7,14 @@
 #![forbid(unsafe_code)]
 
 mod error;
+mod nwa;
 mod outcome;
 mod policy;
 mod time;
 mod types;
 
 pub use error::DomainError;
+pub use nwa::{NwaCallback, NwaError, NwaParsePolicy, NwaRequest, NwaRequestId};
 pub use outcome::{NotificationHint, QueueReason, RejectionCode, RetryReason, WakeDisposition};
 pub use policy::{BudgetInterval, BudgetPolicy, ConnectionPolicy, FeePolicy, WakePolicy};
 pub use time::{BackgroundBudget, Clock, SystemClock, UnixTimestamp};
