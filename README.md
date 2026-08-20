@@ -19,8 +19,8 @@ Native code remains a thin operating-system adapter. Swift and Kotlin receive
 pushes, supply secure-storage and wallet capabilities, schedule background work,
 and render generic notification content; they do not duplicate NWC policy.
 
-> **Status:** Pre-implementation architecture. The public API and storage schema
-> are not stable yet.
+> **Status:** Early development. The public API and storage schema are not stable
+> yet, and payment execution has not been implemented.
 
 ## How a wake request works
 
@@ -270,10 +270,20 @@ The initial implementation should make these properties directly testable:
 
 ## Development
 
-The project has not been scaffolded yet. Expected validation will include Rust
-unit and property tests, SQLite concurrency tests, process-kill recovery tests,
-UniFFI binding checks, Swift NSE tests, Android WorkManager tests, and physical
-device deadline/resource measurements.
+The repository is a Cargo workspace. Run the baseline checks with:
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+```
+
+Future validation will include Rust unit and property tests, SQLite concurrency
+tests, process-kill recovery tests, UniFFI binding checks, Swift NSE tests,
+Android WorkManager tests, and physical-device deadline/resource measurements.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution and test-fixture rules.
 
 ## License
 

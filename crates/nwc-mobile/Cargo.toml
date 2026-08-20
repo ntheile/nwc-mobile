@@ -1,0 +1,14 @@
+[package]
+name = "nwc-mobile"
+description = "Secure Nostr Wallet Connect infrastructure for mobile wallets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["bitcoin", "lightning", "nostr", "nwc", "mobile"]
+categories = ["cryptography::cryptocurrencies"]
+publish = false
+
+[lints]
+workspace = true
