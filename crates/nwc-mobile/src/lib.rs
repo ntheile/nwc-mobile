@@ -11,6 +11,7 @@ mod engine;
 mod error;
 mod host;
 mod ledger;
+mod nip98;
 mod nostr_validation;
 mod nwa;
 mod outcome;
@@ -35,6 +36,7 @@ pub use host::{
     TransactionDirection, WalletBackend, WalletInfo, WalletTransaction,
 };
 pub use ledger::{ClaimOutcome, EventLease, LedgerError, TerminalEvent, TerminalKind, WakeLedger};
+pub use nip98::{Nip98Authorization, Nip98AuthorizationError, Nip98SigningKey};
 pub use nostr_validation::{
     DecryptedNwcRequest, NostrEventError, NwcEncryption, NwcEventValidator, NwcSecretKey,
     ValidatedNwcEvent,
