@@ -16,7 +16,7 @@ publish = false
 # MSRV; Cargo includes them when resolving the complete feature graph.
 base64ct = "=1.7.3"
 base64 = "=0.22.1"
-getrandom = "0.3.4"
+getrandom = "0.4.3"
 # Keep URL parsing compatible with the workspace's Rust 1.84 MSRV. Newer
 # idna_adapter releases use Edition 2024 manifests that Cargo 1.84 cannot parse.
 idna_adapter = "=1.1.0"
