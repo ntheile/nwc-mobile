@@ -13,9 +13,9 @@ resolution and compile-time code as security-sensitive changes.
   requirements, unknown registries, and all Git dependencies. Its downloaded CI
   binary is version-pinned and verified against a committed SHA-256 digest.
 - `deny.toml` explicitly permits the crates that have build scripts.
-- `supply-chain/approved-build-units.txt` records every resolved build script and
-  procedural macro by exact version. CI fails when that execution surface
-  changes.
+- `supply-chain/approved-build-units.txt` records every resolved build script,
+  procedural macro, and transitive build dependency by exact version. CI fails
+  when that execution surface changes.
 - GitHub Actions are pinned to full commit hashes, checkout credentials are not
   persisted, and CI has read-only repository permissions.
 
@@ -32,8 +32,9 @@ Do not run broad, unaudited dependency updates. For an intended update:
 2. Update one direct dependency at a time and inspect the complete `Cargo.lock`
    diff. Use `cargo tree --invert <crate>` to explain each new transitive crate.
 3. Run `./scripts/check-build-units.sh`. If it fails, inspect the source and
-   ownership history of every new build script or procedural macro. Confirm that
-   the publisher and repository match the expected project.
+   ownership history of every new build script, procedural macro, or build
+   dependency. Confirm that the publisher and repository match the expected
+   project.
 4. If the change is approved, update both `deny.toml` and
    `supply-chain/approved-build-units.txt` with exact versions in the same PR.
 5. Run the full checks with `--locked` in an isolated environment that has no
