@@ -1,0 +1,15 @@
+[package]
+name = "nwc-mobile-uniffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[dependencies]
+nwc-mobile = { version = "=0.1.0", path = "../nwc-mobile" }
+uniffi = { version = "=0.29.4", default-features = false }
