@@ -1,0 +1,16 @@
+[workspace]
+members = ["crates/nwc-mobile"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.84"
+repository = "https://github.com/ntheile/nwc-mobile"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
