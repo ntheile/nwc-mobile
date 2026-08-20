@@ -19,6 +19,7 @@ getrandom = "0.3.4"
 # idna_adapter releases use Edition 2024 manifests that Cargo 1.84 cannot parse.
 idna_adapter = "=1.1.0"
 nostr = { version = "=0.44.7", features = ["nip04", "nip44"] }
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
 url = "2.5.8"
 zeroize = "=1.8.2"
 
