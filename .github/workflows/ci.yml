@@ -50,10 +50,11 @@ jobs:
           swift format lint --strict --recursive
           apple/NwcMobileApple/Sources
           apple/NwcMobileApple/Tests
+          Package.swift
           apple/NwcMobileApple/Package.swift
 
-      - name: Test Swift package
-        run: swift test --package-path apple/NwcMobileApple
+      - name: Test distributable Swift package
+        run: swift test
 
   quality:
     name: Format, lint, test, and document
