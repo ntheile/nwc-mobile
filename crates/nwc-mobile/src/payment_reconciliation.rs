@@ -1,10 +1,9 @@
-use std::fmt;
-use std::time::{Duration, Instant};
-
+use crate::time::OperationDeadline;
 use crate::{
-    CancellationSignal, Clock, DurablePaymentState, OperationBudget, OperationContext,
-    PaymentAccountingError, PaymentStatus, WakeLedger, WalletBackend,
+    CancellationSignal, Clock, DurablePaymentState, OperationBudget, PaymentAccountingError,
+    PaymentStatus, WakeLedger, WalletBackend,
 };
+use std::fmt;
 
 /// Maximum payment-status queries performed by one reconciliation pass.
 pub const MAX_PAYMENT_RECONCILIATION_BATCH: u16 = 100;
@@ -147,7 +146,7 @@ impl<'a> PaymentReconciler<'a> {
         let has_additional_attempts = attempts.len() > usize::from(max_attempts);
         attempts.truncate(usize::from(max_attempts));
 
-        let deadline = ReconciliationDeadline::new(budget);
+        let deadline = OperationDeadline::new(budget);
         let mut report = PaymentReconciliationReport::default();
         for attempt in attempts {
             let Some(context) = deadline.context(cancellation) else {
@@ -203,36 +202,6 @@ impl<'a> PaymentReconciler<'a> {
     }
 }
 
-struct ReconciliationDeadline {
-    started: Instant,
-    budget: OperationBudget,
-}
-
-impl ReconciliationDeadline {
-    fn new(budget: OperationBudget) -> Self {
-        Self {
-            started: Instant::now(),
-            budget,
-        }
-    }
-
-    fn remaining(&self) -> Duration {
-        self.budget.timeout().saturating_sub(self.started.elapsed())
-    }
-
-    fn context<'a>(
-        &self,
-        cancellation: &'a dyn CancellationSignal,
-    ) -> Option<OperationContext<'a>> {
-        if cancellation.is_cancelled() {
-            return None;
-        }
-        OperationBudget::new(self.remaining())
-            .ok()
-            .map(|budget| OperationContext::new(budget, cancellation))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -242,14 +211,15 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Wake, Waker};
+    use std::time::Duration;
 
     use crate::{
         AmountMsat, AmountSat, BudgetInterval, BudgetPolicy, ConnectionId, ConnectionPolicy,
         CreatedInvoice, DurablePaymentState, EventId, FeePolicy, HostError, HostErrorKind,
         HostFuture, InvoiceLookup, ListTransactionsRequest, MakeInvoiceRequest, NewConnection,
-        NwcEncryption, NwcMethod, PayInvoiceRequest, PaymentFailure, PaymentHash, PaymentPreimage,
-        PaymentQuote, PublicKey, SecureRelayUrl, UnixTimestamp, WakePolicy, WalletInfo,
-        WalletTransaction,
+        NwcEncryption, NwcMethod, OperationContext, PayInvoiceRequest, PaymentFailure, PaymentHash,
+        PaymentPreimage, PaymentQuote, PublicKey, SecureRelayUrl, UnixTimestamp, WakePolicy,
+        WalletInfo, WalletTransaction,
     };
 
     use super::*;

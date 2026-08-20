@@ -20,6 +20,7 @@ mod policy;
 mod time;
 mod types;
 mod wake_registration;
+mod wake_registration_worker;
 
 pub use connection_registry::{
     ActiveConnection, ConnectionTombstone, NewConnection, RegistryError, StoredConnection,
@@ -30,8 +31,8 @@ pub use host::{
     AmountMsat, AmountSat, CancellationSignal, CreatedInvoice, HostError, HostErrorKind,
     HostFuture, InvoiceLookup, ListTransactionsRequest, MakeInvoiceRequest, NeverCancelled,
     OperationBudget, OperationContext, PayInvoiceRequest, PaymentFailure, PaymentQuote,
-    PaymentStatus, RelayTransport, SecretProvider, SecureRelayUrl, TransactionDirection,
-    WalletBackend, WalletInfo, WalletTransaction,
+    PaymentStatus, RelayTransport, SecretProvider, SecureRelayUrl, SecureWakeServerUrl,
+    TransactionDirection, WalletBackend, WalletInfo, WalletTransaction,
 };
 pub use ledger::{ClaimOutcome, EventLease, LedgerError, TerminalEvent, TerminalKind, WakeLedger};
 pub use nostr_validation::{
@@ -55,4 +56,8 @@ pub use types::{
 };
 pub use wake_registration::{
     WakeRegistrationChange, WakeRegistrationError, MAX_WAKE_REGISTRATION_BATCH,
+};
+pub use wake_registration_worker::{
+    WakeRegistrationTransport, WakeRegistrationWorker, WakeRegistrationWorkerError,
+    WakeRegistrationWorkerReport,
 };

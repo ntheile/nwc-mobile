@@ -1,6 +1,6 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::DomainError;
+use crate::{CancellationSignal, DomainError, OperationBudget, OperationContext};
 
 /// A whole-second timestamp relative to the Unix epoch.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -78,6 +78,36 @@ impl BackgroundBudget {
     #[must_use]
     pub fn execution_budget(self) -> Duration {
         self.total - self.cleanup_reserve
+    }
+}
+
+pub(crate) struct OperationDeadline {
+    started: Instant,
+    budget: OperationBudget,
+}
+
+impl OperationDeadline {
+    pub(crate) fn new(budget: OperationBudget) -> Self {
+        Self {
+            started: Instant::now(),
+            budget,
+        }
+    }
+
+    pub(crate) fn remaining(&self) -> Duration {
+        self.budget.timeout().saturating_sub(self.started.elapsed())
+    }
+
+    pub(crate) fn context<'a>(
+        &self,
+        cancellation: &'a dyn CancellationSignal,
+    ) -> Option<OperationContext<'a>> {
+        if cancellation.is_cancelled() {
+            return None;
+        }
+        OperationBudget::new(self.remaining())
+            .ok()
+            .map(|budget| OperationContext::new(budget, cancellation))
     }
 }
 

@@ -33,6 +33,8 @@ pub enum DomainError {
     InvalidOperationBudget,
     /// A relay URL was malformed or did not use secure WebSockets.
     InvalidRelayUrl,
+    /// A wake-provider URL was malformed or did not use HTTPS.
+    InvalidWakeServerUrl,
     /// A wake policy contained incompatible bounds.
     InvalidWakePolicy,
     /// Adding the fee reserve to a payment principal would overflow.
@@ -62,6 +64,9 @@ impl fmt::Display for DomainError {
                 formatter.write_str("host operation budget must be non-zero")
             }
             Self::InvalidRelayUrl => formatter.write_str("relay URL is invalid or insecure"),
+            Self::InvalidWakeServerUrl => {
+                formatter.write_str("wake-provider URL is invalid or insecure")
+            }
             Self::InvalidWakePolicy => formatter.write_str("wake policy bounds are inconsistent"),
             Self::PaymentAmountOverflow => {
                 formatter.write_str("payment amount and fee reserve overflowed")
