@@ -34,6 +34,7 @@ pub struct WakeEngine<'a> {
     secrets: &'a dyn SecretProvider,
     clock: &'a dyn Clock,
     validator: NwcEventValidator,
+    maximum_event_bytes: usize,
 }
 
 impl<'a> WakeEngine<'a> {
@@ -54,6 +55,7 @@ impl<'a> WakeEngine<'a> {
             secrets,
             clock,
             validator: NwcEventValidator::new(policy),
+            maximum_event_bytes: policy.maximum_payload_bytes(),
         }
     }
 
@@ -89,10 +91,13 @@ impl<'a> WakeEngine<'a> {
             };
             match self
                 .relays
-                .fetch_event(&relay, wake.event_id(), context)
+                .fetch_event(&relay, wake.event_id(), self.maximum_event_bytes, context)
                 .await
             {
                 Ok(Some(event)) => event,
+                Err(error) if error.kind() == HostErrorKind::Rejected => {
+                    return rejected(RejectionCode::InvalidEvent)
+                }
                 Ok(None) | Err(_) => {
                     return retry(ENGINE_RETRY_DELAY, RetryReason::RelayUnavailable)
                 }
@@ -1136,6 +1141,7 @@ mod tests {
         fetched_event: Mutex<Option<String>>,
         published: Mutex<Vec<String>>,
         fetch_calls: AtomicUsize,
+        maximum_fetch_bytes: AtomicUsize,
         fail_next_publish: AtomicBool,
     }
 
@@ -1144,10 +1150,20 @@ mod tests {
             &'a self,
             _relay: &'a SecureRelayUrl,
             _event_id: &'a crate::EventId,
+            maximum_event_bytes: usize,
             _context: OperationContext<'a>,
         ) -> HostFuture<'a, Result<Option<String>, HostError>> {
             self.fetch_calls.fetch_add(1, Ordering::SeqCst);
-            let event = self.fetched_event.lock().expect("fetch lock").clone();
+            self.maximum_fetch_bytes
+                .store(maximum_event_bytes, Ordering::SeqCst);
+            let event = self.fetched_event.lock().expect("fetch lock");
+            if event
+                .as_ref()
+                .is_some_and(|event| event.len() > maximum_event_bytes)
+            {
+                return Box::pin(async { Err(HostError::new(HostErrorKind::Rejected)) });
+            }
+            let event = event.clone();
             Box::pin(async move { Ok(event) })
         }
 
@@ -1473,7 +1489,49 @@ mod tests {
             }
         ));
         assert_eq!(relay.fetch_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            relay.maximum_fetch_bytes.load(Ordering::SeqCst),
+            WakePolicy::default().maximum_payload_bytes()
+        );
         assert_eq!(wallet.balance_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn oversized_relay_event_is_rejected_at_transport_receive_bound() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        insert_connection(&ledger);
+        let wallet = TestWallet::default();
+        let relay = TestRelay::default();
+        const TEST_EVENT_LIMIT: usize = 1_024;
+        *relay.fetched_event.lock().expect("fetch lock") = Some("x".repeat(TEST_EVENT_LIMIT + 1));
+        let secrets = TestSecrets::wallet();
+        let clock = FixedClock::new(100);
+        let policy = WakePolicy::new(
+            Duration::from_secs(10 * 60),
+            Duration::from_secs(30),
+            Duration::from_secs(24 * 60 * 60),
+            TEST_EVENT_LIMIT,
+            2,
+        )
+        .expect("test wake policy");
+        let engine = WakeEngine::new(&ledger, &wallet, &relay, &secrets, &clock, policy);
+        let event = request_event(Request::get_balance(), 100);
+
+        assert!(matches!(
+            execute(&engine, wake(&event, RELAY, false)),
+            WakeDisposition::Rejected {
+                code: RejectionCode::InvalidEvent,
+                ..
+            }
+        ));
+        assert_eq!(relay.fetch_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            relay.maximum_fetch_bytes.load(Ordering::SeqCst),
+            TEST_EVENT_LIMIT
+        );
+        assert_eq!(wallet.balance_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(secrets.loads.load(Ordering::SeqCst), 0);
     }
 
     #[test]
