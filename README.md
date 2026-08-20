@@ -377,7 +377,12 @@ cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
+./scripts/check-native-contract.sh
 ```
+
+See [`RELEASING.md`](RELEASING.md) for the source-release verification and
+artifact-handling checklist. Crate and native artifact publishing remain
+disabled while the public API and storage schema are unstable.
 
 Dependency changes must also pass the review and CI controls documented in
 [`SUPPLY_CHAIN.md`](SUPPLY_CHAIN.md).

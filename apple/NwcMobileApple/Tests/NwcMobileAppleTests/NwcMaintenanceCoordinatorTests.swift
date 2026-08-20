@@ -35,6 +35,12 @@ private actor ControlledMaintenanceExecutor: NwcMaintenanceExecutor {
     paymentContinuation = nil
   }
 
+  func waitForPaymentCall() async {
+    while paymentContinuation == nil {
+      await Task.yield()
+    }
+  }
+
   func failPayments() {
     paymentContinuation?.resume(throwing: MaintenanceTestError.unavailable)
     paymentContinuation = nil
@@ -43,6 +49,12 @@ private actor ControlledMaintenanceExecutor: NwcMaintenanceExecutor {
   func resolveRegistrations(_ report: NwcRegistrationMaintenanceReport) {
     registrationContinuation?.resume(returning: report)
     registrationContinuation = nil
+  }
+
+  func waitForRegistrationCall() async {
+    while registrationContinuation == nil {
+      await Task.yield()
+    }
   }
 }
 
@@ -77,9 +89,9 @@ final class NwcMaintenanceCoordinatorTests: XCTestCase {
         result.set(disposition)
         completed.fulfill()
       })
-    await Task.yield()
+    await executor.waitForPaymentCall()
     await executor.resolvePayments(paymentReport)
-    await Task.yield()
+    await executor.waitForRegistrationCall()
     await executor.resolveRegistrations(registrationReport)
     await fulfillment(of: [completed], timeout: 1)
 
@@ -102,7 +114,7 @@ final class NwcMaintenanceCoordinatorTests: XCTestCase {
         result.set(disposition)
         completed.fulfill()
       })
-    await Task.yield()
+    await executor.waitForPaymentCall()
     await executor.failPayments()
     await fulfillment(of: [completed], timeout: 1)
 
@@ -124,7 +136,7 @@ final class NwcMaintenanceCoordinatorTests: XCTestCase {
         result.set(disposition)
         completed.fulfill()
       })
-    await Task.yield()
+    await executor.waitForPaymentCall()
     coordinator.cancel()
     await executor.resolvePayments(paymentReport)
     await fulfillment(of: [completed], timeout: 1)

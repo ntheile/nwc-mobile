@@ -59,6 +59,7 @@ maintainer trust.
 ```sh
 cargo deny --locked --all-features check advisories bans licenses sources
 ./scripts/check-build-units.sh
+./scripts/check-native-contract.sh
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --locked --workspace --all-features
 gradle --project-dir android/nwc-mobile --no-daemon build lint
