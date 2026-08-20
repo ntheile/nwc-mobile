@@ -808,8 +808,10 @@ fn str_to_method(value: &str) -> Result<NwcMethod, RegistryError> {
 mod tests {
     use std::fs;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use super::*;
+    use crate::{ClaimOutcome, LedgerError};
 
     const CLIENT: &str = "687dd8ece211539364549b1f32c63eceec1e0661009ba65cf8ff2e73ba000746";
     const WALLET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -964,6 +966,88 @@ mod tests {
                 .expect("tombstone metadata count");
             assert_eq!(count, 0);
         }
+    }
+
+    #[test]
+    fn terminal_completion_is_atomic_with_active_revision() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        let active = ledger
+            .insert_connection(
+                new_connection(connection_id()),
+                UnixTimestamp::from_secs(90),
+            )
+            .expect("insert connection");
+
+        let completed_id = crate::EventId::from_bytes([9_u8; 32]);
+        let ClaimOutcome::Acquired(completed_lease) = ledger
+            .claim_event(
+                &completed_id,
+                active.id(),
+                active.revision(),
+                UnixTimestamp::from_secs(100),
+                Duration::from_secs(10),
+            )
+            .expect("claim active event")
+        else {
+            panic!("active event was not acquired");
+        };
+        ledger
+            .complete_event_for_active_connection(
+                &completed_lease,
+                active.id(),
+                active.revision(),
+                "encrypted-response",
+                UnixTimestamp::from_secs(101),
+            )
+            .expect("complete active event");
+
+        let revoked_id = crate::EventId::from_bytes([10_u8; 32]);
+        let ClaimOutcome::Acquired(revoked_lease) = ledger
+            .claim_event(
+                &revoked_id,
+                active.id(),
+                active.revision(),
+                UnixTimestamp::from_secs(102),
+                Duration::from_secs(10),
+            )
+            .expect("claim event before revocation")
+        else {
+            panic!("event before revocation was not acquired");
+        };
+        assert!(ledger
+            .is_connection_revision_active(active.id(), active.revision())
+            .expect("pre-completion revision check"));
+        ledger
+            .tombstone_connection(
+                active.id(),
+                active.revision(),
+                UnixTimestamp::from_secs(103),
+            )
+            .expect("tombstone between check and completion");
+
+        assert_eq!(
+            ledger.complete_event_for_active_connection(
+                &revoked_lease,
+                active.id(),
+                active.revision(),
+                "must-not-persist",
+                UnixTimestamp::from_secs(104),
+            ),
+            Err(LedgerError::ConnectionUnavailable)
+        );
+        assert!(matches!(
+            ledger
+                .claim_event(
+                    &revoked_id,
+                    active.id(),
+                    active.revision(),
+                    UnixTimestamp::from_secs(105),
+                    Duration::from_secs(10),
+                )
+                .expect("inspect nonterminal event"),
+            ClaimOutcome::InProgress { .. }
+        ));
     }
 
     #[test]

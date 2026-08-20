@@ -7,6 +7,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.84"
 repository = "https://github.com/ntheile/nwc-mobile"
+license = "MIT"
 
 [workspace.lints.rust]
 missing_docs = "warn"

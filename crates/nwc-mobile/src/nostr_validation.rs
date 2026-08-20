@@ -281,6 +281,32 @@ impl NwcEventValidator {
         encryption: NwcEncryption,
         now: UnixTimestamp,
     ) -> Result<ValidatedNwcEvent, NostrEventError> {
+        let validated = self.validate_request_for_replay(
+            event_json,
+            expected_event_id,
+            expected_client_pubkey,
+            expected_wallet_service_pubkey,
+            encryption,
+        )?;
+        if !self.accepts_event_time(validated.created_at(), now) {
+            return Err(NostrEventError::InvalidCreatedAt);
+        }
+        Ok(validated)
+    }
+
+    /// Validates every authenticated request property except freshness.
+    ///
+    /// The engine uses this only to consult durable replay state before applying
+    /// current-time freshness. A newly acquired event must still pass
+    /// `accepts_event_time` before decryption or host access.
+    pub(crate) fn validate_request_for_replay(
+        &self,
+        event_json: &str,
+        expected_event_id: &EventId,
+        expected_client_pubkey: &PublicKey,
+        expected_wallet_service_pubkey: &PublicKey,
+        encryption: NwcEncryption,
+    ) -> Result<ValidatedNwcEvent, NostrEventError> {
         if event_json.len() > self.policy.maximum_payload_bytes() {
             return Err(NostrEventError::PayloadTooLarge);
         }
@@ -303,9 +329,6 @@ impl NwcEventValidator {
         }
 
         let created_at = UnixTimestamp::from_secs(event.created_at.as_secs());
-        if !self.policy.accepts_event_time(created_at, now) {
-            return Err(NostrEventError::InvalidCreatedAt);
-        }
         if !ciphertext_matches(encryption, &event.content) {
             return Err(NostrEventError::InvalidCiphertext);
         }
@@ -319,6 +342,12 @@ impl NwcEventValidator {
             ciphertext: event.content,
             maximum_plaintext_bytes: self.policy.maximum_payload_bytes(),
         })
+    }
+
+    /// Returns whether a fully authenticated event is fresh at the supplied time.
+    #[must_use]
+    pub(crate) fn accepts_event_time(&self, created_at: UnixTimestamp, now: UnixTimestamp) -> bool {
+        self.policy.accepts_event_time(created_at, now)
     }
 }
 

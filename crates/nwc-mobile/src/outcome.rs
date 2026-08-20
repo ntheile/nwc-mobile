@@ -41,6 +41,8 @@ pub enum RetryReason {
     WalletUnavailable,
     /// Publishing a response failed after the result was persisted.
     ResponsePublishFailed,
+    /// A response could not be committed before its claim was lost.
+    ResponsePersistenceFailed,
     /// A wake-provider registration operation failed transiently.
     RegistrationUnavailable,
 }
