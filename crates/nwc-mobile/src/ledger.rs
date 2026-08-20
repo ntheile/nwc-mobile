@@ -7,7 +7,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBeha
 
 use crate::{ConnectionId, ConnectionRevision, EventId, UnixTimestamp};
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 const CLAIM_TOKEN_BYTES: usize = 16;
 const MAX_RESPONSE_EVENT_BYTES: usize = 128 * 1024;
 const MAX_PRUNE_BATCH: usize = 1_000;
@@ -144,6 +144,50 @@ CREATE TABLE payment_attempts (
 
 CREATE INDEX payment_attempts_connection_state
     ON payment_attempts(connection_id, state, updated_at);
+"#;
+
+pub(crate) const CREATE_WAKE_REGISTRATION_SCHEMA: &str = r#"
+CREATE TABLE wake_registration_outbox (
+    connection_id        TEXT PRIMARY KEY NOT NULL
+                         REFERENCES connections(connection_id) ON DELETE RESTRICT,
+    connection_revision  INTEGER NOT NULL CHECK(connection_revision >= 0),
+    desired_enabled      INTEGER NOT NULL CHECK(desired_enabled IN (0, 1)),
+    client_pubkey        BLOB NOT NULL
+                         CHECK(typeof(client_pubkey) = 'blob' AND length(client_pubkey) = 32),
+    wallet_service_pubkey BLOB NOT NULL
+                         CHECK(typeof(wallet_service_pubkey) = 'blob' AND
+                               length(wallet_service_pubkey) = 32),
+    attempt_count        INTEGER NOT NULL DEFAULT 0
+                         CHECK(attempt_count BETWEEN 0 AND 2147483647),
+    available_at         INTEGER NOT NULL CHECK(available_at >= 0),
+    updated_at           INTEGER NOT NULL CHECK(updated_at >= 0)
+) STRICT;
+
+CREATE INDEX wake_registration_outbox_due
+    ON wake_registration_outbox(available_at, connection_id);
+
+CREATE TABLE wake_registration_relays (
+    connection_id TEXT NOT NULL
+                  REFERENCES wake_registration_outbox(connection_id) ON DELETE CASCADE,
+    position      INTEGER NOT NULL CHECK(position >= 0),
+    relay_url     TEXT NOT NULL,
+    PRIMARY KEY(connection_id, position),
+    UNIQUE(connection_id, relay_url)
+) STRICT;
+
+INSERT INTO wake_registration_outbox (
+    connection_id, connection_revision, desired_enabled,
+    client_pubkey, wallet_service_pubkey, available_at, updated_at
+)
+SELECT connection_id, revision, 1, client_pubkey, wallet_service_pubkey,
+       updated_at, updated_at
+FROM connections
+WHERE status = 'active';
+
+INSERT INTO wake_registration_relays (connection_id, position, relay_url)
+SELECT r.connection_id, r.position, r.relay_url
+FROM connection_relays AS r
+JOIN wake_registration_outbox AS o ON o.connection_id = r.connection_id;
 "#;
 
 /// A stable, non-sensitive durable-ledger error.
@@ -608,6 +652,10 @@ fn migrate(connection: &mut Connection) -> Result<(), LedgerError> {
         transaction.execute_batch(CREATE_PAYMENT_SCHEMA)?;
         version = 3;
     }
+    if version == 3 {
+        transaction.execute_batch(CREATE_WAKE_REGISTRATION_SCHEMA)?;
+        version = 4;
+    }
     if version != SCHEMA_VERSION {
         return Err(LedgerError::UnsupportedSchema);
     }
@@ -704,6 +752,8 @@ mod tests {
     use super::*;
 
     const EVENT_HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const CLIENT_HEX: &str = "687dd8ece211539364549b1f32c63eceec1e0661009ba65cf8ff2e73ba000746";
+    const WALLET_HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     struct TestDatabase {
         directory: PathBuf,
@@ -788,6 +838,60 @@ mod tests {
             .expect("connection table");
         assert_eq!(version, SCHEMA_VERSION);
         assert_eq!(connection_table, "connections");
+    }
+
+    #[test]
+    fn version_three_migration_queues_existing_active_registration() {
+        let database = TestDatabase::new();
+        {
+            let connection = Connection::open(&database.path).expect("create v3 database");
+            connection.execute_batch(CREATE_SCHEMA).expect("v1 schema");
+            connection
+                .execute_batch(CREATE_CONNECTION_SCHEMA)
+                .expect("v2 schema");
+            connection
+                .execute_batch(CREATE_PAYMENT_SCHEMA)
+                .expect("v3 schema");
+            connection
+                .pragma_update(None, "user_version", 3_i64)
+                .expect("v3 version");
+            let client = crate::PublicKey::from_hex(CLIENT_HEX).expect("client key");
+            let wallet = crate::PublicKey::from_hex(WALLET_HEX).expect("wallet key");
+            connection
+                .execute(
+                    "INSERT INTO connections (
+                        connection_id, revision, status, client_pubkey,
+                        wallet_service_pubkey, encryption, budget_limit_sat,
+                        budget_interval, fee_policy, maximum_fee_sat,
+                        created_at, updated_at, tombstoned_at
+                     ) VALUES (?1, 0, 'active', ?2, ?3, 'nip44_v2', 0,
+                               'never', 'exclude', 0, 100, 100, NULL)",
+                    params![
+                        connection_id().as_str(),
+                        client.as_bytes().as_slice(),
+                        wallet.as_bytes().as_slice(),
+                    ],
+                )
+                .expect("v3 connection");
+            connection
+                .execute(
+                    "INSERT INTO connection_relays (connection_id, position, relay_url)
+                     VALUES (?1, 0, 'wss://relay.example.com/')",
+                    params![connection_id().as_str()],
+                )
+                .expect("v3 relay");
+        }
+
+        let ledger = WakeLedger::open(&database.path).expect("migrate v3 ledger");
+        let change = ledger
+            .load_due_wake_registrations(UnixTimestamp::from_secs(100), 1)
+            .expect("load seeded registration")
+            .pop()
+            .expect("seeded registration");
+        assert!(change.enabled());
+        assert_eq!(change.connection_id(), &connection_id());
+        assert_eq!(change.connection_revision(), ConnectionRevision::INITIAL);
+        assert_eq!(change.relays().len(), 1);
     }
 
     #[test]

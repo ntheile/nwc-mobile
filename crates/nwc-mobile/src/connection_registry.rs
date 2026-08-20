@@ -345,6 +345,24 @@ impl WakeLedger {
                 ],
             )?;
         }
+        transaction.execute(
+            "INSERT INTO wake_registration_outbox (
+                connection_id, connection_revision, desired_enabled,
+                client_pubkey, wallet_service_pubkey, available_at, updated_at
+             ) VALUES (?1, 0, 1, ?2, ?3, ?4, ?4)",
+            params![
+                new_connection.id.as_str(),
+                new_connection.client_pubkey.as_bytes().as_slice(),
+                new_connection.wallet_service_pubkey.as_bytes().as_slice(),
+                now_sql,
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO wake_registration_relays (connection_id, position, relay_url)
+             SELECT connection_id, position, relay_url
+             FROM connection_relays WHERE connection_id = ?1",
+            params![new_connection.id.as_str()],
+        )?;
         transaction.commit()?;
 
         Ok(ActiveConnection {
@@ -536,6 +554,32 @@ impl WakeLedger {
         if updated != 1 {
             return Err(RegistryError::StaleRevision);
         }
+        transaction.execute(
+            "INSERT INTO wake_registration_outbox (
+                connection_id, connection_revision, desired_enabled,
+                client_pubkey, wallet_service_pubkey, attempt_count,
+                available_at, updated_at
+             )
+             SELECT connection_id, ?2, 0, client_pubkey, wallet_service_pubkey, 0, ?3, ?3
+             FROM connections WHERE connection_id = ?1
+             ON CONFLICT(connection_id) DO UPDATE SET
+                 connection_revision = excluded.connection_revision,
+                 desired_enabled = 0,
+                 client_pubkey = excluded.client_pubkey,
+                 wallet_service_pubkey = excluded.wallet_service_pubkey,
+                 attempt_count = 0,
+                 available_at = excluded.available_at,
+                 updated_at = excluded.updated_at",
+            params![id.as_str(), next_sql, now_sql],
+        )?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO wake_registration_relays (
+                connection_id, position, relay_url
+             )
+             SELECT connection_id, position, relay_url
+             FROM connection_relays WHERE connection_id = ?1",
+            params![id.as_str()],
+        )?;
         transaction.execute(
             "DELETE FROM connection_methods WHERE connection_id = ?1",
             params![id.as_str()],
