@@ -270,6 +270,14 @@ rejects plaintext HTTP, embedded credentials, fragments, malformed hosts, and
 oversized endpoints before native networking begins; transports must also
 disable redirects.
 
+Registration transports can build the required NIP-98 header with
+`Nip98Authorization::for_registration_post`. The signed kind-27235 event binds
+the canonical endpoint, POST method, and SHA-256 request-body hash, and includes
+an explicit expiration tag fixed at 60 seconds after creation. Signing key and
+header wrappers redact debug output and zeroize their buffers on drop. Providers
+must verify the signature, request bindings, expiration, and monotonic connection
+revision before applying the change.
+
 ## Security invariants
 
 The initial implementation should make these properties directly testable:

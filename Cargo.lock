@@ -457,6 +457,7 @@ dependencies = [
 name = "nwc-mobile"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "base64ct",
  "getrandom 0.3.4",
  "idna_adapter",
