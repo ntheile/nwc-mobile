@@ -105,7 +105,9 @@ public final class NwcNotificationServiceAdapter: @unchecked Sendable {
     content.summaryArgument = ""
     content.summaryArgumentCount = 0
     #if os(iOS)
-      content.filterCriteria = nil
+      if #available(iOS 16.0, *) {
+        content.filterCriteria = nil
+      }
       content.launchImageName = ""
     #endif
 
