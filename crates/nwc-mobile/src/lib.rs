@@ -15,6 +15,7 @@ mod ledger;
 mod nip98;
 mod nostr_validation;
 mod nwa;
+mod nwc_info;
 mod outcome;
 mod payment_accounting;
 mod payment_reconciliation;
@@ -46,6 +47,7 @@ pub use nostr_validation::{
     ValidatedNwcEvent,
 };
 pub use nwa::{NwaCallback, NwaError, NwaParsePolicy, NwaRequest, NwaRequestId};
+pub use nwc_info::{build_nwc_info_event, NwcInfoEventError};
 pub use outcome::{NotificationHint, QueueReason, RejectionCode, RetryReason, WakeDisposition};
 pub use payment_accounting::{
     DurablePaymentState, PaymentAccountingError, PaymentAttempt, PaymentReservationOutcome,
