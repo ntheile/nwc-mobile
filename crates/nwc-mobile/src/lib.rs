@@ -27,7 +27,9 @@ mod wake_registration_worker;
 pub use connection_registry::{
     ActiveConnection, ConnectionTombstone, NewConnection, RegistryError, StoredConnection,
 };
-pub use connection_service::ConnectionManager;
+pub use connection_service::{
+    ApprovedNwaConnection, ConnectionManager, NwaApproval, NwaApprovalError,
+};
 pub use engine::{ReadOnlyWakeEngine, WakeEngine};
 pub use error::DomainError;
 pub use host::{
