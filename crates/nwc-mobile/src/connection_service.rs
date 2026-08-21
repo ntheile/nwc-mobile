@@ -8,6 +8,7 @@ use std::fmt;
 /// A wallet-reviewed NWA grant ready for authority-subset validation.
 #[derive(Clone, Eq, PartialEq)]
 pub struct NwaApproval {
+    request_id: crate::NwaRequestId,
     connection_id: ConnectionId,
     wallet_service_pubkey: PublicKey,
     relays: Vec<SecureRelayUrl>,
@@ -20,6 +21,7 @@ impl NwaApproval {
     /// Creates an explicit approval selected by the wallet user.
     #[must_use]
     pub fn new(
+        request_id: crate::NwaRequestId,
         connection_id: ConnectionId,
         wallet_service_pubkey: PublicKey,
         relays: Vec<SecureRelayUrl>,
@@ -28,6 +30,7 @@ impl NwaApproval {
         lud16: Option<String>,
     ) -> Self {
         Self {
+            request_id,
             connection_id,
             wallet_service_pubkey,
             relays,
@@ -42,6 +45,7 @@ impl fmt::Debug for NwaApproval {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("NwaApproval")
+            .field("request_id", &"[redacted]")
             .field("connection_id", &"[redacted]")
             .field("wallet_service_pubkey", &"[redacted]")
             .field("relay_count", &self.relays.len())
@@ -87,7 +91,7 @@ impl fmt::Debug for ApprovedNwaConnection {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum NwaApprovalError {
-    /// The approval selected a relay, method, amount, or renewal outside the request.
+    /// The approval targeted a different request or exceeded its requested authority.
     AuthorityEscalation,
     /// The already-validated callback could not encode its public result.
     InvalidCallback,
@@ -178,10 +182,13 @@ impl<'a> ConnectionManager<'a> {
     ///
     /// The public callback is constructed before the registry changes so a
     /// callback encoding failure cannot leave an authorization half-approved.
+    /// The explicit wake policy must be the same configured policy used by the
+    /// wallet when accepting the request's relay set.
     pub fn approve_nwa(
         &self,
         request: NwaRequest,
         approval: NwaApproval,
+        wake_policy: WakePolicy,
     ) -> Result<ApprovedNwaConnection, NwaApprovalError> {
         validate_nwa_authority_subset(&request, &approval)?;
         let callback_relays = approval
@@ -207,7 +214,7 @@ impl<'a> ConnectionManager<'a> {
             approval.relays,
             approval.policy,
             approval.encryption,
-            WakePolicy::default(),
+            wake_policy,
         )
         .map(|connection| connection.with_expiration(request.expires_at()))?;
         let connection = self.create(connection)?;
@@ -235,12 +242,17 @@ fn validate_nwa_authority_subset(
         .policy
         .methods()
         .all(|method| requested_policy.allows(method));
-    if approval.relays.is_empty()
+    if approval.request_id != request.id()
+        || approval.relays.is_empty()
         || !relays_are_requested
         || approval.policy.methods().len() == 0
         || !methods_are_requested
         || approved_budget.limit_sat() > requested_budget.limit_sat()
         || approved_budget.interval() != requested_budget.interval()
+        || !matches!(
+            approved_budget.fee_policy(),
+            crate::FeePolicy::CountTowardBudget { .. }
+        )
     {
         return Err(NwaApprovalError::AuthorityEscalation);
     }
@@ -251,6 +263,7 @@ fn validate_nwa_authority_subset(
 mod tests {
     use std::fs;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use super::*;
     use crate::{
@@ -389,8 +402,12 @@ mod tests {
         .expect("NWA request")
     }
 
-    fn nwa_approval(methods: impl IntoIterator<Item = NwcMethod>) -> NwaApproval {
+    fn nwa_approval(
+        request: &NwaRequest,
+        methods: impl IntoIterator<Item = NwcMethod>,
+    ) -> NwaApproval {
         NwaApproval::new(
+            request.id(),
             ConnectionId::parse("connection:nwa").expect("connection id"),
             PublicKey::from_hex(WALLET).expect("wallet key"),
             vec![SecureRelayUrl::parse("wss://relay.example/nwc").expect("relay")],
@@ -416,8 +433,10 @@ mod tests {
         let clock = FixedClock(UnixTimestamp::from_secs(101));
         let manager = ConnectionManager::new(&ledger, &clock);
 
+        let request = nwa_request();
+        let approval = nwa_approval(&request, [NwcMethod::GetInfo]);
         let approved = manager
-            .approve_nwa(nwa_request(), nwa_approval([NwcMethod::GetInfo]))
+            .approve_nwa(request, approval, WakePolicy::default())
             .expect("approve NWA");
         assert!(approved.connection().policy().allows(NwcMethod::GetInfo));
         assert!(!approved.connection().policy().allows(NwcMethod::PayInvoice));
@@ -434,20 +453,23 @@ mod tests {
         let clock = FixedClock(UnixTimestamp::from_secs(101));
         let manager = ConnectionManager::new(&ledger, &clock);
 
-        let method = nwa_approval([NwcMethod::MakeInvoice]);
+        let request = nwa_request();
+        let method = nwa_approval(&request, [NwcMethod::MakeInvoice]);
         assert_eq!(
-            manager.approve_nwa(nwa_request(), method),
+            manager.approve_nwa(request, method, WakePolicy::default()),
             Err(NwaApprovalError::AuthorityEscalation)
         );
 
-        let mut relay = nwa_approval([NwcMethod::GetInfo]);
+        let request = nwa_request();
+        let mut relay = nwa_approval(&request, [NwcMethod::GetInfo]);
         relay.relays = vec![SecureRelayUrl::parse("wss://other.example").expect("relay")];
         assert_eq!(
-            manager.approve_nwa(nwa_request(), relay),
+            manager.approve_nwa(request, relay, WakePolicy::default()),
             Err(NwaApprovalError::AuthorityEscalation)
         );
 
-        let mut budget = nwa_approval([NwcMethod::GetInfo]);
+        let request = nwa_request();
+        let mut budget = nwa_approval(&request, [NwcMethod::GetInfo]);
         budget.policy = ConnectionPolicy::new(
             [NwcMethod::GetInfo],
             BudgetPolicy::new(
@@ -457,15 +479,89 @@ mod tests {
             ),
         );
         assert_eq!(
-            manager.approve_nwa(nwa_request(), budget),
+            manager.approve_nwa(request, budget, WakePolicy::default()),
             Err(NwaApprovalError::AuthorityEscalation)
         );
 
-        let mut interval = nwa_approval([NwcMethod::GetInfo]);
+        let request = nwa_request();
+        let mut interval = nwa_approval(&request, [NwcMethod::GetInfo]);
         interval.policy = ConnectionPolicy::conservative_default();
         assert_eq!(
-            manager.approve_nwa(nwa_request(), interval),
+            manager.approve_nwa(request, interval, WakePolicy::default()),
             Err(NwaApprovalError::AuthorityEscalation)
         );
+
+        let request = nwa_request();
+        let mut stale = nwa_approval(&request, [NwcMethod::GetInfo]);
+        stale.request_id = crate::NwaRequestId::from_bytes([0x55; 16]);
+        assert_ne!(stale.request_id, request.id());
+        assert_eq!(
+            manager.approve_nwa(request, stale, WakePolicy::default()),
+            Err(NwaApprovalError::AuthorityEscalation)
+        );
+
+        let request = nwa_request();
+        let mut fee_exclusion = nwa_approval(&request, [NwcMethod::GetInfo]);
+        fee_exclusion.policy = ConnectionPolicy::new(
+            [NwcMethod::GetInfo],
+            BudgetPolicy::new(
+                500,
+                BudgetInterval::Daily,
+                FeePolicy::ExcludeForCompatibility,
+            ),
+        );
+        assert_eq!(
+            manager.approve_nwa(request, fee_exclusion, WakePolicy::default()),
+            Err(NwaApprovalError::AuthorityEscalation)
+        );
+    }
+
+    #[test]
+    fn nwa_approval_uses_the_managers_configured_relay_bound() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        let clock = FixedClock(UnixTimestamp::from_secs(101));
+        let wake_policy = WakePolicy::new(
+            Duration::from_secs(10 * 60),
+            Duration::from_secs(30),
+            Duration::from_secs(24 * 60 * 60),
+            64 * 1024,
+            3,
+        )
+        .expect("wake policy");
+        let manager = ConnectionManager::new(&ledger, &clock);
+        let parse_policy = NwaParsePolicy::new(
+            8 * 1024,
+            3,
+            80,
+            Duration::from_secs(30 * 24 * 60 * 60),
+            1_000_000,
+        );
+        let request = NwaRequest::parse(
+            &format!(
+                "nostr+walletauth://{CLIENT}?relay=wss%3A%2F%2Fone.example&relay=wss%3A%2F%2Ftwo.example&relay=wss%3A%2F%2Fthree.example&request_methods=get_info"
+            ),
+            UnixTimestamp::from_secs(100),
+            &parse_policy,
+        )
+        .expect("three-relay request");
+        let approval = NwaApproval::new(
+            request.id(),
+            ConnectionId::parse("connection:three-relays").expect("connection id"),
+            PublicKey::from_hex(WALLET).expect("wallet key"),
+            request
+                .relays()
+                .iter()
+                .map(|relay| SecureRelayUrl::parse(relay).expect("relay"))
+                .collect(),
+            ConnectionPolicy::conservative_default(),
+            NwcEncryption::LegacyNip04,
+            None,
+        );
+
+        let approved = manager
+            .approve_nwa(request, approval, wake_policy)
+            .expect("approve three relays");
+        assert_eq!(approved.connection().relays().len(), 3);
     }
 }
