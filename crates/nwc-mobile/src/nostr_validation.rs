@@ -75,6 +75,17 @@ pub enum NwcEncryption {
     LegacyNip04,
 }
 
+impl NwcEncryption {
+    /// Returns the stable encryption identifier used by NWC metadata.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Nip44V2 => "nip44_v2",
+            Self::LegacyNip04 => "nip04",
+        }
+    }
+}
+
 /// An ephemeral wallet-service secret that is zeroized when dropped.
 ///
 /// Hosts should load this value only for the bounded operation that needs it
@@ -91,7 +102,7 @@ impl NwcSecretKey {
         Ok(Self(bytes))
     }
 
-    fn nostr_secret(&self) -> Result<SecretKey, NostrEventError> {
+    pub(crate) fn nostr_secret(&self) -> Result<SecretKey, NostrEventError> {
         SecretKey::from_slice(&self.0).map_err(|_| NostrEventError::InvalidSecretKey)
     }
 }
