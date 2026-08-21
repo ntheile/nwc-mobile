@@ -51,10 +51,13 @@ pub fn build_nwc_info_event(
         .map(NwcMethod::as_str)
         .collect::<Vec<_>>()
         .join(" ");
-    let mut tags = vec![Tag::custom(
-        TagKind::custom("encryption"),
-        [encryption.as_str()],
-    )];
+    let mut tags = Vec::new();
+    if encryption == NwcEncryption::Nip44V2 {
+        tags.push(Tag::custom(
+            TagKind::custom("encryption"),
+            [encryption.as_str()],
+        ));
+    }
     if let Some(client_pubkey) = client_pubkey {
         tags.push(Tag::public_key(NostrPublicKey::from_byte_array(
             *client_pubkey.as_bytes(),
@@ -108,10 +111,30 @@ mod tests {
             fields.first().is_some_and(|field| field == "p")
                 && fields.get(1).is_some_and(|field| field == &client.to_hex())
         }));
+        assert!(!event.tags.iter().any(|tag| {
+            let fields = tag.as_slice();
+            fields.first().is_some_and(|field| field == "encryption")
+        }));
+    }
+
+    #[test]
+    fn nip44_info_event_advertises_encryption() {
+        let wallet_secret = NwcSecretKey::from_bytes([7_u8; 32]).expect("wallet secret");
+        let json = build_nwc_info_event(
+            &wallet_secret,
+            None,
+            [NwcMethod::GetInfo],
+            NwcEncryption::Nip44V2,
+            UnixTimestamp::from_secs(1_700_000_000),
+        )
+        .expect("info event");
+        let event = Event::from_json(json).expect("event json");
+
+        event.verify().expect("valid signature");
         assert!(event.tags.iter().any(|tag| {
             let fields = tag.as_slice();
             fields.first().is_some_and(|field| field == "encryption")
-                && fields.get(1).is_some_and(|field| field == "nip04")
+                && fields.get(1).is_some_and(|field| field == "nip44_v2")
         }));
     }
 
