@@ -21,6 +21,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 const NWC_REQUEST_KIND: u16 = 23_194;
 const RELAY_ACK_MAX_BYTES: usize = 16 * 1_024;
+const RELAY_EVENT_ENVELOPE_MAX_BYTES: usize = 512;
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// A bounded relay transport that rejects redirects and enforces host budgets.
@@ -64,7 +65,8 @@ async fn fetch_relay_event(
     event_id: &EventId,
     maximum_event_bytes: usize,
 ) -> Result<Option<String>, HostError> {
-    let config = bounded_websocket_config(maximum_event_bytes, 4 * 1_024);
+    let config =
+        bounded_websocket_config(fetch_wire_message_limit(maximum_event_bytes)?, 4 * 1_024);
     let (mut socket, response) = connect_async_with_config(relay.as_str(), Some(config), false)
         .await
         .map_err(relay_connect_error)?;
@@ -72,9 +74,10 @@ async fn fetch_relay_event(
         return Err(host_error(HostErrorKind::Rejected));
     }
 
-    let subscription_id = format!("nwc-mobile-{}", &event_id.to_hex()[..16]);
+    let expected_event_id = event_id.to_hex();
+    let subscription_id = format!("nwc-mobile-{}", &expected_event_id[..16]);
     let request = json!(["REQ", subscription_id, {
-        "ids": [event_id.to_hex()],
+        "ids": [expected_event_id],
         "kinds": [NWC_REQUEST_KIND],
         "limit": 1
     }]);
@@ -86,7 +89,12 @@ async fn fetch_relay_event(
     while let Some(message) = socket.next().await {
         match message.map_err(relay_io_error)? {
             Message::Text(text) => {
-                match parse_fetch_message(text.as_str(), &subscription_id, maximum_event_bytes)? {
+                match parse_fetch_message(
+                    text.as_str(),
+                    &subscription_id,
+                    &expected_event_id,
+                    maximum_event_bytes,
+                )? {
                     FetchMessage::Event(event_json) => return Ok(Some(event_json)),
                     FetchMessage::EndOfStoredEvents => return Ok(None),
                     FetchMessage::Ignore => {}
@@ -159,6 +167,7 @@ enum FetchMessage {
 fn parse_fetch_message(
     message: &str,
     subscription_id: &str,
+    expected_event_id: &str,
     maximum_event_bytes: usize,
 ) -> Result<FetchMessage, HostError> {
     let value: Value =
@@ -172,6 +181,11 @@ fn parse_fetch_message(
                 .get(2)
                 .filter(|event| event.is_object())
                 .ok_or_else(|| host_error(HostErrorKind::Rejected))?;
+            if event.get("id").and_then(Value::as_str) != Some(expected_event_id)
+                || event.get("kind").and_then(Value::as_u64) != Some(u64::from(NWC_REQUEST_KIND))
+            {
+                return Ok(FetchMessage::Ignore);
+            }
             let event_json =
                 serde_json::to_string(event).map_err(|_| host_error(HostErrorKind::Rejected))?;
             if event_json.len() > maximum_event_bytes {
@@ -187,6 +201,12 @@ fn parse_fetch_message(
         }
         _ => Ok(FetchMessage::Ignore),
     }
+}
+
+fn fetch_wire_message_limit(maximum_event_bytes: usize) -> Result<usize, HostError> {
+    maximum_event_bytes
+        .checked_add(RELAY_EVENT_ENVELOPE_MAX_BYTES)
+        .ok_or_else(|| host_error(HostErrorKind::Rejected))
 }
 
 fn parse_publish_ack(message: &str, event_id: &str) -> Result<Option<bool>, HostError> {
@@ -272,16 +292,34 @@ mod tests {
 
     #[test]
     fn relay_parser_returns_only_the_requested_bounded_event() {
-        let message = json!(["EVENT", "subscription", {"id": EVENT_ID}]).to_string();
+        let message = json!(["EVENT", "subscription", {"id": EVENT_ID, "kind": NWC_REQUEST_KIND}])
+            .to_string();
         assert!(matches!(
-            parse_fetch_message(&message, "subscription", 1_024),
+            parse_fetch_message(&message, "subscription", EVENT_ID, 1_024),
             Ok(FetchMessage::Event(_))
         ));
         assert!(matches!(
-            parse_fetch_message(&message, "other", 1_024),
+            parse_fetch_message(&message, "other", EVENT_ID, 1_024),
             Ok(FetchMessage::Ignore)
         ));
-        assert!(parse_fetch_message(&message, "subscription", 1).is_err());
+        assert!(parse_fetch_message(&message, "subscription", EVENT_ID, 1).is_err());
+
+        let wrong_event = json!([
+            "EVENT",
+            "subscription",
+            {"id": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "kind": NWC_REQUEST_KIND}
+        ])
+        .to_string();
+        assert!(matches!(
+            parse_fetch_message(&wrong_event, "subscription", EVENT_ID, 1_024),
+            Ok(FetchMessage::Ignore)
+        ));
+
+        let wrong_kind = json!(["EVENT", "subscription", {"id": EVENT_ID, "kind": 1}]).to_string();
+        assert!(matches!(
+            parse_fetch_message(&wrong_kind, "subscription", EVENT_ID, 1_024),
+            Ok(FetchMessage::Ignore)
+        ));
     }
 
     #[test]
@@ -301,10 +339,13 @@ mod tests {
 
     #[test]
     fn websocket_limits_are_applied_before_reads() {
-        let config = bounded_websocket_config(2_048, 4_096);
-        assert_eq!(config.max_message_size, Some(2_048));
-        assert_eq!(config.max_frame_size, Some(2_048));
-        assert_eq!(config.read_buffer_size, 2_048);
+        let wire_limit = fetch_wire_message_limit(2_048).expect("bounded wire limit");
+        let config = bounded_websocket_config(wire_limit, 4_096);
+        assert_eq!(wire_limit, 2_048 + RELAY_EVENT_ENVELOPE_MAX_BYTES);
+        assert_eq!(config.max_message_size, Some(wire_limit));
+        assert_eq!(config.max_frame_size, Some(wire_limit));
+        assert_eq!(config.read_buffer_size, wire_limit);
         assert!(config.max_write_buffer_size > 4_096);
+        assert!(fetch_wire_message_limit(usize::MAX).is_err());
     }
 }
