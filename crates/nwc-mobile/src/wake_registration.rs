@@ -140,6 +140,70 @@ impl fmt::Debug for WakeRegistrationChange {
 }
 
 impl WakeLedger {
+    /// Requeues the latest desired registration for every active connection.
+    ///
+    /// Mobile hosts should call this after wake-provider configuration changes,
+    /// such as APNs token rotation. The refresh is atomic, resets retry state,
+    /// and never replaces a pending revocation for a tombstoned connection.
+    pub fn requeue_active_wake_registrations(
+        &self,
+        now: UnixTimestamp,
+    ) -> Result<usize, WakeRegistrationError> {
+        let now_sql = sqlite_u64(now.as_secs())?;
+        let mut database = self
+            .lock_connection()
+            .map_err(|_| WakeRegistrationError::DatabaseUnavailable)?;
+        let transaction = database.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let future_connection = transaction.query_row(
+            "SELECT EXISTS(
+                    SELECT 1 FROM connections
+                    WHERE status = 'active' AND updated_at > ?1
+                 )",
+            params![now_sql],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if future_connection {
+            return Err(WakeRegistrationError::ValueOutOfRange);
+        }
+
+        let requeued = transaction.execute(
+            "INSERT INTO wake_registration_outbox (
+                connection_id, connection_revision, desired_enabled,
+                client_pubkey, wallet_service_pubkey, attempt_count,
+                available_at, updated_at
+             )
+             SELECT connection_id, revision, 1, client_pubkey,
+                    wallet_service_pubkey, 0, ?1, ?1
+             FROM connections WHERE status = 'active'
+             ON CONFLICT(connection_id) DO UPDATE SET
+                connection_revision = excluded.connection_revision,
+                desired_enabled = 1,
+                client_pubkey = excluded.client_pubkey,
+                wallet_service_pubkey = excluded.wallet_service_pubkey,
+                attempt_count = 0,
+                available_at = excluded.available_at,
+                updated_at = excluded.updated_at",
+            params![now_sql],
+        )?;
+        transaction.execute(
+            "DELETE FROM wake_registration_relays
+             WHERE connection_id IN (
+                SELECT connection_id FROM connections WHERE status = 'active'
+             )",
+            [],
+        )?;
+        transaction.execute(
+            "INSERT INTO wake_registration_relays (connection_id, position, relay_url)
+             SELECT r.connection_id, r.position, r.relay_url
+             FROM connection_relays AS r
+             JOIN connections AS c ON c.connection_id = r.connection_id
+             WHERE c.status = 'active'",
+            [],
+        )?;
+        transaction.commit()?;
+        Ok(requeued)
+    }
+
     /// Loads a bounded batch of due registration changes in stable order.
     pub fn load_due_wake_registrations(
         &self,
@@ -525,6 +589,76 @@ mod tests {
         reopened
             .acknowledge_wake_registration(&due)
             .expect("ack disable");
+    }
+
+    #[test]
+    fn provider_configuration_change_requeues_acknowledged_active_connection() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        let active = ledger
+            .insert_connection(new_connection(), UnixTimestamp::from_secs(100))
+            .expect("insert connection");
+        let initial = ledger
+            .load_due_wake_registrations(UnixTimestamp::from_secs(100), 1)
+            .expect("load initial registration")
+            .pop()
+            .expect("initial registration");
+        ledger
+            .retry_wake_registration(
+                &initial,
+                UnixTimestamp::from_secs(101),
+                Duration::from_secs(30),
+            )
+            .expect("defer initial registration");
+
+        assert_eq!(
+            ledger
+                .requeue_active_wake_registrations(UnixTimestamp::from_secs(110))
+                .expect("requeue active registrations"),
+            1
+        );
+        let refreshed = ledger
+            .load_due_wake_registrations(UnixTimestamp::from_secs(110), 1)
+            .expect("load refreshed registration")
+            .pop()
+            .expect("refreshed registration");
+        assert!(refreshed.enabled());
+        assert_eq!(refreshed.connection_id(), active.id());
+        assert_eq!(refreshed.connection_revision(), active.revision());
+        assert_eq!(refreshed.relays(), active.relays());
+        assert_eq!(refreshed.attempt_count(), 0);
+        assert_eq!(refreshed.available_at(), UnixTimestamp::from_secs(110));
+    }
+
+    #[test]
+    fn active_refresh_never_replaces_a_pending_tombstone() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        let active = ledger
+            .insert_connection(new_connection(), UnixTimestamp::from_secs(100))
+            .expect("insert connection");
+        let tombstone = ledger
+            .tombstone_connection(
+                active.id(),
+                active.revision(),
+                UnixTimestamp::from_secs(101),
+            )
+            .expect("tombstone");
+
+        assert_eq!(
+            ledger
+                .requeue_active_wake_registrations(UnixTimestamp::from_secs(102))
+                .expect("requeue active registrations"),
+            0
+        );
+        let pending = ledger
+            .load_due_wake_registrations(UnixTimestamp::from_secs(102), 1)
+            .expect("load pending tombstone")
+            .pop()
+            .expect("pending tombstone");
+        assert!(!pending.enabled());
+        assert_eq!(pending.connection_revision(), tombstone.revision());
+        assert_eq!(pending.relays(), active.relays());
     }
 
     #[test]
