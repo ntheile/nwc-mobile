@@ -173,10 +173,9 @@ fn parse_fetch_message(
     };
     match values.first().and_then(Value::as_str) {
         Some("EVENT") if values.get(1).and_then(Value::as_str) == Some(subscription_id) => {
-            let event = values
-                .get(2)
-                .filter(|event| event.is_object())
-                .ok_or_else(|| host_error(HostErrorKind::Rejected))?;
+            let Some(event) = values.get(2).filter(|event| event.is_object()) else {
+                return Ok(FetchMessage::Ignore);
+            };
             if event.get("id").and_then(Value::as_str) != Some(expected_event_id)
                 || event.get("kind").and_then(Value::as_u64) != Some(u64::from(NWC_REQUEST_KIND))
             {
@@ -292,6 +291,18 @@ mod tests {
             parse_fetch_message(&wrong_kind, "subscription", EVENT_ID, 1_024),
             Ok(FetchMessage::Ignore)
         ));
+
+        for malformed_event in [
+            json!(["EVENT", "subscription"]).to_string(),
+            json!(["EVENT", "subscription", null]).to_string(),
+            json!(["EVENT", "subscription", []]).to_string(),
+            json!(["EVENT", "subscription", "not-an-event"]).to_string(),
+        ] {
+            assert!(matches!(
+                parse_fetch_message(&malformed_event, "subscription", EVENT_ID, 1_024),
+                Ok(FetchMessage::Ignore)
+            ));
+        }
     }
 
     #[test]
