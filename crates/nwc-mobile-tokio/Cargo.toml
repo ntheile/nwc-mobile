@@ -1,0 +1,16 @@
+[package]
+name = "nwc-mobile-tokio"
+description = "Tokio deadline and cancellation integration for nwc-mobile hosts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+nwc-mobile = { version = "=0.1.0", path = "../nwc-mobile" }
+tokio = { version = "1.43.1", features = ["macros", "rt", "time"] }
+
+[lints]
+workspace = true

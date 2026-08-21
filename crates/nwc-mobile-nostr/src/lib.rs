@@ -5,14 +5,11 @@
 
 #![forbid(unsafe_code)]
 
-use std::future::Future;
-use std::time::Duration;
-
 use futures_util::{SinkExt, StreamExt};
 use nwc_mobile::{
-    CancellationSignal, EventId, HostError, HostErrorKind, HostFuture, OperationContext,
-    RelayTransport, SecureRelayUrl,
+    EventId, HostError, HostErrorKind, HostFuture, OperationContext, RelayTransport, SecureRelayUrl,
 };
+use nwc_mobile_tokio::run_with_context;
 use serde_json::{json, Value};
 use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::error::Error as WebSocketError;
@@ -22,7 +19,6 @@ use tokio_tungstenite::tungstenite::Message;
 const NWC_REQUEST_KIND: u16 = 23_194;
 const RELAY_ACK_MAX_BYTES: usize = 16 * 1_024;
 const RELAY_EVENT_ENVELOPE_MAX_BYTES: usize = 512;
-const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// A bounded relay transport that rejects redirects and enforces host budgets.
 #[derive(Clone, Copy, Debug, Default)]
@@ -238,30 +234,6 @@ fn bounded_websocket_config(
         .max_write_buffer_size(maximum_outgoing_bytes.saturating_add(8 * 1_024))
         .max_message_size(Some(maximum_message_bytes))
         .max_frame_size(Some(maximum_message_bytes))
-}
-
-async fn run_with_context<T, F>(context: OperationContext<'_>, operation: F) -> Result<T, HostError>
-where
-    F: Future<Output = Result<T, HostError>> + Send,
-{
-    if context.cancellation().is_cancelled() {
-        return Err(host_error(HostErrorKind::Cancelled));
-    }
-    tokio::select! {
-        biased;
-        () = wait_for_cancellation(context.cancellation()) => {
-            Err(host_error(HostErrorKind::Cancelled))
-        }
-        result = tokio::time::timeout(context.budget().timeout(), operation) => {
-            result.unwrap_or_else(|_| Err(host_error(HostErrorKind::TimedOut)))
-        }
-    }
-}
-
-async fn wait_for_cancellation(cancellation: &dyn CancellationSignal) {
-    while !cancellation.is_cancelled() {
-        tokio::time::sleep(CANCELLATION_POLL_INTERVAL).await;
-    }
 }
 
 fn relay_connect_error(error: WebSocketError) -> HostError {

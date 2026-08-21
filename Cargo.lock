@@ -878,9 +878,17 @@ version = "0.1.0"
 dependencies = [
  "futures-util",
  "nwc-mobile",
+ "nwc-mobile-tokio",
  "serde_json",
- "tokio",
  "tokio-tungstenite",
+]
+
+[[package]]
+name = "nwc-mobile-tokio"
+version = "0.1.0"
+dependencies = [
+ "nwc-mobile",
+ "tokio",
 ]
 
 [[package]]
