@@ -868,7 +868,9 @@ dependencies = [
 name = "nwc-mobile-bolt11"
 version = "0.1.0"
 dependencies = [
+ "bitcoin",
  "lightning-invoice",
+ "lightning-types",
  "nwc-mobile",
 ]
 

@@ -9,8 +9,12 @@ license.workspace = true
 publish = false
 
 [dependencies]
-lightning-invoice = "=0.34.0"
+lightning-invoice = { version = "=0.34.0", features = ["std"] }
 nwc-mobile = { version = "=0.1.0", path = "../nwc-mobile" }
+
+[dev-dependencies]
+bitcoin = "=0.32.102"
+lightning-types = "=0.3.5"
 
 [lints]
 workspace = true

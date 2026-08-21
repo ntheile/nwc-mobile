@@ -28,9 +28,9 @@ pub fn payment_hash(invoice: &Bolt11Invoice) -> PaymentHash {
 
 /// Builds a side-effect-free NWC quote from a client-supplied BOLT11 invoice.
 ///
-/// The returned principal is the explicit NWC amount when present, otherwise
-/// the amount encoded by the invoice. Zero-valued and amountless requests are
-/// rejected.
+/// The returned principal is the amount encoded by the invoice, or the explicit
+/// NWC amount for an amountless invoice. Expired, zero-valued, ambiguous, and
+/// amountless requests without an explicit amount are rejected.
 pub fn quote_invoice(
     invoice: &str,
     explicit_amount: Option<AmountMsat>,
@@ -56,16 +56,21 @@ pub fn quote_invoice_sats(
 
 /// Returns the exact millisatoshi principal a wallet should pay.
 ///
-/// An explicit amount is required for amountless invoices. When supplied for
-/// an invoice that already carries an amount, it intentionally takes precedence
-/// to match NIP-47's `amount` parameter semantics.
+/// An explicit amount is required for amountless invoices and rejected for
+/// invoices that already carry an amount. Expired and zero-valued invoices are
+/// also rejected before a wallet operation can start.
 pub fn payment_amount(
     invoice: &Bolt11Invoice,
     explicit_amount: Option<AmountMsat>,
 ) -> Result<AmountMsat, HostError> {
-    let amount = explicit_amount
-        .or_else(|| invoice.amount_milli_satoshis().map(AmountMsat::from_msat))
-        .ok_or_else(rejected)?;
+    if invoice.is_expired() {
+        return Err(rejected());
+    }
+    let amount = match (invoice.amount_milli_satoshis(), explicit_amount) {
+        (Some(amount), None) => AmountMsat::from_msat(amount),
+        (None, Some(amount)) => amount,
+        (Some(_), Some(_)) | (None, None) => return Err(rejected()),
+    };
     if amount.as_msat() == 0 {
         return Err(rejected());
     }
@@ -130,38 +135,65 @@ const fn internal() -> HostError {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use bitcoin::hashes::{sha256, Hash};
+    use bitcoin::secp256k1::{Secp256k1, SecretKey};
+    use lightning_invoice::{Currency, InvoiceBuilder};
+    use lightning_types::payment::PaymentSecret;
+
     use super::*;
 
-    const AMOUNTLESS_INVOICE: &str = "lnbc1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdpl2pkx2ctnv5sxxmmwwd5kgetjypeh2ursdae8g6twvus8g6rfwvs8qun0dfjkxaq9qrsgq357wnc5r2ueh7ck6q93dj32dlqnls087fxdwk8qakdyafkq3yap9us6v52vjjsrvywa6rt52cm9r9zqt8r2t7mlcwspyetp5h2tztugp9lfyql";
-    const AMOUNT_INVOICE: &str = "lnbc2500u1pvjluezsp5zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygspp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypqdq5xysxxatsyp3k7enxv4jsxqzpu9qrsgquk0rl77nj30yxdy8j9vdx85fkpmdla2087ne0xh8nhedh8w27kyke0lp53ut353s06fv3qfegext0eh0ymjpf39tuven09sam30g4vgpfna3rh";
+    fn signed_invoice(amount_msat: Option<u64>, timestamp: Duration) -> Bolt11Invoice {
+        let mut builder = InvoiceBuilder::new(Currency::Bitcoin)
+            .description("nwc-mobile test".to_owned())
+            .payment_hash(sha256::Hash::hash(b"nwc-mobile payment"))
+            .payment_secret(PaymentSecret([42; 32]))
+            .duration_since_epoch(timestamp)
+            .expiry_time(Duration::from_secs(3_600))
+            .min_final_cltv_expiry_delta(18);
+        if let Some(amount_msat) = amount_msat {
+            builder = builder.amount_milli_satoshis(amount_msat);
+        }
+        let signing_key = SecretKey::from_slice(&[7; 32]).expect("signing key");
+        builder
+            .build_signed(|message| Secp256k1::new().sign_ecdsa_recoverable(message, &signing_key))
+            .expect("signed invoice")
+    }
+
+    fn current_timestamp() -> Duration {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("current timestamp")
+    }
 
     #[test]
     fn quote_uses_invoice_amount_and_hash() {
-        let quote = quote_invoice(AMOUNT_INVOICE, None).expect("quote");
+        let invoice = signed_invoice(Some(250_000_000), current_timestamp());
+        let expected_hash = payment_hash(&invoice);
+        let quote = quote_invoice(&invoice.to_string(), None).expect("quote");
 
         assert_eq!(quote.principal(), AmountMsat::from_msat(250_000_000));
-        assert_eq!(
-            quote.payment_hash().to_hex(),
-            "0001020304050607080900010203040506070809000102030405060708090102"
-        );
+        assert_eq!(quote.payment_hash(), &expected_hash);
     }
 
     #[test]
     fn amountless_invoice_requires_positive_explicit_amount() {
+        let invoice = signed_invoice(None, current_timestamp()).to_string();
         assert_eq!(
-            quote_invoice(AMOUNTLESS_INVOICE, None)
+            quote_invoice(&invoice, None)
                 .expect_err("missing amount")
                 .kind(),
             HostErrorKind::Rejected
         );
         assert_eq!(
-            quote_invoice(AMOUNTLESS_INVOICE, Some(AmountMsat::from_msat(0)))
+            quote_invoice(&invoice, Some(AmountMsat::from_msat(0)))
                 .expect_err("zero amount")
                 .kind(),
             HostErrorKind::Rejected
         );
         assert_eq!(
-            quote_invoice(AMOUNTLESS_INVOICE, Some(AmountMsat::from_msat(42_000)))
+            quote_invoice(&invoice, Some(AmountMsat::from_msat(42_000)))
                 .expect("quote")
                 .principal(),
             AmountMsat::from_msat(42_000)
@@ -170,7 +202,7 @@ mod tests {
 
     #[test]
     fn satoshi_boundary_rejects_fractional_amounts() {
-        let invoice = parse_invoice(AMOUNTLESS_INVOICE).expect("invoice");
+        let invoice = signed_invoice(None, current_timestamp());
         assert_eq!(
             payment_amount_sats(&invoice, Some(AmountMsat::from_msat(2_000))).expect("sats"),
             2
@@ -182,7 +214,7 @@ mod tests {
             HostErrorKind::Rejected
         );
         assert_eq!(
-            quote_invoice_sats(AMOUNTLESS_INVOICE, Some(AmountMsat::from_msat(2_001)))
+            quote_invoice_sats(&invoice.to_string(), Some(AmountMsat::from_msat(2_001)))
                 .expect_err("fractional quote")
                 .kind(),
             HostErrorKind::Rejected
@@ -191,11 +223,12 @@ mod tests {
 
     #[test]
     fn created_invoice_preserves_metadata() {
-        let invoice = parse_invoice(AMOUNT_INVOICE).expect("invoice");
+        let invoice = signed_invoice(Some(250_000_000), current_timestamp());
+        let encoded = invoice.to_string();
         let expected_expiry = invoice.expires_at().expect("expiry").as_secs();
         let created = created_invoice(invoice).expect("created invoice");
 
-        assert_eq!(created.invoice(), AMOUNT_INVOICE);
+        assert_eq!(created.invoice(), encoded);
         assert_eq!(created.amount(), AmountMsat::from_msat(250_000_000));
         assert_eq!(
             created.expires_at(),
@@ -209,5 +242,43 @@ mod tests {
             parse_invoice("not-an-invoice").expect_err("invalid").kind(),
             HostErrorKind::Rejected
         );
+    }
+
+    #[test]
+    fn fixed_invoice_rejects_any_explicit_amount_override() {
+        let invoice = signed_invoice(Some(500_000), current_timestamp());
+        for amount in [1_000, 500_000, 1_000_000] {
+            assert_eq!(
+                quote_invoice(&invoice.to_string(), Some(AmountMsat::from_msat(amount)))
+                    .expect_err("ambiguous amount")
+                    .kind(),
+                HostErrorKind::Rejected
+            );
+            assert_eq!(
+                payment_amount_sats(&invoice, Some(AmountMsat::from_msat(amount)))
+                    .expect_err("ambiguous payment")
+                    .kind(),
+                HostErrorKind::Rejected
+            );
+        }
+    }
+
+    #[test]
+    fn expired_invoice_is_rejected_before_quote_or_payment() {
+        let invoice = signed_invoice(Some(500_000), Duration::from_secs(1));
+        assert!(invoice.is_expired());
+        assert_eq!(
+            quote_invoice(&invoice.to_string(), None)
+                .expect_err("expired quote")
+                .kind(),
+            HostErrorKind::Rejected
+        );
+        assert_eq!(
+            payment_amount_sats(&invoice, None)
+                .expect_err("expired payment")
+                .kind(),
+            HostErrorKind::Rejected
+        );
+        assert!(parse_invoice(&invoice.to_string()).is_ok());
     }
 }
