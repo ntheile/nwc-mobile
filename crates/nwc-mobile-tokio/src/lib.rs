@@ -34,7 +34,11 @@ where
             Err(host_error(HostErrorKind::Cancelled))
         }
         result = tokio::time::timeout(context.budget().timeout(), operation) => {
-            result.unwrap_or_else(|_| Err(host_error(HostErrorKind::TimedOut)))
+            if context.cancellation().is_cancelled() {
+                Err(host_error(HostErrorKind::Cancelled))
+            } else {
+                result.unwrap_or_else(|_| Err(host_error(HostErrorKind::TimedOut)))
+            }
         }
     }
 }
@@ -130,5 +134,33 @@ mod tests {
             result.expect_err("cancelled").kind(),
             HostErrorKind::Cancelled
         );
+    }
+
+    #[tokio::test]
+    async fn operation_completion_rechecks_cancellation() {
+        let cancellation = Cancellation::new(false);
+        let result = run_with_context(
+            context(&cancellation, Duration::from_secs(1)),
+            std::future::poll_fn(|_| {
+                cancellation.cancel();
+                std::task::Poll::Ready(Ok(()))
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            result.expect_err("cancelled").kind(),
+            HostErrorKind::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_operation_returns_its_result() {
+        let result = run_with_context(context(&NeverCancelled, Duration::from_secs(1)), async {
+            Ok(42)
+        })
+        .await;
+
+        assert_eq!(result, Ok(42));
     }
 }
