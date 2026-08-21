@@ -140,6 +140,27 @@ impl fmt::Debug for WakeRegistrationChange {
 }
 
 impl WakeLedger {
+    /// Returns the earliest durable registration deadline, if work remains.
+    ///
+    /// Native schedulers can use this after every worker pass and on startup so
+    /// persisted exponential backoff is neither lost nor polled prematurely.
+    pub fn next_wake_registration_at(
+        &self,
+    ) -> Result<Option<UnixTimestamp>, WakeRegistrationError> {
+        let database = self
+            .lock_connection()
+            .map_err(|_| WakeRegistrationError::DatabaseUnavailable)?;
+        let available_at = database.query_row(
+            "SELECT MIN(available_at) FROM wake_registration_outbox",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
+        available_at
+            .map(decode_u64)
+            .transpose()
+            .map(|value| value.map(UnixTimestamp::from_secs))
+    }
+
     /// Requeues the latest desired registration for every active connection.
     ///
     /// Mobile hosts should call this after wake-provider configuration changes,
@@ -588,6 +609,12 @@ mod tests {
         }
 
         let reopened = WakeLedger::open(&database.path).expect("reopen ledger");
+        assert_eq!(
+            reopened
+                .next_wake_registration_at()
+                .expect("next registration deadline"),
+            Some(UnixTimestamp::from_secs(107))
+        );
         assert!(reopened
             .load_due_wake_registrations(UnixTimestamp::from_secs(106), 1)
             .expect("not due")
@@ -603,6 +630,12 @@ mod tests {
         reopened
             .acknowledge_wake_registration(&due)
             .expect("ack disable");
+        assert_eq!(
+            reopened
+                .next_wake_registration_at()
+                .expect("empty registration deadline"),
+            None
+        );
     }
 
     #[test]
