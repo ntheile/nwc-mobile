@@ -170,7 +170,21 @@ impl WakeLedger {
         &self,
         now: UnixTimestamp,
     ) -> Result<usize, WakeRegistrationError> {
+        self.requeue_active_wake_registrations_with_state(true, now)
+    }
+
+    /// Requeues an explicit provider state for every active connection.
+    ///
+    /// This lets a mobile host suspend wake delivery after native notification
+    /// permission is revoked without revoking the underlying NWC authorization.
+    /// Re-enabling uses the same operation with `enabled` set to `true`.
+    pub fn requeue_active_wake_registrations_with_state(
+        &self,
+        enabled: bool,
+        now: UnixTimestamp,
+    ) -> Result<usize, WakeRegistrationError> {
         let now_sql = sqlite_u64(now.as_secs())?;
+        let desired_enabled = i64::from(enabled);
         let mut database = self
             .lock_connection()
             .map_err(|_| WakeRegistrationError::DatabaseUnavailable)?;
@@ -193,18 +207,18 @@ impl WakeLedger {
                 client_pubkey, wallet_service_pubkey, attempt_count,
                 available_at, updated_at
              )
-             SELECT connection_id, revision, 1, client_pubkey,
+             SELECT connection_id, revision, ?2, client_pubkey,
                     wallet_service_pubkey, 0, ?1, ?1
              FROM connections WHERE status = 'active'
              ON CONFLICT(connection_id) DO UPDATE SET
                 connection_revision = excluded.connection_revision,
-                desired_enabled = 1,
+                desired_enabled = excluded.desired_enabled,
                 client_pubkey = excluded.client_pubkey,
                 wallet_service_pubkey = excluded.wallet_service_pubkey,
                 attempt_count = 0,
                 available_at = excluded.available_at,
                 updated_at = excluded.updated_at",
-            params![now_sql],
+            params![now_sql, desired_enabled],
         )?;
         transaction.execute(
             "DELETE FROM wake_registration_relays
@@ -687,6 +701,51 @@ mod tests {
             ),
             Err(WakeRegistrationError::StaleChange)
         );
+    }
+
+    #[test]
+    fn native_permission_changes_suspend_and_restore_active_registration() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        let active = ledger
+            .insert_connection(new_connection(), UnixTimestamp::from_secs(100))
+            .expect("insert connection");
+        let initial = ledger
+            .load_due_wake_registrations(UnixTimestamp::from_secs(100), 1)
+            .expect("load initial registration")
+            .pop()
+            .expect("initial registration");
+        ledger
+            .acknowledge_wake_registration(&initial)
+            .expect("acknowledge initial registration");
+
+        assert_eq!(
+            ledger
+                .requeue_active_wake_registrations_with_state(false, UnixTimestamp::from_secs(110),)
+                .expect("suspend registrations"),
+            1
+        );
+        let suspended = ledger
+            .load_due_wake_registrations(UnixTimestamp::from_secs(110), 1)
+            .expect("load suspension")
+            .pop()
+            .expect("suspension");
+        assert!(!suspended.enabled());
+        assert_eq!(suspended.connection_revision(), active.revision());
+        ledger
+            .acknowledge_wake_registration(&suspended)
+            .expect("acknowledge suspension");
+
+        ledger
+            .requeue_active_wake_registrations_with_state(true, UnixTimestamp::from_secs(120))
+            .expect("restore registrations");
+        let restored = ledger
+            .load_due_wake_registrations(UnixTimestamp::from_secs(120), 1)
+            .expect("load restoration")
+            .pop()
+            .expect("restoration");
+        assert!(restored.enabled());
+        assert_eq!(restored.relays(), active.relays());
     }
 
     #[test]
