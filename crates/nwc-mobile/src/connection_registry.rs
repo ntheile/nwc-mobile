@@ -480,6 +480,41 @@ impl WakeLedger {
         }
     }
 
+    /// Lists every active authorization in stable creation order.
+    ///
+    /// Tombstones remain durable but are deliberately excluded so applications
+    /// cannot accidentally present or restore revoked authority.
+    pub fn list_active_connections(&self) -> Result<Vec<ActiveConnection>, RegistryError> {
+        let mut connection = self
+            .lock_connection()
+            .map_err(|_| RegistryError::DatabaseUnavailable)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let rows = {
+            let mut statement = transaction.prepare(
+                "SELECT connection_id, revision, status, client_pubkey,
+                        wallet_service_pubkey, encryption, budget_limit_sat,
+                        budget_interval, fee_policy, maximum_fee_sat,
+                        created_at, expires_at, updated_at, tombstoned_at
+                 FROM connections
+                 WHERE status = 'active'
+                 ORDER BY created_at, connection_id",
+            )?;
+            let rows = statement
+                .query_map([], decode_connection_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let connections = rows
+            .into_iter()
+            .map(|row| match hydrate_stored_connection(&transaction, row)? {
+                StoredConnection::Active(active) => Ok(active),
+                StoredConnection::Tombstoned(_) => Err(RegistryError::CorruptData),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        transaction.commit()?;
+        Ok(connections)
+    }
+
     /// Loads an active connection by its authenticated client and wallet keys.
     pub fn load_active_connection_by_keys(
         &self,

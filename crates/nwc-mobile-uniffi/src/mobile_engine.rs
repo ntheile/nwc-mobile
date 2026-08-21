@@ -7,11 +7,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nwc_mobile::{
-    BudgetInterval, BudgetPolicy, Clock, ConnectionId, ConnectionPolicy, FeePolicy, LedgerError,
-    NewConnection, NwcEncryption, NwcMethod, OperationBudget, PaymentAccountingError,
-    PaymentReconciler, PaymentReconciliationError, PublicKey, RegistryError, SecureRelayUrl,
-    SecureWakeServerUrl, StoredConnection, SystemClock, UnixTimestamp, WakeEngine, WakeLedger,
-    WakePolicy, WakeRegistrationError, WakeRegistrationWorker, WakeRegistrationWorkerError,
+    ActiveConnection, BudgetInterval, BudgetPolicy, ConnectionId, ConnectionManager,
+    ConnectionPolicy, FeePolicy, LedgerError, NewConnection, NwcEncryption, NwcMethod,
+    OperationBudget, PaymentAccountingError, PaymentReconciler, PaymentReconciliationError,
+    PublicKey, RegistryError, SecureRelayUrl, SecureWakeServerUrl, StoredConnection, SystemClock,
+    UnixTimestamp, WakeEngine, WakeLedger, WakePolicy, WakeRegistrationError,
+    WakeRegistrationWorker, WakeRegistrationWorkerError,
 };
 
 use crate::host_bridge::{MobileHostBridge, MobileWakeRegistrationBridge};
@@ -267,15 +268,11 @@ impl MobileNwcEngine {
         request: MobileConnectionRequest,
     ) -> Result<MobileConnectionState, MobileEngineError> {
         let connection = core_connection(request, self.policy)?;
-        let active = self
-            .ledger
-            .insert_connection(connection, SystemClock.now())
+        let clock = SystemClock;
+        let active = ConnectionManager::new(&self.ledger, &clock)
+            .create(connection)
             .map_err(MobileEngineError::from)?;
-        Ok(MobileConnectionState {
-            connection_id: active.id().as_str().to_owned(),
-            revision: active.revision().value(),
-            active: true,
-        })
+        Ok(mobile_active_connection_state(&active))
     }
 
     /// Loads lifecycle state without returning relay or public-key metadata.
@@ -285,11 +282,25 @@ impl MobileNwcEngine {
     ) -> Result<Option<MobileConnectionState>, MobileEngineError> {
         let connection_id =
             ConnectionId::parse(connection_id).map_err(|_| MobileEngineError::InvalidArgument)?;
-        let connection = self
-            .ledger
-            .load_connection(&connection_id)
+        let clock = SystemClock;
+        let connection = ConnectionManager::new(&self.ledger, &clock)
+            .connection(&connection_id)
             .map_err(MobileEngineError::from)?;
         connection.map(mobile_connection_state).transpose()
+    }
+
+    /// Lists active connection lifecycle states in stable creation order.
+    pub fn active_connections(&self) -> Result<Vec<MobileConnectionState>, MobileEngineError> {
+        let clock = SystemClock;
+        ConnectionManager::new(&self.ledger, &clock)
+            .active_connections()
+            .map(|connections| {
+                connections
+                    .iter()
+                    .map(mobile_active_connection_state)
+                    .collect()
+            })
+            .map_err(MobileEngineError::from)
     }
 
     /// Permanently revokes the expected active connection revision.
@@ -300,12 +311,11 @@ impl MobileNwcEngine {
     ) -> Result<MobileConnectionState, MobileEngineError> {
         let connection_id =
             ConnectionId::parse(connection_id).map_err(|_| MobileEngineError::InvalidArgument)?;
-        let tombstone = self
-            .ledger
-            .tombstone_connection(
+        let clock = SystemClock;
+        let tombstone = ConnectionManager::new(&self.ledger, &clock)
+            .revoke(
                 &connection_id,
                 nwc_mobile::ConnectionRevision::from_value(expected_revision),
-                SystemClock.now(),
             )
             .map_err(MobileEngineError::from)?;
         Ok(MobileConnectionState {
@@ -477,6 +487,14 @@ fn mobile_connection_state(
             active: false,
         }),
         _ => Err(MobileEngineError::CorruptData),
+    }
+}
+
+fn mobile_active_connection_state(connection: &ActiveConnection) -> MobileConnectionState {
+    MobileConnectionState {
+        connection_id: connection.id().as_str().to_owned(),
+        revision: connection.revision().value(),
+        active: true,
     }
 }
 
