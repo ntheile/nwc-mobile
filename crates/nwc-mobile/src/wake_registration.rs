@@ -259,14 +259,23 @@ impl WakeLedger {
         change: &WakeRegistrationChange,
     ) -> Result<(), WakeRegistrationError> {
         let revision = sqlite_u64(change.connection_revision.value())?;
+        let attempt_count = i64::from(change.attempt_count);
+        let updated_at = sqlite_u64(change.updated_at.as_secs())?;
         let database = self
             .lock_connection()
             .map_err(|_| WakeRegistrationError::DatabaseUnavailable)?;
         let removed = database.execute(
             "DELETE FROM wake_registration_outbox
              WHERE connection_id = ?1 AND connection_revision = ?2
-               AND desired_enabled = ?3",
-            params![change.connection_id.as_str(), revision, change.enabled],
+               AND desired_enabled = ?3 AND attempt_count = ?4
+               AND updated_at = ?5",
+            params![
+                change.connection_id.as_str(),
+                revision,
+                change.enabled,
+                attempt_count,
+                updated_at
+            ],
         )?;
         if removed == 1 {
             Ok(())
@@ -294,19 +303,24 @@ impl WakeLedger {
             .checked_add(seconds)
             .ok_or(WakeRegistrationError::ValueOutOfRange)?;
         let revision = sqlite_u64(change.connection_revision.value())?;
+        let attempt_count = i64::from(change.attempt_count);
+        let previous_updated_at = sqlite_u64(change.updated_at.as_secs())?;
         let database = self
             .lock_connection()
             .map_err(|_| WakeRegistrationError::DatabaseUnavailable)?;
         let updated = database.execute(
             "UPDATE wake_registration_outbox
              SET attempt_count = attempt_count + 1,
-                 available_at = ?4, updated_at = ?5
+                 available_at = ?6, updated_at = ?7
              WHERE connection_id = ?1 AND connection_revision = ?2
-               AND desired_enabled = ?3 AND attempt_count < 2147483647",
+               AND desired_enabled = ?3 AND attempt_count = ?4
+               AND updated_at = ?5 AND attempt_count < 2147483647",
             params![
                 change.connection_id.as_str(),
                 revision,
                 change.enabled,
+                attempt_count,
+                previous_updated_at,
                 sqlite_u64(available_at)?,
                 sqlite_u64(now.as_secs())?,
             ],
@@ -628,6 +642,18 @@ mod tests {
         assert_eq!(refreshed.relays(), active.relays());
         assert_eq!(refreshed.attempt_count(), 0);
         assert_eq!(refreshed.available_at(), UnixTimestamp::from_secs(110));
+        assert_eq!(
+            ledger.acknowledge_wake_registration(&initial),
+            Err(WakeRegistrationError::StaleChange)
+        );
+        assert_eq!(
+            ledger.retry_wake_registration(
+                &initial,
+                UnixTimestamp::from_secs(111),
+                Duration::from_secs(5),
+            ),
+            Err(WakeRegistrationError::StaleChange)
+        );
     }
 
     #[test]
