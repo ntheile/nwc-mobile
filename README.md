@@ -95,6 +95,7 @@ nwc-mobile/
 │   ├── nwc-mobile/             # Rust engine, protocol, ledger, and policy
 │   ├── nwc-mobile-bolt11/      # Optional BOLT11 wallet-adapter helpers
 │   ├── nwc-mobile-nostr/       # Bounded WebSocket relay transport
+│   ├── nwc-mobile-tokio/       # Runtime deadline and cancellation enforcement
 │   └── nwc-mobile-uniffi/      # Swift/Kotlin lifecycle API
 ├── apple/
 │   └── NwcMobileApple/         # NSE and app lifecycle coordinator
