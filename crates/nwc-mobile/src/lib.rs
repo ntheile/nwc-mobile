@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod connection_registry;
+mod connection_service;
 mod engine;
 mod error;
 mod host;
@@ -26,6 +27,7 @@ mod wake_registration_worker;
 pub use connection_registry::{
     ActiveConnection, ConnectionTombstone, NewConnection, RegistryError, StoredConnection,
 };
+pub use connection_service::ConnectionManager;
 pub use engine::{ReadOnlyWakeEngine, WakeEngine};
 pub use error::DomainError;
 pub use host::{
