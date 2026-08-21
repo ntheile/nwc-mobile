@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/nwc-mobile",
+    "crates/nwc-mobile-nostr",
     "crates/nwc-mobile-uniffi",
     "tools/uniffi-bindgen",
 ]

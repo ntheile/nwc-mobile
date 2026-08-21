@@ -93,6 +93,7 @@ budget.
 nwc-mobile/
 ├── crates/
 │   ├── nwc-mobile/             # Rust engine, protocol, ledger, and policy
+│   ├── nwc-mobile-nostr/       # Bounded WebSocket relay transport
 │   └── nwc-mobile-uniffi/      # Swift/Kotlin lifecycle API
 ├── apple/
 │   └── NwcMobileApple/         # NSE and app lifecycle coordinator
@@ -100,8 +101,10 @@ nwc-mobile/
     └── nwc-mobile/             # FCM ingestion and WorkManager coordinator
 ```
 
-The first implementation may keep the Rust modules in one crate while the API
-settles. The native companion packages should stay small and optional.
+The core engine remains independent of a network runtime. Rust hosts that use
+Tokio can opt into `nwc-mobile-nostr` for a bounded WSS transport with redirect,
+message-size, deadline, and cancellation enforcement. Native companion packages
+stay small and optional.
 
 ## Host integration
 
