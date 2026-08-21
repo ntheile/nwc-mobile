@@ -93,6 +93,7 @@ budget.
 nwc-mobile/
 ├── crates/
 │   ├── nwc-mobile/             # Rust engine, protocol, ledger, and policy
+│   ├── nwc-mobile-bolt11/      # Optional BOLT11 wallet-adapter helpers
 │   ├── nwc-mobile-nostr/       # Bounded WebSocket relay transport
 │   └── nwc-mobile-uniffi/      # Swift/Kotlin lifecycle API
 ├── apple/

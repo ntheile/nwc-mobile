@@ -1,0 +1,16 @@
+[package]
+name = "nwc-mobile-bolt11"
+description = "BOLT11 invoice integration for nwc-mobile wallet adapters"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+lightning-invoice = "=0.34.0"
+nwc-mobile = { version = "=0.1.0", path = "../nwc-mobile" }
+
+[lints]
+workspace = true

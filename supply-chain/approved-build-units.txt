@@ -5,6 +5,7 @@ askama_parser	0.13.0	proc-macro-dependency
 async-trait	0.1.92	proc-macro
 autocfg	1.5.1	build-dependency,proc-macro-dependency
 basic-toml	0.1.10	proc-macro-dependency
+bitcoin	0.32.102	custom-build
 bitcoin-internals	0.6.0	custom-build
 bitcoin-io	0.1.101	custom-build
 bitflags	2.13.1	proc-macro-dependency
@@ -23,6 +24,7 @@ generic-array	0.14.7	custom-build
 getrandom	0.3.4	custom-build,proc-macro-dependency
 hashbrown	0.16.1	proc-macro-dependency
 heck	0.5.0	proc-macro-dependency
+hex_lit	0.1.1	custom-build
 httparse	1.10.1	custom-build
 indexmap	2.12.1	proc-macro-dependency
 libc	0.2.189	custom-build,proc-macro-dependency
