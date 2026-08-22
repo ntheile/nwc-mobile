@@ -1135,15 +1135,8 @@ mod tests {
         )
     }
 
-    struct NoopWake;
-
-    impl std::task::Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn block_on<F: std::future::Future>(future: F) -> F::Output {
-        let waker = std::task::Waker::from(Arc::new(NoopWake));
-        let mut task_context = std::task::Context::from_waker(&waker);
+        let mut task_context = std::task::Context::from_waker(std::task::Waker::noop());
         let mut future = Box::pin(future);
         loop {
             match future.as_mut().poll(&mut task_context) {
