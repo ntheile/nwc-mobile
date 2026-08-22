@@ -433,19 +433,28 @@ impl NwcMobileService {
     /// Approves the retained request while enforcing its exact authority bound.
     pub fn approve_pending_nwa(
         &self,
+        expected_request_id_hex: &str,
         authorization: HostConnectionAuthorization,
         lud16: Option<String>,
     ) -> Result<ApprovedNwaConnection, MobileServiceError> {
-        let request = self
+        let mut pending = self
             .pending_nwa
             .lock()
-            .map_err(|_| MobileServiceError::StateUnavailable)?
+            .map_err(|_| MobileServiceError::StateUnavailable)?;
+        let request = pending
             .as_ref()
             .cloned()
             .ok_or(MobileServiceError::NoPendingNwa)?;
+        if request.id().to_hex() != expected_request_id_hex {
+            return Err(MobileServiceError::NwaApproval(
+                NwaApprovalError::AuthorityEscalation,
+            ));
+        }
         let connection = authorization.into_connection(self.wake_policy)?;
-        Ok(ConnectionManager::new(&self.ledger, &SystemClock)
-            .approve_nwa_connection(request, connection, lud16)?)
+        let approved = ConnectionManager::new(&self.ledger, &SystemClock)
+            .approve_nwa_connection(request, connection, lud16)?;
+        *pending = None;
+        Ok(approved)
     }
 
     /// Completes or cancels the current NWA session.
@@ -614,16 +623,26 @@ mod tests {
         );
 
         assert_eq!(
-            service.approve_pending_nwa(authorization(CLIENT_TWO), None),
+            service.approve_pending_nwa(presentation.id_hex(), authorization(CLIENT_TWO), None),
+            Err(MobileServiceError::NwaApproval(
+                NwaApprovalError::AuthorityEscalation
+            ))
+        );
+        assert!(service.pending_nwa_request().expect("pending").is_some());
+        assert_eq!(
+            service.approve_pending_nwa("wrong-request", authorization(CLIENT), None),
             Err(MobileServiceError::NwaApproval(
                 NwaApprovalError::AuthorityEscalation
             ))
         );
         let approved = service
-            .approve_pending_nwa(authorization(CLIENT), None)
+            .approve_pending_nwa(presentation.id_hex(), authorization(CLIENT), None)
             .expect("approval");
         assert_eq!(approved.connection().id().as_str(), "connection:service");
-        service.clear_pending_nwa().expect("clear");
         assert_eq!(service.pending_nwa_request().expect("pending"), None);
+        assert_eq!(
+            service.approve_pending_nwa(presentation.id_hex(), authorization(CLIENT), None),
+            Err(MobileServiceError::NoPendingNwa)
+        );
     }
 }

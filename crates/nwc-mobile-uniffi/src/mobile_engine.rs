@@ -245,12 +245,22 @@ impl fmt::Debug for MobileNwaRequestPresentation {
 }
 
 /// Result of an atomically persisted NWA approval.
-#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+#[derive(Clone, Eq, PartialEq, uniffi::Record)]
 pub struct MobileNwaApprovalResult {
     /// Durable connection lifecycle state.
     pub connection: MobileConnectionState,
     /// Verified public callback URL, when the request supplied one.
     pub callback_url: Option<String>,
+}
+
+impl fmt::Debug for MobileNwaApprovalResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MobileNwaApprovalResult")
+            .field("connection", &self.connection)
+            .field("has_callback", &self.callback_url.is_some())
+            .finish()
+    }
 }
 
 /// One legacy host authorization and its already-consumed accounting state.
@@ -483,12 +493,13 @@ impl MobileNwcEngine {
     /// Atomically validates and persists approval of the retained NWA request.
     pub fn approve_pending_nwa(
         &self,
+        request_id_hex: String,
         request: MobileConnectionRequest,
         lud16: Option<String>,
     ) -> Result<MobileNwaApprovalResult, MobileEngineError> {
         let approved = self
             .service
-            .approve_pending_nwa(core_authorization(request)?, lud16)
+            .approve_pending_nwa(&request_id_hex, core_authorization(request)?, lud16)
             .map_err(MobileEngineError::from)?;
         Ok(MobileNwaApprovalResult {
             connection: mobile_active_connection_state(approved.connection()),

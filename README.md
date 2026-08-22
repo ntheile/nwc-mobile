@@ -153,8 +153,9 @@ For existing wallets, pass the complete old registry once to
 `migrateLegacyConnections`, delete records and secrets named by the returned
 report, and then treat the `nwc-mobile` ledger as authoritative. New NWA flows
 use `openNwaRequest`, render only `MobileNwaRequestPresentation`, call
-`approvePendingNwa`, deliver the verified callback if present, and finally call
-`clearPendingNwa`.
+`approvePendingNwa` with that presentation's `requestIdHex`, and deliver the
+verified callback if present. Successful approval atomically consumes the
+pending request; cancellation uses `clearPendingNwa`.
 
 A wallet supplies an implementation of a narrow Rust capability interface:
 
