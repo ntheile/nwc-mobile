@@ -8,6 +8,13 @@ public API stabilizes.
 
 ## Unreleased
 
+- Added an application workflow that atomically generates, stores, persists,
+  exports, approves, and revokes wallet connections behind a narrow secret-store
+  capability.
+- Added configurable Apple Keychain and App Group wake-store helpers so apps and
+  notification extensions only provide identifiers and UI notifications.
+- Added a reusable Tokio exponential-backoff helper and public core/native enum
+  conversions for thin host adapters.
 - Added application-level connection validation, relay normalization, fee
   policy, export URI construction, and non-sensitive presentations.
 - Added shared native connection, NWA session, wake-envelope, and wake-history

@@ -16,6 +16,33 @@ use nwc_mobile::{
 
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
+/// Retries a fallible asynchronous operation with bounded exponential backoff.
+///
+/// A zero attempt count is normalized to one attempt. The operation's final
+/// typed error is returned without logging or stringifying remote diagnostics.
+pub async fn retry_with_exponential_backoff<F, Fut, T, E>(
+    maximum_attempts: u8,
+    base_delay: Duration,
+    mut operation: F,
+) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
+    let maximum_attempts = maximum_attempts.max(1);
+    for attempt in 0..maximum_attempts {
+        match operation().await {
+            Ok(value) => return Ok(value),
+            Err(error) if attempt + 1 == maximum_attempts => return Err(error),
+            Err(_) => {
+                let multiplier = 1_u32.checked_shl(u32::from(attempt)).unwrap_or(u32::MAX);
+                tokio::time::sleep(base_delay.saturating_mul(multiplier)).await;
+            }
+        }
+    }
+    unreachable!("at least one retry attempt is always executed")
+}
+
 /// Monotonic execution window shared by wallet preparation and the wake engine.
 #[derive(Clone, Copy, Debug)]
 pub struct BackgroundWakeWindow {
@@ -113,6 +140,20 @@ mod tests {
     use nwc_mobile::{NeverCancelled, OperationBudget};
 
     use super::*;
+
+    #[tokio::test]
+    async fn exponential_retry_returns_success_without_extra_attempts() {
+        let attempts = AtomicBool::new(false);
+        let result = retry_with_exponential_backoff(3, Duration::ZERO, || async {
+            if attempts.swap(true, Ordering::AcqRel) {
+                Ok(42)
+            } else {
+                Err("retry")
+            }
+        })
+        .await;
+        assert_eq!(result, Ok(42));
+    }
 
     struct Cancellation(AtomicBool);
 
