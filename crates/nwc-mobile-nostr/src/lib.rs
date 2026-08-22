@@ -5,9 +5,13 @@
 
 #![forbid(unsafe_code)]
 
+use std::time::Duration;
+
 use futures_util::{SinkExt, StreamExt};
 use nwc_mobile::{
-    EventId, HostError, HostErrorKind, HostFuture, OperationContext, RelayTransport, SecureRelayUrl,
+    build_nwc_info_event, Clock, EventId, HostError, HostErrorKind, HostFuture, NeverCancelled,
+    NwcEncryption, NwcMethod, NwcSecretKey, OperationBudget, OperationContext, PublicKey,
+    RelayTransport, SecureRelayUrl, SystemClock, UnixTimestamp,
 };
 use nwc_mobile_tokio::run_with_context;
 use serde_json::{json, Value};
@@ -23,6 +27,60 @@ const RELAY_EVENT_ENVELOPE_MAX_BYTES: usize = 512;
 /// A bounded relay transport that rejects redirects and enforces host budgets.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NostrRelayTransport;
+
+/// Builds, signs, and publishes one bounded NIP-47 info event.
+///
+/// This is the high-level host boundary for wallet applications. It keeps
+/// relay validation, event construction, operation budgeting, and transport
+/// behavior under the same reviewed implementation.
+pub async fn publish_nwc_info_event(
+    relay_url: &str,
+    wallet_service_secret: &NwcSecretKey,
+    client_pubkey: Option<&PublicKey>,
+    methods: Vec<NwcMethod>,
+    encryption: NwcEncryption,
+    timeout: Duration,
+) -> Result<(), HostError> {
+    let (relay, event_json, budget) = prepare_nwc_info_publication(
+        relay_url,
+        wallet_service_secret,
+        client_pubkey,
+        methods,
+        encryption,
+        SystemClock.now(),
+        timeout,
+    )?;
+    NostrRelayTransport
+        .publish_event(
+            &relay,
+            &event_json,
+            OperationContext::new(budget, &NeverCancelled),
+        )
+        .await
+}
+
+fn prepare_nwc_info_publication(
+    relay_url: &str,
+    wallet_service_secret: &NwcSecretKey,
+    client_pubkey: Option<&PublicKey>,
+    methods: Vec<NwcMethod>,
+    encryption: NwcEncryption,
+    created_at: UnixTimestamp,
+    timeout: Duration,
+) -> Result<(SecureRelayUrl, String, OperationBudget), HostError> {
+    let relay =
+        SecureRelayUrl::parse(relay_url).map_err(|_| host_error(HostErrorKind::Rejected))?;
+    let event_json = build_nwc_info_event(
+        wallet_service_secret,
+        client_pubkey,
+        methods,
+        encryption,
+        created_at,
+    )
+    .map_err(|_| host_error(HostErrorKind::Rejected))?;
+    let budget = OperationBudget::new(timeout).map_err(|_| host_error(HostErrorKind::Rejected))?;
+    Ok((relay, event_json, budget))
+}
 
 impl RelayTransport for NostrRelayTransport {
     fn fetch_event<'a>(
@@ -260,6 +318,50 @@ mod tests {
     use super::*;
 
     const EVENT_ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn info_publication_preparation_owns_validation_signing_and_budget() {
+        let secret = NwcSecretKey::from_bytes([7_u8; 32]).expect("secret");
+        let client = PublicKey::from_hex(EVENT_ID).expect("client");
+        let (relay, event_json, budget) = prepare_nwc_info_publication(
+            "wss://relay.example/nwc",
+            &secret,
+            Some(&client),
+            vec![NwcMethod::PayInvoice, NwcMethod::GetInfo],
+            NwcEncryption::LegacyNip04,
+            UnixTimestamp::from_secs(1_700_000_000),
+            Duration::from_secs(10),
+        )
+        .expect("publication");
+
+        let event: Value = serde_json::from_str(&event_json).expect("signed event JSON");
+        assert_eq!(event["kind"], 13_194);
+        assert_eq!(event["created_at"], 1_700_000_000_u64);
+        assert_eq!(event["sig"].as_str().map(str::len), Some(128));
+        assert_eq!(relay.as_str(), "wss://relay.example/nwc");
+        assert_eq!(budget.timeout(), Duration::from_secs(10));
+
+        assert!(prepare_nwc_info_publication(
+            "ws://relay.example",
+            &secret,
+            None,
+            vec![NwcMethod::GetInfo],
+            NwcEncryption::LegacyNip04,
+            UnixTimestamp::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .is_err());
+        assert!(prepare_nwc_info_publication(
+            "wss://relay.example",
+            &secret,
+            None,
+            vec![NwcMethod::GetInfo],
+            NwcEncryption::LegacyNip04,
+            UnixTimestamp::from_secs(1),
+            Duration::ZERO,
+        )
+        .is_err());
+    }
 
     #[test]
     fn relay_parser_returns_only_the_requested_bounded_event() {

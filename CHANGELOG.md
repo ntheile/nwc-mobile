@@ -8,6 +8,9 @@ public API stabilizes.
 
 ## Unreleased
 
+- Added a bounded Nostr info-event publisher so host wallets no longer need to
+  coordinate relay validation, signing, budgeting, and transport themselves.
+
 ### Added
 
 - Durable NWC wake validation, replay protection, payment accounting, and

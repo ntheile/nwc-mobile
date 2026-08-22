@@ -194,6 +194,12 @@ typed validation boundary. For NWA, pass that result to
 to the reviewed request, enforces the approved authority subset, constructs the
 public callback, and persists the authorization atomically.
 
+Rust wallets can publish public NIP-47 capability events through
+`nwc_mobile_nostr::publish_nwc_info_event`. The bounded adapter owns secure
+relay validation, signing, timeout enforcement, and relay transport; the host
+provides only the ephemeral service key, optional client key, allowed methods,
+encryption mode, and timeout.
+
 ## Native background helpers
 
 ### Apple
