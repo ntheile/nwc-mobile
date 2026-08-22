@@ -113,6 +113,48 @@ impl NewConnection {
         self.expires_at = expires_at;
         self
     }
+
+    /// Returns the stable connection identifier selected by the host.
+    #[must_use]
+    pub const fn id(&self) -> &ConnectionId {
+        &self.id
+    }
+
+    /// Returns the authorized NWC client public key.
+    #[must_use]
+    pub const fn client_pubkey(&self) -> &PublicKey {
+        &self.client_pubkey
+    }
+
+    /// Returns the wallet-service public key.
+    #[must_use]
+    pub const fn wallet_service_pubkey(&self) -> &PublicKey {
+        &self.wallet_service_pubkey
+    }
+
+    /// Returns the exact secure relay allowlist in approval order.
+    #[must_use]
+    pub fn relays(&self) -> &[SecureRelayUrl] {
+        &self.relays
+    }
+
+    /// Returns the authorization and budget policy.
+    #[must_use]
+    pub const fn policy(&self) -> &ConnectionPolicy {
+        &self.policy
+    }
+
+    /// Returns the negotiated encryption mode.
+    #[must_use]
+    pub const fn encryption(&self) -> NwcEncryption {
+        self.encryption
+    }
+
+    /// Returns when the authorization stops accepting new work.
+    #[must_use]
+    pub const fn expires_at(&self) -> Option<UnixTimestamp> {
+        self.expires_at
+    }
 }
 
 impl fmt::Debug for NewConnection {

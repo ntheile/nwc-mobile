@@ -5,6 +5,73 @@ use crate::{
 };
 use std::fmt;
 
+/// One trusted application authorization ready for a one-time registry import.
+#[derive(Clone, Eq, PartialEq)]
+pub struct LegacyConnectionImport {
+    connection: NewConnection,
+    created_at: UnixTimestamp,
+    budget_used_sat: u64,
+}
+
+impl LegacyConnectionImport {
+    /// Binds a validated connection to its original creation and budget state.
+    #[must_use]
+    pub const fn new(
+        connection: NewConnection,
+        created_at: UnixTimestamp,
+        budget_used_sat: u64,
+    ) -> Self {
+        Self {
+            connection,
+            created_at,
+            budget_used_sat,
+        }
+    }
+
+    fn matches(&self, active: &ActiveConnection) -> bool {
+        active.id() == self.connection.id()
+            && active.client_pubkey() == self.connection.client_pubkey()
+            && active.wallet_service_pubkey() == self.connection.wallet_service_pubkey()
+            && active.relays() == self.connection.relays()
+            && active.policy() == self.connection.policy()
+            && active.encryption() == self.connection.encryption()
+            && active.created_at() == self.created_at
+            && active.expires_at() == self.connection.expires_at()
+    }
+}
+
+impl fmt::Debug for LegacyConnectionImport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LegacyConnectionImport")
+            .field("connection", &self.connection)
+            .field("created_at", &self.created_at)
+            .field("has_budget_usage", &(self.budget_used_sat > 0))
+            .finish()
+    }
+}
+
+/// Tombstones discovered while importing an application's legacy registry.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct LegacyMigrationResult {
+    revoked_connection_ids: Vec<ConnectionId>,
+    revoked_client_pubkeys: Vec<PublicKey>,
+}
+
+impl LegacyMigrationResult {
+    /// Returns legacy records that must be removed from application state.
+    #[must_use]
+    pub fn revoked_connection_ids(&self) -> &[ConnectionId] {
+        &self.revoked_connection_ids
+    }
+
+    /// Returns public client keys whose application-side secrets may be scrubbed.
+    #[must_use]
+    pub fn revoked_client_pubkeys(&self) -> &[PublicKey] {
+        &self.revoked_client_pubkeys
+    }
+}
+
 /// A wallet-reviewed NWA grant ready for authority-subset validation.
 #[derive(Clone, Eq, PartialEq)]
 pub struct NwaApproval {
@@ -156,6 +223,40 @@ impl<'a> ConnectionManager<'a> {
     ) -> Result<ActiveConnection, RegistryError> {
         self.ledger
             .import_connection(connection, created_at, budget_used_sat, self.clock.now())
+    }
+
+    /// Idempotently imports a complete trusted application registry snapshot.
+    ///
+    /// Existing active records must exactly match immutable authorization
+    /// fields. Permanent tombstones are returned to the host so stale JSON or
+    /// other legacy state can be removed without resurrecting authority.
+    pub fn migrate_legacy_batch(
+        &self,
+        connections: impl IntoIterator<Item = LegacyConnectionImport>,
+    ) -> Result<LegacyMigrationResult, RegistryError> {
+        let mut result = LegacyMigrationResult::default();
+        for legacy in connections {
+            match self.connection(legacy.connection.id())? {
+                None => {
+                    self.import_legacy(
+                        legacy.connection,
+                        legacy.created_at,
+                        legacy.budget_used_sat,
+                    )?;
+                }
+                Some(StoredConnection::Active(active)) if legacy.matches(&active) => {}
+                Some(StoredConnection::Active(_)) => return Err(RegistryError::CorruptData),
+                Some(StoredConnection::Tombstoned(_)) => {
+                    result
+                        .revoked_connection_ids
+                        .push(legacy.connection.id().clone());
+                    result
+                        .revoked_client_pubkeys
+                        .push(legacy.connection.client_pubkey().clone());
+                }
+            }
+        }
+        Ok(result)
     }
 
     /// Loads either the active authorization or its permanent tombstone.
@@ -371,6 +472,78 @@ mod tests {
             manager.connection(first.id()).expect("load first"),
             Some(StoredConnection::Tombstoned(_))
         ));
+    }
+
+    #[test]
+    fn legacy_batch_migration_is_idempotent_and_reports_tombstones() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        let clock = FixedClock(UnixTimestamp::from_secs(200));
+        let manager = ConnectionManager::new(&ledger, &clock);
+        let import = LegacyConnectionImport::new(
+            connection("connection:legacy"),
+            UnixTimestamp::from_secs(100),
+            0,
+        );
+
+        assert_eq!(
+            manager
+                .migrate_legacy_batch([import.clone()])
+                .expect("initial migration"),
+            LegacyMigrationResult::default()
+        );
+        assert_eq!(
+            manager
+                .migrate_legacy_batch([import.clone()])
+                .expect("idempotent migration"),
+            LegacyMigrationResult::default()
+        );
+
+        let active = manager
+            .connection(import.connection.id())
+            .expect("load")
+            .and_then(|stored| match stored {
+                StoredConnection::Active(active) => Some(active),
+                StoredConnection::Tombstoned(_) => None,
+            })
+            .expect("active");
+        manager
+            .revoke(active.id(), active.revision())
+            .expect("revoke");
+        let result = manager
+            .migrate_legacy_batch([import])
+            .expect("tombstone migration");
+        assert_eq!(
+            result.revoked_connection_ids(),
+            &[ConnectionId::parse("connection:legacy").expect("id")]
+        );
+        assert_eq!(result.revoked_client_pubkeys().len(), 1);
+    }
+
+    #[test]
+    fn legacy_batch_migration_rejects_authorization_drift() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        let clock = FixedClock(UnixTimestamp::from_secs(200));
+        let manager = ConnectionManager::new(&ledger, &clock);
+        let original = LegacyConnectionImport::new(
+            connection("connection:legacy").with_expiration(Some(UnixTimestamp::from_secs(300))),
+            UnixTimestamp::from_secs(100),
+            0,
+        );
+        manager
+            .migrate_legacy_batch([original])
+            .expect("initial migration");
+        let changed = LegacyConnectionImport::new(
+            connection("connection:legacy"),
+            UnixTimestamp::from_secs(100),
+            0,
+        );
+
+        assert_eq!(
+            manager.migrate_legacy_batch([changed]),
+            Err(RegistryError::CorruptData)
+        );
     }
 
     #[test]
