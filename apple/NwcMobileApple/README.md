@@ -53,6 +53,12 @@ current receive timestamp, call `validateWakeEnvelope`, then call
 cancellation bridge. Map only its `MobileNotificationHint` to
 `NwcWakePresentationHint`; do not surface Rust or remote error text.
 
+Wallets that validate the full APNs dictionary through Rust before constructing
+the adapter can call `didReceive(payload:content:contentHandler:)` directly. The
+adapter replaces `userInfo` with `NwcWakePayload.normalizedUserInfo`. Use
+`NwcNotificationPresenter` to build the same sanitized open-application fallback
+when shared storage or the Rust executor is unavailable.
+
 ```swift
 import NwcMobileApple
 import UserNotifications

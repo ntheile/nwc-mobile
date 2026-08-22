@@ -20,6 +20,8 @@ public API stabilizes.
   and consistent engine-disposition handling.
 - Shared native wake-envelope parsing, cancellation, bounded background
   execution, and Bark engine assembly helpers.
+- Apple payload normalization and generic notification presentation helpers for
+  Rust-validated NSE wake requests and fail-closed fallback content.
 - Locked and checksum-verified Rust and Android dependency controls.
 
 ### Changed

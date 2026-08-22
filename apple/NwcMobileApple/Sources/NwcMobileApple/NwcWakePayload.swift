@@ -38,6 +38,22 @@ public enum NwcWakePayloadError: Error, Sendable, Equatable {
 }
 
 extension NwcWakePayload {
+  /// Encodes only the stable APNs routing keys understood by the NSE helper.
+  ///
+  /// This deliberately drops every unrecognized notification field so callers
+  /// cannot accidentally retain remote presentation text or actions.
+  public var normalizedUserInfo: [AnyHashable: Any] {
+    var userInfo: [AnyHashable: Any] = [
+      NwcWakePayloadKey.relayURL: relayURL,
+      NwcWakePayloadKey.eventID: eventIDHex,
+      NwcWakePayloadKey.walletServicePublicKey: walletServicePublicKeyHex,
+    ]
+    if let embeddedEventJSON {
+      userInfo[NwcWakePayloadKey.embeddedEvent] = embeddedEventJSON
+    }
+    return userInfo
+  }
+
   /// Decodes only the expected APNs fields without interpreting their values.
   public static func decode(
     userInfo: [AnyHashable: Any]

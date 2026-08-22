@@ -29,68 +29,32 @@ public struct NwcNotificationCopy: Sendable, Equatable {
   }
 }
 
-/// Thin `UNNotificationServiceExtension` adapter around the lifecycle coordinator.
-public final class NwcNotificationServiceAdapter: @unchecked Sendable {
-  private let coordinator: NwcNotificationServiceCoordinator
+/// Applies static wallet-owned copy and strips untrusted presentation fields.
+public struct NwcNotificationPresenter: Sendable {
   private let copy: NwcNotificationCopy
 
-  public init(
-    executor: any NwcWakeExecutor,
-    cancellationFactory: @escaping NwcWakeCancellationFactory,
-    executionMilliseconds: UInt64,
-    copy: NwcNotificationCopy
-  ) {
-    coordinator = NwcNotificationServiceCoordinator(
-      executor: executor,
-      cancellationFactory: cancellationFactory,
-      executionMilliseconds: executionMilliseconds
-    )
+  public init(copy: NwcNotificationCopy) {
     self.copy = copy
   }
 
-  /// Decodes the APNs envelope, runs Rust-owned policy, and completes once.
-  public func didReceive(
-    _ request: UNNotificationRequest,
-    contentHandler: @escaping (UNNotificationContent) -> Void
-  ) {
-    let contentHandler = NwcContentHandler(contentHandler)
+  /// Returns sanitized content for a Rust-owned presentation hint.
+  public func content(
+    applying hint: NwcWakePresentationHint,
+    to content: UNNotificationContent,
+    userInfo: [AnyHashable: Any]? = nil
+  ) -> UNNotificationContent {
     let mutableContent =
-      (request.content.mutableCopy() as? UNMutableNotificationContent)
+      (content.mutableCopy() as? UNMutableNotificationContent)
       ?? UNMutableNotificationContent()
-    let payload: NwcWakePayload
-    do {
-      payload = try NwcWakePayload.decode(userInfo: request.content.userInfo)
-    } catch {
-      apply(.openApplication, to: mutableContent)
-      contentHandler.call(mutableContent)
-      return
+    if let userInfo {
+      mutableContent.userInfo = userInfo
     }
-
-    let started = coordinator.start(payload: payload) { [copy] hint in
-      Self.apply(hint, copy: copy, to: mutableContent)
-      contentHandler.call(mutableContent)
-    }
-    if !started {
-      apply(.openApplication, to: mutableContent)
-      contentHandler.call(mutableContent)
-    }
+    apply(hint, to: mutableContent)
+    return mutableContent
   }
 
-  /// Forwards the NSE expiration callback to cancellation and completion.
-  public func timeWillExpire() {
-    coordinator.timeWillExpire()
-  }
-
-  private func apply(
+  fileprivate func apply(
     _ hint: NwcWakePresentationHint,
-    to content: UNMutableNotificationContent
-  ) {
-    Self.apply(hint, copy: copy, to: content)
-  }
-
-  private static func apply(
-    _ hint: NwcWakePresentationHint,
-    copy: NwcNotificationCopy,
     to content: UNMutableNotificationContent
   ) {
     content.subtitle = ""
@@ -123,6 +87,80 @@ public final class NwcNotificationServiceAdapter: @unchecked Sendable {
       content.body = copy.openApplicationBody
     }
   }
+}
+
+/// Thin `UNNotificationServiceExtension` adapter around the lifecycle coordinator.
+public final class NwcNotificationServiceAdapter: @unchecked Sendable {
+  private let coordinator: NwcNotificationServiceCoordinator
+  private let presenter: NwcNotificationPresenter
+
+  public init(
+    executor: any NwcWakeExecutor,
+    cancellationFactory: @escaping NwcWakeCancellationFactory,
+    executionMilliseconds: UInt64,
+    copy: NwcNotificationCopy
+  ) {
+    coordinator = NwcNotificationServiceCoordinator(
+      executor: executor,
+      cancellationFactory: cancellationFactory,
+      executionMilliseconds: executionMilliseconds
+    )
+    presenter = NwcNotificationPresenter(copy: copy)
+  }
+
+  /// Decodes the APNs envelope, runs Rust-owned policy, and completes once.
+  public func didReceive(
+    _ request: UNNotificationRequest,
+    contentHandler: @escaping (UNNotificationContent) -> Void
+  ) {
+    let contentHandler = NwcContentHandler(contentHandler)
+    let mutableContent =
+      (request.content.mutableCopy() as? UNMutableNotificationContent)
+      ?? UNMutableNotificationContent()
+    let payload: NwcWakePayload
+    do {
+      payload = try NwcWakePayload.decode(userInfo: request.content.userInfo)
+    } catch {
+      mutableContent.userInfo = [:]
+      presenter.apply(.openApplication, to: mutableContent)
+      contentHandler.call(mutableContent)
+      return
+    }
+
+    didReceive(
+      payload: payload,
+      content: mutableContent,
+      contentHandler: contentHandler.call
+    )
+  }
+
+  /// Runs a payload already validated and normalized by the containing wallet.
+  public func didReceive(
+    payload: NwcWakePayload,
+    content: UNNotificationContent,
+    contentHandler: @escaping (UNNotificationContent) -> Void
+  ) {
+    let contentHandler = NwcContentHandler(contentHandler)
+    let mutableContent =
+      (content.mutableCopy() as? UNMutableNotificationContent)
+      ?? UNMutableNotificationContent()
+    mutableContent.userInfo = payload.normalizedUserInfo
+
+    let started = coordinator.start(payload: payload) { [presenter] hint in
+      presenter.apply(hint, to: mutableContent)
+      contentHandler.call(mutableContent)
+    }
+    if !started {
+      presenter.apply(.openApplication, to: mutableContent)
+      contentHandler.call(mutableContent)
+    }
+  }
+
+  /// Forwards the NSE expiration callback to cancellation and completion.
+  public func timeWillExpire() {
+    coordinator.timeWillExpire()
+  }
+
 }
 
 private final class NwcContentHandler: @unchecked Sendable {

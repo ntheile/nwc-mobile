@@ -15,6 +15,25 @@ final class NwcWakePayloadTests: XCTestCase {
     XCTAssertEqual(payload.eventIDHex, "event-id")
     XCTAssertEqual(payload.walletServicePublicKeyHex, "wallet-key")
     XCTAssertEqual(payload.embeddedEventJSON, "{encrypted}")
+    XCTAssertEqual(payload.normalizedUserInfo.count, 4)
+    XCTAssertEqual(
+      payload.normalizedUserInfo[NwcWakePayloadKey.embeddedEvent] as? String,
+      "{encrypted}"
+    )
+  }
+
+  func testNormalizationDropsUnrecognizedNotificationFields() throws {
+    let payload = try NwcWakePayload.decode(userInfo: [
+      NwcWakePayloadKey.relayURL: "wss://relay.example",
+      NwcWakePayloadKey.eventID: "event-id",
+      NwcWakePayloadKey.walletServicePublicKey: "wallet-key",
+      "title": "remote text",
+      "category": "remote action",
+    ])
+
+    XCTAssertEqual(payload.normalizedUserInfo.count, 3)
+    XCTAssertNil(payload.normalizedUserInfo["title"])
+    XCTAssertNil(payload.normalizedUserInfo["category"])
   }
 
   func testRejectsMissingAndNonStringFields() {
