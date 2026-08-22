@@ -69,6 +69,40 @@ pub struct NewConnection {
 }
 
 impl NewConnection {
+    /// Parses untyped host application fields into a validated connection.
+    ///
+    /// Native and FFI adapters can use this boundary to avoid duplicating key,
+    /// identifier, and secure-relay parsing before registry operations.
+    pub fn from_host_strings(
+        id: String,
+        client_pubkey_hex: &str,
+        wallet_service_pubkey_hex: &str,
+        relay_urls: Vec<String>,
+        policy: ConnectionPolicy,
+        encryption: NwcEncryption,
+        wake_policy: WakePolicy,
+    ) -> Result<Self, RegistryError> {
+        let id = ConnectionId::parse(id).map_err(|_| RegistryError::InvalidConnection)?;
+        let client_pubkey =
+            PublicKey::from_hex(client_pubkey_hex).map_err(|_| RegistryError::InvalidConnection)?;
+        let wallet_service_pubkey = PublicKey::from_hex(wallet_service_pubkey_hex)
+            .map_err(|_| RegistryError::InvalidConnection)?;
+        let relays = relay_urls
+            .into_iter()
+            .map(|relay| SecureRelayUrl::parse(&relay))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| RegistryError::InvalidConnection)?;
+        Self::new(
+            id,
+            client_pubkey,
+            wallet_service_pubkey,
+            relays,
+            policy,
+            encryption,
+            wake_policy,
+        )
+    }
+
     /// Validates a new connection against the wake relay bound.
     pub fn new(
         id: ConnectionId,
@@ -1420,6 +1454,30 @@ mod tests {
                 NwcEncryption::Nip44V2,
                 WakePolicy::default(),
             ),
+            Err(RegistryError::InvalidConnection)
+        );
+    }
+
+    #[test]
+    fn host_connection_parser_rejects_untyped_invalid_fields() {
+        let parse = |client: &str, relay: &str| {
+            NewConnection::from_host_strings(
+                "connection:host".to_owned(),
+                client,
+                WALLET,
+                vec![relay.to_owned()],
+                ConnectionPolicy::conservative_default(),
+                NwcEncryption::Nip44V2,
+                WakePolicy::default(),
+            )
+        };
+
+        assert_eq!(
+            parse("not-a-public-key", "wss://relay.example.com"),
+            Err(RegistryError::InvalidConnection)
+        );
+        assert_eq!(
+            parse(CLIENT, "ws://relay.example.com"),
             Err(RegistryError::InvalidConnection)
         );
     }

@@ -23,6 +23,8 @@ public API stabilizes.
 - Apple payload normalization and generic notification presentation helpers for
   Rust-validated NSE wake requests and fail-closed fallback content.
 - Bounded Apple App Group wake diagnostics with fail-closed corrupt-log handling.
+- Host-string connection parsing and direct NWA connection approval with
+  request-bound client, expiration, relay, method, and budget validation.
 - Locked and checksum-verified Rust and Android dependency controls.
 
 ### Changed
