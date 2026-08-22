@@ -206,8 +206,8 @@ mod tests {
     use std::future::Future;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::sync::Mutex;
+    use std::task::{Context, Poll, Waker};
 
     use crate::{
         BudgetInterval, BudgetPolicy, ConnectionId, ConnectionPolicy, ConnectionRevision,
@@ -484,15 +484,8 @@ mod tests {
         );
     }
 
-    struct NoopWake;
-
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn block_on<F: Future>(future: F) -> F::Output {
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut context = Context::from_waker(&waker);
+        let mut context = Context::from_waker(Waker::noop());
         let mut future = Box::pin(future);
         loop {
             match future.as_mut().poll(&mut context) {
