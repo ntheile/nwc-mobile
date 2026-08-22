@@ -11,6 +11,8 @@ public API stabilizes.
 - Added an application workflow that atomically generates, stores, persists,
   exports, approves, and revokes wallet connections behind a narrow secret-store
   capability.
+- Added shared native connection-view builders for wallet-created and NWA-approved
+  connections so hosts do not reconstruct the same display model.
 - Added configurable Apple Keychain and App Group wake-store helpers so apps and
   notification extensions only provide identifiers and UI notifications.
 - Added a reusable Tokio exponential-backoff helper and public core/native enum

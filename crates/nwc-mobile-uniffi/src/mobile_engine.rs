@@ -7,7 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nwc_mobile::{
-    ActiveConnection, BudgetInterval, ConnectionRevision, FeePolicy, HostConnectionAuthorization,
+    ActiveConnection, ApprovedApplicationConnection, BudgetInterval, ConnectionDraft,
+    ConnectionRevision, CreatedWalletConnection, FeePolicy, HostConnectionAuthorization,
     LedgerError, LegacyHostConnection, MobileServiceError, NwaApprovalError, NwcEncryption,
     NwcMethod, NwcMobileService, OperationBudget, PaymentAccountingError, PaymentReconciler,
     PaymentReconciliationError, RegistryError, SecureWakeServerUrl, StoredConnection, SystemClock,
@@ -244,6 +245,19 @@ impl TryFrom<nwc_mobile::ConnectionPresentation> for MobileConnectionPresentatio
     }
 }
 
+/// Product metadata supplied when the shared workflow constructs a native connection view.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct MobileConnectionMetadata {
+    /// Host-selected display name.
+    pub name: String,
+    /// Validated remote icon URL.
+    pub icon_url: Option<String>,
+    /// Host-resolved local icon URL.
+    pub icon_display_url: Option<String>,
+    /// Whether this wallet generated and stored the client secret.
+    pub wallet_managed_secret: bool,
+}
+
 /// Complete non-sensitive connection state for native application rendering.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct MobileConnectionView {
@@ -290,10 +304,88 @@ pub struct MobileConnectionView {
 }
 
 impl MobileConnectionView {
+    /// Builds a render-ready view from an atomically created wallet connection.
+    pub fn from_created(
+        created: &CreatedWalletConnection,
+        metadata: MobileConnectionMetadata,
+    ) -> Result<Self, MobileEngineError> {
+        mobile_connection_view(created.draft(), created.connection(), metadata)
+    }
+
+    /// Builds a render-ready view from an atomically persisted NWA approval.
+    pub fn from_approved(
+        approved: &ApprovedApplicationConnection,
+        metadata: MobileConnectionMetadata,
+    ) -> Result<Self, MobileEngineError> {
+        mobile_connection_view(approved.draft(), approved.approval().connection(), metadata)
+    }
+
     /// Returns the exact method allowlist in canonical order.
     #[must_use]
     pub fn enabled_permissions(&self) -> Vec<MobileNwcMethod> {
         self.permissions.clone()
+    }
+}
+
+fn mobile_connection_view(
+    draft: &ConnectionDraft,
+    connection: &ActiveConnection,
+    metadata: MobileConnectionMetadata,
+) -> Result<MobileConnectionView, MobileEngineError> {
+    let authorization = draft.authorization();
+    let budget_interval: MobileBudgetInterval = draft.budget_interval().try_into()?;
+    Ok(MobileConnectionView {
+        id: draft.id().to_owned(),
+        name: metadata.name,
+        icon_url: metadata.icon_url,
+        icon_display_url: metadata.icon_display_url,
+        relay: draft.relay_storage().to_owned(),
+        wallet_managed_secret: metadata.wallet_managed_secret,
+        service_pubkey: draft.wallet_service_pubkey_hex().to_owned(),
+        client_pubkey: draft.client_pubkey_hex().to_owned(),
+        budget_sat: draft.budget_limit_sat(),
+        spent_sat: 0,
+        budget_display: display_sats(draft.budget_limit_sat()),
+        spent_display: display_sats(0),
+        budget_interval,
+        budget_interval_display: display_budget_interval(budget_interval).to_owned(),
+        permissions: draft
+            .methods()
+            .iter()
+            .copied()
+            .map(MobileNwcMethod::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| MobileEngineError::CorruptData)?,
+        created_at: connection.created_at().as_secs(),
+        last_used_at: None,
+        expires_at: connection
+            .expires_at()
+            .map(nwc_mobile::UnixTimestamp::as_secs),
+        budget_period_started_at: connection.created_at().as_secs(),
+        pending_info_event_relays: authorization.relay_urls().to_vec(),
+    })
+}
+
+fn display_sats(amount: u64) -> String {
+    let digits = amount.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, character) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(character);
+    }
+    format!("{grouped} sats")
+}
+
+const fn display_budget_interval(interval: MobileBudgetInterval) -> &'static str {
+    match interval {
+        MobileBudgetInterval::Never => "Never",
+        MobileBudgetInterval::Hourly => "Hourly",
+        MobileBudgetInterval::Daily => "Daily",
+        MobileBudgetInterval::Weekly => "Weekly",
+        MobileBudgetInterval::Monthly => "Monthly",
+        MobileBudgetInterval::Yearly => "Yearly",
     }
 }
 
@@ -998,6 +1090,16 @@ mod tests {
         assert!(!debug.contains(WALLET_KEY));
         assert!(!debug.contains("relay.example"));
         assert!(debug.contains("relay_count: 1"));
+    }
+
+    #[test]
+    fn shared_connection_views_use_stable_display_labels() {
+        assert_eq!(display_sats(0), "0 sats");
+        assert_eq!(display_sats(1_234_567), "1,234,567 sats");
+        assert_eq!(
+            display_budget_interval(MobileBudgetInterval::Monthly),
+            "Monthly"
+        );
     }
 
     #[test]
