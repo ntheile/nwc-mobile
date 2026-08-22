@@ -10,6 +10,7 @@ mod connection_registry;
 mod connection_service;
 mod engine;
 mod error;
+mod foreground;
 mod host;
 mod ledger;
 mod nip98;
@@ -34,6 +35,11 @@ pub use connection_service::{
 };
 pub use engine::{ReadOnlyWakeEngine, WakeEngine};
 pub use error::DomainError;
+pub use foreground::{
+    ForegroundWakeCoordinator, ForegroundWakeDecision, ForegroundWakeOutcome, ForegroundWakePolicy,
+    ForegroundWakeRetryCause, DEFAULT_FOREGROUND_WAKE_RETRY_ATTEMPTS,
+    DEFAULT_FOREGROUND_WAKE_RETRY_BASE_DELAY,
+};
 pub use host::{
     AmountMsat, AmountSat, CancellationSignal, CreatedInvoice, HostError, HostErrorKind,
     HostFuture, InvoiceLookup, ListTransactionsRequest, MakeInvoiceRequest, NeverCancelled,

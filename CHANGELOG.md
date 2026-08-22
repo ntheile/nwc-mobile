@@ -16,6 +16,8 @@ public API stabilizes.
 - UniFFI contracts with Swift NSE, Android WorkManager, and maintenance helpers.
 - An optional Bark wallet adapter implementing the complete `WalletBackend`
   contract.
+- A foreground wake coordinator for process-local ownership, bounded retries,
+  and consistent engine-disposition handling.
 - Locked and checksum-verified Rust and Android dependency controls.
 
 ### Changed

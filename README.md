@@ -115,6 +115,11 @@ Bark-based wallets can opt into `nwc-mobile-bark` to reuse the complete
 idempotent status lookup, transaction history conversion, fee enforcement, and
 deadline/cancellation handling.
 
+Foreground application loops can use `ForegroundWakeCoordinator` to suppress
+duplicate tasks, retain retry attempts across delayed work, apply bounded
+exponential backoff to app-owned queues, and translate `WakeDisposition` into a
+single terminal-or-retry action.
+
 ## Host integration
 
 A wallet supplies an implementation of a narrow Rust capability interface:
