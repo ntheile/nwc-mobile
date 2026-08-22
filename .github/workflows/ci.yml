@@ -58,7 +58,9 @@ jobs:
 
   quality:
     name: Format, lint, test, and document
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    env:
+      PROTOBUF_COMPILER_VERSION: 3.21.12-8.2ubuntu0.3
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -67,6 +69,13 @@ jobs:
 
       - name: Install stable Rust
         run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+
+      - name: Install pinned Protocol Buffers compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            "protobuf-compiler=${PROTOBUF_COMPILER_VERSION}"
+          protoc --version
 
       - name: Check formatting
         run: cargo +stable fmt --all --check
@@ -90,7 +99,9 @@ jobs:
 
   msrv:
     name: Minimum supported Rust 1.90
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    env:
+      PROTOBUF_COMPILER_VERSION: 3.21.12-8.2ubuntu0.3
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -99,6 +110,13 @@ jobs:
 
       - name: Install minimum supported Rust
         run: rustup toolchain install 1.90.0 --profile minimal
+
+      - name: Install pinned Protocol Buffers compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            "protobuf-compiler=${PROTOBUF_COMPILER_VERSION}"
+          protoc --version
 
       - name: Test with minimum supported Rust
         run: cargo +1.90.0 test --locked --workspace --all-features

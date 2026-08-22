@@ -258,7 +258,7 @@ impl WalletBackend for BarkWalletBackend {
                 }));
 
                 transactions.retain(|transaction| transaction_matches(transaction, request));
-                transactions.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+                transactions.sort_by_key(|transaction| std::cmp::Reverse(transaction.created_at));
                 Ok(transactions
                     .into_iter()
                     .skip(request.offset as usize)
