@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nwc_mobile::{
-    BackgroundBudget, EventId, NotificationHint, PublicKey, QueueReason, RejectionCode,
-    RetryReason, SecureRelayUrl, UnixTimestamp, WakeDisposition, WakeInput,
+    BackgroundBudget, NotificationHint, QueueReason, RejectionCode, RetryReason, WakeDisposition,
+    WakeEnvelope, WakeEnvelopeError, WakeInput,
 };
 
 mod host_bridge;
@@ -32,8 +32,6 @@ pub use mobile_engine::{
     MobileFeePolicy, MobileNwcEncryption, MobileNwcEngine, MobilePaymentReconciliationReport,
     MobileWakeRegistrationReport,
 };
-
-const MAX_EMBEDDED_EVENT_BYTES: usize = 64 * 1024;
 
 uniffi::setup_scaffolding!();
 
@@ -138,29 +136,29 @@ impl ValidatedMobileWake {
 pub fn validate_wake_envelope(
     envelope: MobileWakeEnvelope,
 ) -> Result<Arc<ValidatedMobileWake>, MobileWakeContractError> {
-    let relay = SecureRelayUrl::parse(&envelope.relay_url)
-        .map_err(|_| MobileWakeContractError::InvalidRelay)?;
-    let event_id = EventId::from_hex(&envelope.event_id_hex)
-        .map_err(|_| MobileWakeContractError::InvalidEventId)?;
-    let wallet_service_pubkey = PublicKey::from_hex(&envelope.wallet_service_public_key_hex)
-        .map_err(|_| MobileWakeContractError::InvalidWalletServicePublicKey)?;
-    if envelope
-        .embedded_event_json
-        .as_ref()
-        .is_some_and(|event| event.len() > MAX_EMBEDDED_EVENT_BYTES)
-    {
-        return Err(MobileWakeContractError::EmbeddedEventTooLarge);
-    }
-
     Ok(Arc::new(ValidatedMobileWake {
-        input: WakeInput::new(
-            relay.as_str().to_owned(),
-            event_id,
-            wallet_service_pubkey,
+        input: WakeEnvelope::new(
+            envelope.relay_url,
+            envelope.event_id_hex,
+            envelope.wallet_service_public_key_hex,
             envelope.embedded_event_json,
-            UnixTimestamp::from_secs(envelope.received_at_seconds),
-        ),
+            envelope.received_at_seconds,
+        )
+        .validate()
+        .map_err(MobileWakeContractError::from)?,
     }))
+}
+
+impl From<WakeEnvelopeError> for MobileWakeContractError {
+    fn from(error: WakeEnvelopeError) -> Self {
+        match error {
+            WakeEnvelopeError::InvalidRelay => Self::InvalidRelay,
+            WakeEnvelopeError::InvalidEventId => Self::InvalidEventId,
+            WakeEnvelopeError::InvalidWalletServicePublicKey => Self::InvalidWalletServicePublicKey,
+            WakeEnvelopeError::EmbeddedEventTooLarge => Self::EmbeddedEventTooLarge,
+            _ => Self::EmbeddedEventTooLarge,
+        }
+    }
 }
 
 /// Native time allocation derived from a complete OS background window.
@@ -425,7 +423,8 @@ mod tests {
         );
 
         let mut oversized = envelope();
-        oversized.embedded_event_json = Some("x".repeat(MAX_EMBEDDED_EVENT_BYTES + 1));
+        oversized.embedded_event_json =
+            Some("x".repeat(nwc_mobile::MAX_EMBEDDED_WAKE_EVENT_BYTES + 1));
         assert_eq!(
             validate_wake_envelope(oversized).unwrap_err(),
             MobileWakeContractError::EmbeddedEventTooLarge

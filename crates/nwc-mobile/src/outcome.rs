@@ -109,3 +109,63 @@ pub enum WakeDisposition {
         notification: NotificationHint,
     },
 }
+
+/// Stable high-level classification of an engine disposition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum WakeDispositionKind {
+    /// The request reached a durable terminal state.
+    Completed,
+    /// Another execution context already owns or completed the request.
+    AlreadyProcessed,
+    /// The containing application must resume the durable request.
+    QueuedForApplication,
+    /// Native or foreground code may retry after a delay.
+    RetryAfter,
+    /// The request failed a non-retriable check.
+    Rejected,
+}
+
+impl WakeDisposition {
+    /// Creates a conservative containing-application handoff.
+    #[must_use]
+    pub const fn queued(reason: QueueReason) -> Self {
+        Self::QueuedForApplication {
+            reason,
+            notification: NotificationHint::OpenApplication,
+        }
+    }
+
+    /// Creates a conservative invalid-payload rejection.
+    #[must_use]
+    pub const fn rejected(code: RejectionCode) -> Self {
+        Self::Rejected {
+            code,
+            notification: NotificationHint::OpenApplication,
+        }
+    }
+
+    /// Returns the stable high-level classification.
+    #[must_use]
+    pub const fn kind(self) -> WakeDispositionKind {
+        match self {
+            Self::Completed { .. } => WakeDispositionKind::Completed,
+            Self::AlreadyProcessed { .. } => WakeDispositionKind::AlreadyProcessed,
+            Self::QueuedForApplication { .. } => WakeDispositionKind::QueuedForApplication,
+            Self::RetryAfter { .. } => WakeDispositionKind::RetryAfter,
+            Self::Rejected { .. } => WakeDispositionKind::Rejected,
+        }
+    }
+
+    /// Returns generic presentation guidance without exposing result details.
+    #[must_use]
+    pub const fn notification(self) -> NotificationHint {
+        match self {
+            Self::Completed { notification }
+            | Self::AlreadyProcessed { notification }
+            | Self::QueuedForApplication { notification, .. }
+            | Self::RetryAfter { notification, .. }
+            | Self::Rejected { notification, .. } => notification,
+        }
+    }
+}
