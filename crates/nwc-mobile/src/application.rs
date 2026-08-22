@@ -618,6 +618,11 @@ pub struct ConnectionPresentation {
     created_at: UnixTimestamp,
     expires_at: Option<UnixTimestamp>,
     last_used_at: Option<UnixTimestamp>,
+    display_name: Option<String>,
+    icon_url: Option<String>,
+    spent_sat: u64,
+    budget_period_started_at: UnixTimestamp,
+    pending_info_event_relays: Vec<String>,
 }
 
 impl fmt::Debug for ConnectionPresentation {
@@ -642,7 +647,19 @@ impl ConnectionPresentation {
     pub(crate) fn from_active(
         connection: &ActiveConnection,
         last_used_at: Option<UnixTimestamp>,
+        metadata: Option<crate::ApplicationConnectionMetadata>,
+        usage: crate::ConnectionBudgetUsage,
     ) -> Self {
+        let (display_name, icon_url, pending_info_event_relays) = metadata.map_or_else(
+            || (None, None, Vec::new()),
+            |metadata| {
+                (
+                    Some(metadata.display_name().to_owned()),
+                    metadata.icon_url().map(str::to_owned),
+                    metadata.pending_info_event_relays().to_vec(),
+                )
+            },
+        );
         Self {
             id: connection.id().as_str().to_owned(),
             client_pubkey_hex: connection.client_pubkey().to_hex(),
@@ -658,6 +675,11 @@ impl ConnectionPresentation {
             created_at: connection.created_at(),
             expires_at: connection.expires_at(),
             last_used_at,
+            display_name,
+            icon_url,
+            spent_sat: usage.spent_sat(),
+            budget_period_started_at: usage.period_started_at(),
+            pending_info_event_relays,
         }
     }
 
@@ -715,6 +737,36 @@ impl ConnectionPresentation {
     #[must_use]
     pub const fn last_used_at(&self) -> Option<UnixTimestamp> {
         self.last_used_at
+    }
+
+    /// Returns the optional host-selected display name stored in the shared ledger.
+    #[must_use]
+    pub fn display_name(&self) -> Option<&str> {
+        self.display_name.as_deref()
+    }
+
+    /// Returns the optional validated HTTPS icon URL stored in the shared ledger.
+    #[must_use]
+    pub fn icon_url(&self) -> Option<&str> {
+        self.icon_url.as_deref()
+    }
+
+    /// Returns the durable amount consumed in the current accounting interval.
+    #[must_use]
+    pub const fn spent_sat(&self) -> u64 {
+        self.spent_sat
+    }
+
+    /// Returns the deterministic start of the current accounting interval.
+    #[must_use]
+    pub const fn budget_period_started_at(&self) -> UnixTimestamp {
+        self.budget_period_started_at
+    }
+
+    /// Returns capability-event relays still awaiting acknowledgement.
+    #[must_use]
+    pub fn pending_info_event_relays(&self) -> &[String] {
+        &self.pending_info_event_relays
     }
 }
 

@@ -2,11 +2,12 @@ use std::fmt;
 use std::sync::Mutex;
 
 use crate::{
-    ActiveConnection, ApprovedNwaConnection, BudgetInterval, BudgetPolicy, Clock, ConnectionId,
-    ConnectionManager, ConnectionPolicy, ConnectionRevision, ConnectionTombstone, FeePolicy,
-    LedgerError, LegacyConnectionImport, NewConnection, NwaApprovalError, NwaError, NwaParsePolicy,
-    NwaRequest, NwcEncryption, NwcMethod, RegistryError, StoredConnection, SystemClock,
-    UnixTimestamp, WakeLedger, WakePolicy, WakeRegistrationError,
+    ActiveConnection, ApplicationConnectionMetadata, ApprovedNwaConnection, BudgetInterval,
+    BudgetPolicy, Clock, ConnectionId, ConnectionManager, ConnectionPolicy, ConnectionRevision,
+    ConnectionTombstone, FeePolicy, LedgerError, LegacyConnectionImport, NewConnection,
+    NwaApprovalError, NwaError, NwaParsePolicy, NwaRequest, NwcEncryption, NwcMethod,
+    RegistryError, StoredConnection, SystemClock, UnixTimestamp, WakeLedger, WakePolicy,
+    WakeRegistrationError,
 };
 
 /// Stable failure returned by the batteries-included mobile service facade.
@@ -421,14 +422,42 @@ impl NwcMobileService {
         self.active_connections()?
             .iter()
             .map(|connection| {
-                self.ledger
-                    .last_completed_event_at(connection.id())
-                    .map(|last_used_at| {
-                        crate::ConnectionPresentation::from_active(connection, last_used_at)
-                    })
-                    .map_err(MobileServiceError::from)
+                let last_used_at = self.ledger.last_completed_event_at(connection.id())?;
+                let metadata = self.ledger.application_metadata(connection.id())?;
+                let usage = self.ledger.current_budget_usage(connection)?;
+                Ok(crate::ConnectionPresentation::from_active(
+                    connection,
+                    last_used_at,
+                    metadata,
+                    usage,
+                ))
             })
             .collect()
+    }
+
+    /// Persists non-sensitive display metadata and capability-publication work in the shared
+    /// ledger used by foreground and background processes.
+    pub fn set_connection_metadata(
+        &self,
+        id: &str,
+        metadata: ApplicationConnectionMetadata,
+    ) -> Result<(), MobileServiceError> {
+        let id =
+            ConnectionId::parse(id.to_owned()).map_err(|_| RegistryError::InvalidConnection)?;
+        self.ledger.upsert_application_metadata(&id, &metadata)?;
+        Ok(())
+    }
+
+    /// Acknowledges one successfully published NIP-47 capability event.
+    pub fn acknowledge_nwc_info_event(
+        &self,
+        id: &str,
+        relay_url: &str,
+    ) -> Result<(), MobileServiceError> {
+        let id =
+            ConnectionId::parse(id.to_owned()).map_err(|_| RegistryError::InvalidConnection)?;
+        self.ledger.acknowledge_nwc_info_event(&id, relay_url)?;
+        Ok(())
     }
 
     /// Permanently revokes an exact active revision.
@@ -692,5 +721,52 @@ mod tests {
             service.approve_pending_nwa(presentation.id_hex(), authorization(CLIENT), None),
             Err(MobileServiceError::NoPendingNwa)
         );
+    }
+
+    #[test]
+    fn service_owns_display_accounting_and_info_publication_state() {
+        let database = TestDatabase::new();
+        let service = NwcMobileService::open(&database.path).expect("service");
+        service
+            .create_host_connection(authorization(CLIENT))
+            .expect("connection");
+        service
+            .set_connection_metadata(
+                "connection:service",
+                ApplicationConnectionMetadata::new(
+                    "Example App",
+                    Some("https://app.example/icon.png".to_owned()),
+                    vec!["wss://relay.example/nwc".to_owned()],
+                )
+                .expect("metadata"),
+            )
+            .expect("store metadata");
+
+        let presentation = service
+            .connection_presentations()
+            .expect("presentations")
+            .pop()
+            .expect("connection presentation");
+        assert_eq!(presentation.display_name(), Some("Example App"));
+        assert_eq!(
+            presentation.icon_url(),
+            Some("https://app.example/icon.png")
+        );
+        assert_eq!(presentation.spent_sat(), 0);
+        assert_eq!(
+            presentation.pending_info_event_relays(),
+            &["wss://relay.example/nwc".to_owned()]
+        );
+
+        service
+            .acknowledge_nwc_info_event("connection:service", "wss://relay.example/nwc")
+            .expect("acknowledge info event");
+        assert!(service
+            .connection_presentations()
+            .expect("presentations")
+            .pop()
+            .expect("connection presentation")
+            .pending_info_event_relays()
+            .is_empty());
     }
 }
