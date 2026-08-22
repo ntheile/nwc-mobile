@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod application;
+mod application_coordinator;
 mod connection_registry;
 mod connection_service;
 mod engine;
@@ -36,6 +37,11 @@ pub use application::{
     ClientSecretStoreError, ConnectionDraft, ConnectionPresentation, ConnectionSelection,
     CreatedWalletConnection, NwaApprovalSelection, WalletConnectionRequest,
     DEFAULT_MAXIMUM_CONNECTION_RELAYS,
+};
+pub use application_coordinator::{
+    ApplicationRegistrationBegin, ApplicationRegistrationCompletion,
+    ApplicationRegistrationCoordinator, ApplicationRegistrationPass, NwaCallbackBegin,
+    NwaCallbackCompletion, NwaCallbackCoordinator,
 };
 pub use connection_registry::{
     ActiveConnection, ConnectionTombstone, NewConnection, RegistryError, StoredConnection,
