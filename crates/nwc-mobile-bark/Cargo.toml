@@ -1,0 +1,20 @@
+[package]
+name = "nwc-mobile-bark"
+description = "Bark wallet adapter for nwc-mobile"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+bark = { package = "bark-wallet", git = "https://gitlab.com/benthecarman/bark.git", rev = "3ec92d287a65195d73463c7f186ed4b1387fbf57", default-features = false, features = ["sqlite-bundled", "native", "tls-webpki-roots", "rand"] }
+bitcoin = "0.32"
+nwc-mobile = { version = "=0.1.0", path = "../nwc-mobile" }
+nwc-mobile-bolt11 = { version = "=0.1.0", path = "../nwc-mobile-bolt11" }
+nwc-mobile-tokio = { version = "=0.1.0", path = "../nwc-mobile-tokio" }
+serde_json = "1"
+
+[lints]
+workspace = true

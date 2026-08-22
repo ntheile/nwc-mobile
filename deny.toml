@@ -30,18 +30,28 @@ deny = [
 allow-build-scripts = [
   "ahash@0.8.12",
   "anyhow@1.0.104",
+  "bark-server-rpc@0.6.0",
   "bitcoin@0.32.102",
   "bitcoin-internals@0.6.0",
   "bitcoin-io@0.1.101",
   "camino@1.2.5",
+  "crunchy@0.2.4",
+  "erased-serde@0.4.10",
   "fs-err@2.11.0",
   "generic-array@0.14.7",
   "getrandom@0.3.4",
+  "getrandom@0.4.3",
   "hex_lit@0.1.1",
   "httparse@1.10.1",
+  "iana-time-zone-haiku@0.1.2",
   "libc@0.2.189",
+  "libm@0.2.16",
   "libsqlite3-sys@0.28.0",
+  "num-traits@0.2.19",
+  "parking_lot_core@0.9.12",
+  "prettyplease@0.2.37",
   "proc-macro2@1.0.107",
+  "pulldown-cmark@0.13.4",
   "quote@1.0.47",
   "quinn@0.11.9",
   "quinn-udp@0.5.10",
@@ -49,10 +59,13 @@ allow-build-scripts = [
   "rustls@0.23.43",
   "rustversion@1.0.23",
   "secp256k1-sys@0.10.1",
+  "secp256k1-sys@0.12.0",
   "serde@1.0.229",
   "serde_core@1.0.229",
   "serde_json@1.0.151",
   "thiserror@2.0.20",
+  "tiny-keccak@2.0.2",
+  "typeid@1.0.3",
   "unicode-joining-type@1.0.0",
   "wasm-bindgen@0.2.127",
   "wasm-bindgen-shared@0.2.127",
@@ -90,4 +103,4 @@ ignore = true
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+allow-git = ["https://gitlab.com/benthecarman/bark.git"]

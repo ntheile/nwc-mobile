@@ -80,7 +80,7 @@ pub fn payment_amount(
 /// Converts a millisatoshi amount at a whole-satoshi wallet boundary.
 pub fn exact_sats(amount: AmountMsat) -> Result<u64, HostError> {
     let amount_msat = amount.as_msat();
-    if amount_msat % 1_000 != 0 {
+    if !amount_msat.is_multiple_of(1_000) {
         return Err(rejected());
     }
     Ok(amount_msat / 1_000)

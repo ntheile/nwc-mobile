@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/nwc-mobile",
+    "crates/nwc-mobile-bark",
     "crates/nwc-mobile-bolt11",
     "crates/nwc-mobile-http",
     "crates/nwc-mobile-nostr",
@@ -13,7 +14,7 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.84"
+rust-version = "1.90"
 repository = "https://github.com/ntheile/nwc-mobile"
 license = "MIT"
 
