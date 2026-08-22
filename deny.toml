@@ -43,6 +43,8 @@ allow-build-scripts = [
   "libsqlite3-sys@0.28.0",
   "proc-macro2@1.0.107",
   "quote@1.0.47",
+  "quinn@0.11.9",
+  "quinn-udp@0.5.10",
   "rustix@1.1.4",
   "rustls@0.23.43",
   "rustversion@1.0.23",

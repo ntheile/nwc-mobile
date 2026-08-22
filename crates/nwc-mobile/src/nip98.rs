@@ -6,7 +6,7 @@ use nostr::nips::nip98::{HttpData, HttpMethod};
 use nostr::{EventBuilder, JsonUtil, Keys, SecretKey, Tag, Timestamp, Url};
 use zeroize::Zeroize;
 
-use crate::{SecureWakeServerUrl, UnixTimestamp};
+use crate::{PublicKey, SecureWakeServerUrl, UnixTimestamp};
 
 const AUTHORIZATION_LIFETIME_SECONDS: u64 = 60;
 const MAX_AUTHORIZED_PAYLOAD_BYTES: usize = 64 * 1024;
@@ -56,6 +56,12 @@ impl Nip98SigningKey {
 
     fn nostr_secret(&self) -> Result<SecretKey, Nip98AuthorizationError> {
         SecretKey::from_slice(&self.0).map_err(|_| Nip98AuthorizationError::InvalidSigningKey)
+    }
+
+    /// Derives the public key used by authorizations signed with this key.
+    pub fn public_key(&self) -> Result<PublicKey, Nip98AuthorizationError> {
+        let keys = Keys::new(self.nostr_secret()?);
+        Ok(PublicKey::from_bytes(*keys.public_key().as_bytes()))
     }
 }
 
@@ -251,5 +257,15 @@ mod tests {
             "Nip98Authorization([redacted])"
         );
         assert!(!format!("{authorization:?}").contains("Nostr "));
+    }
+
+    #[test]
+    fn signing_key_exposes_only_its_public_identity() {
+        let key = signing_key();
+        assert_eq!(key.public_key().expect("public key").as_bytes().len(), 32);
+        assert_ne!(
+            key.public_key().expect("public key").as_bytes(),
+            &[7_u8; 32]
+        );
     }
 }

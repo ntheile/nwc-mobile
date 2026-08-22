@@ -5,11 +5,12 @@ repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 approved="${repository_root}/supply-chain/approved-build-units.txt"
 classifier="${repository_root}/scripts/classify-build-units.jq"
 observed="$(mktemp)"
-trap 'rm -f "${observed}"' EXIT
+metadata="$(mktemp)"
+trap 'rm -f "${observed}" "${metadata}"' EXIT
 
 cd "${repository_root}"
-cargo metadata --locked --format-version 1 \
-  | jq --raw-output --from-file "${classifier}" \
+cargo metadata --locked --format-version 1 > "${metadata}"
+jq --raw-output --from-file "${classifier}" "${metadata}" \
   | LC_ALL=C sort > "${observed}"
 
 if ! diff --unified "${approved}" "${observed}"; then
