@@ -19,7 +19,8 @@ The package:
 - parses only the expected APNs routing fields;
 - creates one cancellation bridge and one asynchronous attempt per request;
 - cancels work and chooses an open-app fallback when the NSE is expiring;
-- resolves the completion path exactly once; and
+- resolves the completion path exactly once;
+- provides an atomic, cross-process file inbox for NSE-to-app handoff; and
 - removes untrusted notification presentation fields before applying static,
   wallet-localized generic copy.
 
