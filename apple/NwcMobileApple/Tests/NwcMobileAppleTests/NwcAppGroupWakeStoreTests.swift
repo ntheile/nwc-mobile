@@ -38,4 +38,29 @@ struct NwcAppGroupWakeStoreTests {
     store.clearDebugEntries()
     #expect(try store.debugEntries().isEmpty)
   }
+
+  @Test("reports legacy Keychain cleanup failures so callers can retry")
+  func reportsLegacyKeychainCleanupFailures() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let suite = "NwcAppGroupWakeStoreTests.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer {
+      defaults.removePersistentDomain(forName: suite)
+      try? FileManager.default.removeItem(at: root)
+    }
+    defaults.set("legacy", forKey: "legacy-default")
+    let store = NwcAppGroupWakeStore(
+      inbox: NwcAppGroupWakeInbox(rootURL: root),
+      defaults: defaults,
+      deleteLegacyKeychainValue: { _, _ in false }
+    )
+
+    let removed = store.removeLegacyState(
+      defaultsKeys: ["legacy-default"],
+      keychainEntries: [(vault: NwcKeychainVault(service: "test"), key: "legacy-secret")]
+    )
+
+    #expect(!removed)
+    #expect(defaults.object(forKey: "legacy-default") == nil)
+  }
 }

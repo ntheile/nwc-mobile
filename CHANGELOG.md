@@ -8,6 +8,8 @@ public API stabilizes.
 
 ## Unreleased
 
+- Fixed application revocation and Apple legacy cleanup so transient Keychain
+  deletion failures remain observable and retryable.
 - Added an application workflow that atomically generates, stores, persists,
   exports, approves, and revokes wallet connections behind a narrow secret-store
   capability.
