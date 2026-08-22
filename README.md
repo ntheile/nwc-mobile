@@ -195,6 +195,11 @@ the NSE wiring contract and payload keys.
 The containing app uses the same ledger and resubmits queued wake envelopes from
 its wallet-owned inbox when it is launched or foregrounded.
 
+`NwcAppGroupWakeInbox` resolves the shared App Group container, creates the
+wallet's Rust data directory, delegates atomic queue operations, and migrates
+the flat `UserDefaults` queue used by early integrations. This keeps App Group
+path and cross-process handoff boilerplate out of individual wallet targets.
+
 For maintenance outside the NSE, `NwcMaintenanceCoordinator` serializes bounded
 payment reconciliation and wake-registration processing, prevents overlapping
 runs, and propagates iOS task expiration into the shared Rust cancellation
