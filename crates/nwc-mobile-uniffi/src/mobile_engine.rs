@@ -195,6 +195,84 @@ pub struct MobileConnectionState {
     pub active: bool,
 }
 
+/// Authoritative non-sensitive connection fields stored by the shared engine.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct MobileConnectionPresentation {
+    /// Stable wallet-local identifier.
+    pub connection_id: String,
+    /// Authorized client public key.
+    pub client_public_key_hex: String,
+    /// Wallet-service public key.
+    pub wallet_service_public_key_hex: String,
+    /// Canonical secure relay allowlist.
+    pub relay_urls: Vec<String>,
+    /// Exact implemented method allowlist.
+    pub methods: Vec<MobileNwcMethod>,
+    /// Budget limit for one policy interval.
+    pub budget_limit_sat: u64,
+    /// Budget renewal interval.
+    pub budget_interval: MobileBudgetInterval,
+    /// Original creation timestamp.
+    pub created_at_seconds: u64,
+    /// Optional authorization expiration timestamp.
+    pub expires_at_seconds: Option<u64>,
+    /// Latest successfully completed wake timestamp.
+    pub last_used_at_seconds: Option<u64>,
+}
+
+/// Complete non-sensitive connection state for native application rendering.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct MobileConnectionView {
+    /// Stable wallet-local identifier.
+    pub id: String,
+    /// Host-selected display name.
+    pub name: String,
+    /// Validated remote icon URL.
+    pub icon_url: Option<String>,
+    /// Host-resolved cache URL used only for rendering.
+    pub icon_display_url: Option<String>,
+    /// Canonical newline-delimited secure relay list.
+    pub relay: String,
+    /// Whether the wallet owns exportable client secret material.
+    pub wallet_managed_secret: bool,
+    /// Wallet-service public key.
+    pub service_pubkey: String,
+    /// Authorized client public key.
+    pub client_pubkey: String,
+    /// Budget limit for the current interval.
+    pub budget_sat: u64,
+    /// Durable amount consumed in the current interval.
+    pub spent_sat: u64,
+    /// Display-ready budget amount.
+    pub budget_display: String,
+    /// Display-ready consumed amount.
+    pub spent_display: String,
+    /// Budget renewal interval.
+    pub budget_interval: MobileBudgetInterval,
+    /// Display-ready renewal interval.
+    pub budget_interval_display: String,
+    /// Exact implemented method allowlist.
+    pub permissions: Vec<MobileNwcMethod>,
+    /// Original creation timestamp.
+    pub created_at: u64,
+    /// Latest successfully completed wake timestamp.
+    pub last_used_at: Option<u64>,
+    /// Optional authorization expiration timestamp.
+    pub expires_at: Option<u64>,
+    /// Start of the durable accounting period.
+    pub budget_period_started_at: u64,
+    /// Capability events still awaiting publication.
+    pub pending_info_event_relays: Vec<String>,
+}
+
+impl MobileConnectionView {
+    /// Returns the exact method allowlist in canonical order.
+    #[must_use]
+    pub fn enabled_permissions(&self) -> Vec<MobileNwcMethod> {
+        self.permissions.clone()
+    }
+}
+
 /// Non-sensitive fields safe for a native NWA approval screen.
 #[derive(Clone, Eq, PartialEq, uniffi::Record)]
 pub struct MobileNwaRequestPresentation {
@@ -242,6 +320,21 @@ impl fmt::Debug for MobileNwaRequestPresentation {
             .field("expires_at", &self.expires_at)
             .finish()
     }
+}
+
+/// Application-level NWA session state shared by native hosts.
+#[derive(Clone, Debug, Default, Eq, PartialEq, uniffi::Record)]
+pub struct MobileNwaSessionState {
+    /// Validated request currently awaiting a decision.
+    pub request: Option<MobileNwaRequestPresentation>,
+    /// Host-resolved local icon URL used only for rendering.
+    pub icon_display_url: Option<String>,
+    /// Whether an approval transaction is in progress.
+    pub approving: bool,
+    /// Stable host-facing error message, when present.
+    pub error_message: Option<String>,
+    /// Whether the approved callback still needs to be opened.
+    pub callback_pending: bool,
 }
 
 /// Result of an atomically persisted NWA approval.
@@ -394,6 +487,21 @@ impl MobileNwcEngine {
                     .collect()
             })
             .map_err(MobileEngineError::from)
+    }
+
+    /// Lists complete non-sensitive connection presentations in stable order.
+    pub fn connection_presentations(
+        &self,
+    ) -> Result<Vec<MobileConnectionPresentation>, MobileEngineError> {
+        self.service
+            .connection_presentations()
+            .map(|connections| {
+                connections
+                    .into_iter()
+                    .map(mobile_connection_presentation)
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .map_err(MobileEngineError::from)?
     }
 
     /// Idempotently imports a complete legacy host registry snapshot.
@@ -656,6 +764,32 @@ fn mobile_nwa_presentation(
             .map(mobile_nwc_method)
             .collect::<Result<Vec<_>, _>>()?,
         expires_at: request.expires_at().map(nwc_mobile::UnixTimestamp::as_secs),
+    })
+}
+
+fn mobile_connection_presentation(
+    connection: nwc_mobile::ConnectionPresentation,
+) -> Result<MobileConnectionPresentation, MobileEngineError> {
+    Ok(MobileConnectionPresentation {
+        connection_id: connection.id().to_owned(),
+        client_public_key_hex: connection.client_pubkey_hex().to_owned(),
+        wallet_service_public_key_hex: connection.wallet_service_pubkey_hex().to_owned(),
+        relay_urls: connection.relay_urls().to_vec(),
+        methods: connection
+            .methods()
+            .iter()
+            .copied()
+            .map(mobile_nwc_method)
+            .collect::<Result<Vec<_>, _>>()?,
+        budget_limit_sat: connection.budget_limit_sat(),
+        budget_interval: mobile_budget_interval(connection.budget_interval())?,
+        created_at_seconds: connection.created_at().as_secs(),
+        expires_at_seconds: connection
+            .expires_at()
+            .map(nwc_mobile::UnixTimestamp::as_secs),
+        last_used_at_seconds: connection
+            .last_used_at()
+            .map(nwc_mobile::UnixTimestamp::as_secs),
     })
 }
 

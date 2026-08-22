@@ -28,9 +28,10 @@ pub use host_bridge::{
     MobileWalletInfo, MobileWalletTransaction,
 };
 pub use mobile_engine::{
-    MobileBudgetInterval, MobileConnectionRequest, MobileConnectionState, MobileEngineError,
-    MobileFeePolicy, MobileLegacyConnection, MobileMigrationReport, MobileNwaApprovalResult,
-    MobileNwaRequestPresentation, MobileNwcEncryption, MobileNwcEngine,
+    MobileBudgetInterval, MobileConnectionPresentation, MobileConnectionRequest,
+    MobileConnectionState, MobileConnectionView, MobileEngineError, MobileFeePolicy,
+    MobileLegacyConnection, MobileMigrationReport, MobileNwaApprovalResult,
+    MobileNwaRequestPresentation, MobileNwaSessionState, MobileNwcEncryption, MobileNwcEngine,
     MobilePaymentReconciliationReport, MobileWakeRegistrationReport,
 };
 
@@ -52,6 +53,44 @@ pub struct MobileWakeEnvelope {
     pub embedded_event_json: Option<String>,
     /// Whole seconds since the Unix epoch when the native adapter received it.
     pub received_at_seconds: u64,
+}
+
+/// Bounded display history for a wake handled by the containing application.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct MobileProcessedWakeRequest {
+    /// Secure relay selected for the wake.
+    pub relay_url: String,
+    /// Canonical event identifier.
+    pub event_id_hex: String,
+    /// Authorized client public key when known.
+    pub client_public_key_hex: String,
+    /// NIP-47 method name when known.
+    pub method: String,
+    /// Stable local completion status.
+    pub status: String,
+    /// Associated principal amount when known.
+    pub amount_sat: u64,
+    /// Native receipt timestamp.
+    pub received_at_seconds: u64,
+    /// Application completion timestamp.
+    pub processed_at_seconds: u64,
+}
+
+/// Parses canonical or compatibility push JSON into the shared native envelope.
+#[uniffi::export]
+pub fn parse_mobile_wake_payload_json(
+    payload_json: String,
+    received_at_seconds: u64,
+) -> Option<MobileWakeEnvelope> {
+    WakeEnvelope::parse_json(&payload_json, received_at_seconds)
+        .ok()
+        .map(|envelope| MobileWakeEnvelope {
+            relay_url: envelope.relay_url().to_owned(),
+            event_id_hex: envelope.event_id_hex().to_owned(),
+            wallet_service_public_key_hex: envelope.wallet_service_public_key_hex().to_owned(),
+            embedded_event_json: envelope.embedded_event_json().map(str::to_owned),
+            received_at_seconds: envelope.received_at_seconds(),
+        })
 }
 
 impl fmt::Debug for MobileWakeEnvelope {
