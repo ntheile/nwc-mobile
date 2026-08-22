@@ -187,6 +187,13 @@ validated `LegacyConnectionImport` values to
 authorization drift, and reports durable tombstones that the host must remove
 from its legacy display state.
 
+Hosts whose persisted models still contain string identifiers, hexadecimal
+keys, and relay URLs can use `NewConnection::from_host_strings` as the single
+typed validation boundary. For NWA, pass that result to
+`ConnectionManager::approve_nwa_connection`; it binds the client and expiration
+to the reviewed request, enforces the approved authority subset, constructs the
+public callback, and persists the authorization atomically.
+
 ## Native background helpers
 
 ### Apple

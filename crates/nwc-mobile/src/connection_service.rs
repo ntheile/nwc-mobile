@@ -291,23 +291,10 @@ impl<'a> ConnectionManager<'a> {
         approval: NwaApproval,
         wake_policy: WakePolicy,
     ) -> Result<ApprovedNwaConnection, NwaApprovalError> {
-        validate_nwa_authority_subset(&request, &approval)?;
-        let callback_relays = approval
-            .relays
-            .iter()
-            .map(|relay| relay.as_str().to_owned())
-            .collect::<Vec<_>>();
-        let callback_url = request
-            .callback()
-            .map(|callback| {
-                callback.approved_url(
-                    &approval.wallet_service_pubkey,
-                    &callback_relays,
-                    approval.lud16.as_deref(),
-                )
-            })
-            .transpose()?
-            .map(|url| url.to_string());
+        if approval.request_id != request.id() {
+            return Err(NwaApprovalError::AuthorityEscalation);
+        }
+        let lud16 = approval.lud16;
         let connection = NewConnection::new(
             approval.connection_id,
             request.client_pubkey().clone(),
@@ -318,6 +305,37 @@ impl<'a> ConnectionManager<'a> {
             wake_policy,
         )
         .map(|connection| connection.with_expiration(request.expires_at()))?;
+        self.approve_nwa_connection(request, connection, lud16)
+    }
+
+    /// Validates and persists a host-built connection for an NWA request.
+    ///
+    /// The client key and expiration remain bound to the reviewed request, and
+    /// the connection's relay, method, and budget authority must be a subset.
+    /// The public callback is constructed before the registry changes.
+    pub fn approve_nwa_connection(
+        &self,
+        request: NwaRequest,
+        connection: NewConnection,
+        lud16: Option<String>,
+    ) -> Result<ApprovedNwaConnection, NwaApprovalError> {
+        validate_nwa_connection_subset(&request, &connection)?;
+        let callback_relays = connection
+            .relays()
+            .iter()
+            .map(|relay| relay.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let callback_url = request
+            .callback()
+            .map(|callback| {
+                callback.approved_url(
+                    connection.wallet_service_pubkey(),
+                    &callback_relays,
+                    lud16.as_deref(),
+                )
+            })
+            .transpose()?
+            .map(|url| url.to_string());
         let connection = self.create(connection)?;
         Ok(ApprovedNwaConnection {
             connection,
@@ -326,27 +344,28 @@ impl<'a> ConnectionManager<'a> {
     }
 }
 
-fn validate_nwa_authority_subset(
+fn validate_nwa_connection_subset(
     request: &NwaRequest,
-    approval: &NwaApproval,
+    connection: &NewConnection,
 ) -> Result<(), NwaApprovalError> {
     let requested_policy = request.requested_policy();
     let requested_budget = requested_policy.budget();
-    let approved_budget = approval.policy.budget();
-    let relays_are_requested = approval.relays.iter().all(|approved| {
+    let approved_policy = connection.policy();
+    let approved_budget = approved_policy.budget();
+    let relays_are_requested = connection.relays().iter().all(|approved| {
         request
             .relays()
             .iter()
             .any(|requested| requested == approved.as_str())
     });
-    let methods_are_requested = approval
-        .policy
+    let methods_are_requested = approved_policy
         .methods()
         .all(|method| requested_policy.allows(method));
-    if approval.request_id != request.id()
-        || approval.relays.is_empty()
+    if connection.client_pubkey() != request.client_pubkey()
+        || connection.expires_at() != request.expires_at()
+        || connection.relays().is_empty()
         || !relays_are_requested
-        || approval.policy.methods().len() == 0
+        || approved_policy.methods().len() == 0
         || !methods_are_requested
         || approved_budget.limit_sat() > requested_budget.limit_sat()
         || approved_budget.interval() != requested_budget.interval()
@@ -617,6 +636,68 @@ mod tests {
         assert!(callback.starts_with("https://app.example/nwa#"));
         assert!(callback.contains("status=approved"));
         assert!(callback.contains("lud16=wallet%40example.com"));
+    }
+
+    #[test]
+    fn host_built_nwa_connection_remains_bound_to_the_request() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        let clock = FixedClock(UnixTimestamp::from_secs(101));
+        let manager = ConnectionManager::new(&ledger, &clock);
+        let request = nwa_request();
+        let connection = NewConnection::from_host_strings(
+            "connection:host-nwa".to_owned(),
+            CLIENT,
+            WALLET,
+            vec!["wss://relay.example/nwc".to_owned()],
+            ConnectionPolicy::new(
+                [NwcMethod::GetInfo],
+                BudgetPolicy::new(
+                    500,
+                    BudgetInterval::Daily,
+                    FeePolicy::CountTowardBudget {
+                        maximum_fee_sat: 10,
+                    },
+                ),
+            ),
+            NwcEncryption::LegacyNip04,
+            WakePolicy::default(),
+        )
+        .expect("host connection")
+        .with_expiration(request.expires_at());
+
+        let approved = manager
+            .approve_nwa_connection(request, connection, Some("wallet@example.com".to_owned()))
+            .expect("approve host connection");
+        assert_eq!(approved.connection().id().as_str(), "connection:host-nwa");
+        assert!(approved
+            .callback_url()
+            .is_some_and(|callback| callback.contains("status=approved")));
+
+        let request = nwa_request();
+        let wrong_client = NewConnection::from_host_strings(
+            "connection:wrong-client".to_owned(),
+            CLIENT_TWO,
+            WALLET,
+            vec!["wss://relay.example/nwc".to_owned()],
+            ConnectionPolicy::new(
+                [NwcMethod::GetInfo],
+                BudgetPolicy::new(
+                    500,
+                    BudgetInterval::Daily,
+                    FeePolicy::CountTowardBudget {
+                        maximum_fee_sat: 10,
+                    },
+                ),
+            ),
+            NwcEncryption::LegacyNip04,
+            WakePolicy::default(),
+        )
+        .expect("host connection");
+        assert_eq!(
+            manager.approve_nwa_connection(request, wrong_client, None),
+            Err(NwaApprovalError::AuthorityEscalation)
+        );
     }
 
     #[test]
