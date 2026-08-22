@@ -8,6 +8,7 @@ public struct NwcAppGroupWakeStore: @unchecked Sendable {
   private let inbox: NwcAppGroupWakeInbox
   private let defaults: UserDefaults
   private let debugLog: NwcWakeDebugLog
+  private let deleteLegacyKeychainValue: @Sendable (NwcKeychainVault, String) -> Bool
 
   public init?(
     appGroupIdentifier: String,
@@ -24,7 +25,8 @@ public struct NwcAppGroupWakeStore: @unchecked Sendable {
       inbox: inbox,
       defaults: defaults,
       debugLogKey: debugLogKey,
-      maximumDebugEntries: maximumDebugEntries
+      maximumDebugEntries: maximumDebugEntries,
+      deleteLegacyKeychainValue: { vault, key in vault.deleteValue(forKey: key) }
     )
   }
 
@@ -35,8 +37,25 @@ public struct NwcAppGroupWakeStore: @unchecked Sendable {
     debugLogKey: String = "nwcWakeDebugLog",
     maximumDebugEntries: Int = 30
   ) {
+    self.init(
+      inbox: inbox,
+      defaults: defaults,
+      debugLogKey: debugLogKey,
+      maximumDebugEntries: maximumDebugEntries,
+      deleteLegacyKeychainValue: { vault, key in vault.deleteValue(forKey: key) }
+    )
+  }
+
+  init(
+    inbox: NwcAppGroupWakeInbox,
+    defaults: UserDefaults,
+    debugLogKey: String = "nwcWakeDebugLog",
+    maximumDebugEntries: Int = 30,
+    deleteLegacyKeychainValue: @escaping @Sendable (NwcKeychainVault, String) -> Bool
+  ) {
     self.inbox = inbox
     self.defaults = defaults
+    self.deleteLegacyKeychainValue = deleteLegacyKeychainValue
     debugLog = NwcWakeDebugLog(
       defaults: defaults,
       key: debugLogKey,
@@ -89,13 +108,16 @@ public struct NwcAppGroupWakeStore: @unchecked Sendable {
   }
 
   /// Removes obsolete defaults and Keychain state from pre-file-inbox integrations.
+  @discardableResult
   public func removeLegacyState(
     defaultsKeys: [String],
     keychainEntries: [(vault: NwcKeychainVault, key: String)] = []
-  ) {
+  ) -> Bool {
     defaultsKeys.forEach(defaults.removeObject(forKey:))
-    keychainEntries.forEach { entry in
-      entry.vault.deleteValue(forKey: entry.key)
+    return keychainEntries.reduce(into: true) { allDeleted, entry in
+      if !deleteLegacyKeychainValue(entry.vault, entry.key) {
+        allDeleted = false
+      }
     }
   }
 }

@@ -584,9 +584,10 @@ impl NwcMobileService {
             .connection_presentations()?
             .into_iter()
             .find(|connection| connection.id() == connection_id)
-            .map(|connection| connection.client_pubkey_hex().to_owned());
+            .map(|connection| connection.client_pubkey_hex().to_owned())
+            .or_else(|| application_client_pubkey_from_id(connection_id));
         self.revoke_host_connection(connection_id)?;
-        let client_secret_deleted = client_pubkey_hex.is_none_or(|client_pubkey_hex| {
+        let client_secret_deleted = client_pubkey_hex.is_some_and(|client_pubkey_hex| {
             secrets
                 .delete_client_secret(&client_secret_storage_key(&client_pubkey_hex))
                 .is_ok()
@@ -595,6 +596,13 @@ impl NwcMobileService {
             client_secret_deleted,
         })
     }
+}
+
+fn application_client_pubkey_from_id(connection_id: &str) -> Option<String> {
+    let client_pubkey_hex = connection_id.strip_prefix("nwc-")?;
+    NostrPublicKey::from_hex(client_pubkey_hex)
+        .ok()
+        .map(|public_key| public_key.to_hex())
 }
 
 /// Non-sensitive authoritative connection data safe for application state.
@@ -811,6 +819,7 @@ impl From<RegistryError> for ApplicationError {
 mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     use super::*;
@@ -849,6 +858,66 @@ mod tests {
 
         fn delete_client_secret(&self, storage_key: &str) -> Result<(), ClientSecretStoreError> {
             self.0
+                .lock()
+                .map_err(|_| ClientSecretStoreError)?
+                .remove(storage_key);
+            Ok(())
+        }
+    }
+
+    struct FlakyDeleteSecrets {
+        values: Mutex<HashMap<String, String>>,
+        remaining_delete_failures: AtomicUsize,
+        delete_attempts: AtomicUsize,
+    }
+
+    impl FlakyDeleteSecrets {
+        fn fail_next_delete() -> Self {
+            Self {
+                values: Mutex::new(HashMap::new()),
+                remaining_delete_failures: AtomicUsize::new(1),
+                delete_attempts: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl ClientSecretStore for FlakyDeleteSecrets {
+        fn load_client_secret(
+            &self,
+            storage_key: &str,
+        ) -> Result<Option<String>, ClientSecretStoreError> {
+            Ok(self
+                .values
+                .lock()
+                .map_err(|_| ClientSecretStoreError)?
+                .get(storage_key)
+                .cloned())
+        }
+
+        fn store_client_secret(
+            &self,
+            storage_key: &str,
+            secret: &str,
+        ) -> Result<(), ClientSecretStoreError> {
+            self.values
+                .lock()
+                .map_err(|_| ClientSecretStoreError)?
+                .insert(storage_key.to_owned(), secret.to_owned());
+            Ok(())
+        }
+
+        fn delete_client_secret(&self, storage_key: &str) -> Result<(), ClientSecretStoreError> {
+            self.delete_attempts.fetch_add(1, Ordering::Relaxed);
+            if self
+                .remaining_delete_failures
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(ClientSecretStoreError);
+            }
+            self.values
                 .lock()
                 .map_err(|_| ClientSecretStoreError)?
                 .remove(storage_key);
@@ -983,5 +1052,49 @@ mod tests {
                 MobileServiceError::Registry(RegistryError::NotFound)
             ))
         );
+    }
+
+    #[test]
+    fn revocation_retries_secret_deletion_after_the_connection_is_tombstoned() {
+        let database = TestDatabase::new();
+        let service = NwcMobileService::open(&database.path).expect("service");
+        let secrets = FlakyDeleteSecrets::fail_next_delete();
+        let created = service
+            .create_wallet_connection(
+                WalletConnectionRequest::new(
+                    WALLET.to_owned(),
+                    "wss://relay.example/nwc".to_owned(),
+                    String::new(),
+                    vec![NwcMethod::GetInfo],
+                    1_000,
+                    BudgetInterval::Daily,
+                    NwcEncryption::Nip44V2,
+                    None,
+                    None,
+                ),
+                &secrets,
+            )
+            .expect("created");
+        let connection_id = created.connection().id().as_str().to_owned();
+        let storage_key = client_secret_storage_key(created.draft().client_pubkey_hex());
+
+        let first = service
+            .revoke_application_connection(&connection_id, &secrets)
+            .expect("authorization revoked");
+        assert!(!first.client_secret_deleted());
+        assert!(secrets
+            .load_client_secret(&storage_key)
+            .expect("secret store")
+            .is_some());
+
+        let second = service
+            .revoke_application_connection(&connection_id, &secrets)
+            .expect("idempotent retry");
+        assert!(second.client_secret_deleted());
+        assert_eq!(secrets.delete_attempts.load(Ordering::Relaxed), 2);
+        assert!(secrets
+            .load_client_secret(&storage_key)
+            .expect("secret store")
+            .is_none());
     }
 }
