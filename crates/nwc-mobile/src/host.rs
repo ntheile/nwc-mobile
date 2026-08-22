@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use url::Url;
@@ -80,6 +81,35 @@ impl OperationBudget {
 pub trait CancellationSignal: Send + Sync {
     /// Returns `true` once work should stop and checkpoint.
     fn is_cancelled(&self) -> bool;
+}
+
+/// Thread-safe monotonic cancellation shared by native lifecycle adapters.
+#[derive(Debug, Default)]
+pub struct AtomicCancellation(AtomicBool);
+
+impl AtomicCancellation {
+    /// Creates an active cancellation signal.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self(AtomicBool::new(false))
+    }
+
+    /// Permanently marks the signal as cancelled.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    /// Returns whether cancellation has been requested.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+impl CancellationSignal for AtomicCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.is_cancelled()
+    }
 }
 
 /// A cancellation signal for foreground work without external cancellation.

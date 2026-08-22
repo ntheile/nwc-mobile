@@ -120,6 +120,12 @@ duplicate tasks, retain retry attempts across delayed work, apply bounded
 exponential backoff to app-owned queues, and translate `WakeDisposition` into a
 single terminal-or-retry action.
 
+Native entry points can parse provider JSON with `WakeEnvelope`, share an
+`AtomicCancellation`, and use `run_bounded_background_wake` so wallet setup and
+engine execution consume one monotonic OS budget. Bark hosts can call
+`execute_bark_wake` from foreground and background paths without rebuilding the
+engine wiring.
+
 ## Host integration
 
 A wallet supplies an implementation of a narrow Rust capability interface:

@@ -23,6 +23,7 @@ mod payment_reconciliation;
 mod policy;
 mod time;
 mod types;
+mod wake_envelope;
 mod wake_registration;
 mod wake_registration_worker;
 
@@ -41,11 +42,11 @@ pub use foreground::{
     DEFAULT_FOREGROUND_WAKE_RETRY_BASE_DELAY,
 };
 pub use host::{
-    AmountMsat, AmountSat, CancellationSignal, CreatedInvoice, HostError, HostErrorKind,
-    HostFuture, InvoiceLookup, ListTransactionsRequest, MakeInvoiceRequest, NeverCancelled,
-    OperationBudget, OperationContext, PayInvoiceRequest, PaymentFailure, PaymentQuote,
-    PaymentStatus, RelayTransport, SecretProvider, SecureRelayUrl, SecureWakeServerUrl,
-    TransactionDirection, WalletBackend, WalletInfo, WalletTransaction,
+    AmountMsat, AmountSat, AtomicCancellation, CancellationSignal, CreatedInvoice, HostError,
+    HostErrorKind, HostFuture, InvoiceLookup, ListTransactionsRequest, MakeInvoiceRequest,
+    NeverCancelled, OperationBudget, OperationContext, PayInvoiceRequest, PaymentFailure,
+    PaymentQuote, PaymentStatus, RelayTransport, SecretProvider, SecureRelayUrl,
+    SecureWakeServerUrl, TransactionDirection, WalletBackend, WalletInfo, WalletTransaction,
 };
 pub use ledger::{ClaimOutcome, EventLease, LedgerError, TerminalEvent, TerminalKind, WakeLedger};
 pub use nip98::{Nip98Authorization, Nip98AuthorizationError, Nip98SigningKey};
@@ -55,7 +56,9 @@ pub use nostr_validation::{
 };
 pub use nwa::{NwaCallback, NwaError, NwaParsePolicy, NwaRequest, NwaRequestId};
 pub use nwc_info::{build_nwc_info_event, NwcInfoEventError};
-pub use outcome::{NotificationHint, QueueReason, RejectionCode, RetryReason, WakeDisposition};
+pub use outcome::{
+    NotificationHint, QueueReason, RejectionCode, RetryReason, WakeDisposition, WakeDispositionKind,
+};
 pub use payment_accounting::{
     DurablePaymentState, PaymentAccountingError, PaymentAttempt, PaymentReservationOutcome,
 };
@@ -68,6 +71,9 @@ pub use time::{BackgroundBudget, Clock, SystemClock, UnixTimestamp};
 pub use types::{
     ConnectionId, ConnectionRevision, EventId, NwcMethod, PaymentHash, PaymentPreimage, PublicKey,
     WakeInput,
+};
+pub use wake_envelope::{
+    WakeEnvelope, WakeEnvelopeError, MAX_EMBEDDED_WAKE_EVENT_BYTES, MAX_WAKE_PAYLOAD_JSON_BYTES,
 };
 pub use wake_registration::{
     WakeRegistrationChange, WakeRegistrationError, MAX_WAKE_REGISTRATION_BATCH,

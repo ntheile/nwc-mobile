@@ -13,10 +13,12 @@ use bark::persist::models::SettledLightningReceive;
 use bark::Wallet;
 use bitcoin::Amount;
 use nwc_mobile::{
-    AmountMsat, CreatedInvoice, HostError, HostErrorKind, HostFuture, InvoiceLookup,
-    ListTransactionsRequest, MakeInvoiceRequest, NwcMethod, OperationContext, PayInvoiceRequest,
-    PaymentFailure, PaymentHash, PaymentPreimage, PaymentQuote, PaymentStatus, PublicKey,
-    TransactionDirection, UnixTimestamp, WalletBackend, WalletInfo, WalletTransaction,
+    AmountMsat, CancellationSignal, CreatedInvoice, HostError, HostErrorKind, HostFuture,
+    InvoiceLookup, ListTransactionsRequest, MakeInvoiceRequest, NwcMethod, OperationBudget,
+    OperationContext, PayInvoiceRequest, PaymentFailure, PaymentHash, PaymentPreimage,
+    PaymentQuote, PaymentStatus, PublicKey, RelayTransport, SecretProvider, SystemClock,
+    TransactionDirection, UnixTimestamp, WakeDisposition, WakeEngine, WakeInput, WakeLedger,
+    WakePolicy, WalletBackend, WalletInfo, WalletTransaction,
 };
 use nwc_mobile_bolt11::{
     created_invoice, exact_sats, parse_invoice, payment_amount_sats, quote_invoice_sats,
@@ -41,6 +43,34 @@ impl BarkWalletBackend {
             service_pubkey,
         }
     }
+}
+
+/// Executes one wake using an already-open Bark wallet and standard policy.
+///
+/// This is the shared assembly point used by foreground applications and native
+/// background extensions. The wake envelope selects the advertised service
+/// identity; authorization is still loaded from the durable ledger before any
+/// wallet or secret capability is used.
+pub async fn execute_bark_wake(
+    ledger: &WakeLedger,
+    wallet: Wallet,
+    relays: &dyn RelayTransport,
+    secrets: &dyn SecretProvider,
+    input: WakeInput,
+    budget: OperationBudget,
+    cancellation: &dyn CancellationSignal,
+) -> WakeDisposition {
+    let wallet = BarkWalletBackend::new(wallet, input.wallet_service_pubkey().clone());
+    WakeEngine::new(
+        ledger,
+        &wallet,
+        relays,
+        secrets,
+        &SystemClock,
+        WakePolicy::default(),
+    )
+    .execute(input, budget, cancellation)
+    .await
 }
 
 impl WalletBackend for BarkWalletBackend {

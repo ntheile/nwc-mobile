@@ -18,6 +18,8 @@ public API stabilizes.
   contract.
 - A foreground wake coordinator for process-local ownership, bounded retries,
   and consistent engine-disposition handling.
+- Shared native wake-envelope parsing, cancellation, bounded background
+  execution, and Bark engine assembly helpers.
 - Locked and checksum-verified Rust and Android dependency controls.
 
 ### Changed
