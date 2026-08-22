@@ -4,7 +4,7 @@ import Foundation
 ///
 /// The values remain unvalidated until the generated Rust API creates a
 /// `MobileWakeEnvelope`. They must never be logged by the native adapter.
-public struct NwcWakePayload: Sendable, Equatable {
+public struct NwcWakePayload: Sendable, Equatable, Codable {
   public let relayURL: String
   public let eventIDHex: String
   public let walletServicePublicKeyHex: String
