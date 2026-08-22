@@ -29,7 +29,8 @@ pub use connection_registry::{
     ActiveConnection, ConnectionTombstone, NewConnection, RegistryError, StoredConnection,
 };
 pub use connection_service::{
-    ApprovedNwaConnection, ConnectionManager, NwaApproval, NwaApprovalError,
+    ApprovedNwaConnection, ConnectionManager, LegacyConnectionImport, LegacyMigrationResult,
+    NwaApproval, NwaApprovalError,
 };
 pub use engine::{ReadOnlyWakeEngine, WakeEngine};
 pub use error::DomainError;

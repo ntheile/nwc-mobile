@@ -163,6 +163,12 @@ receives its own execution budget and `MobileCancellation`, so an NSE or Android
 worker can cancel one background attempt without poisoning later foreground
 work.
 
+Rust hosts migrating an existing application-owned connection list can pass
+validated `LegacyConnectionImport` values to
+`ConnectionManager::migrate_legacy_batch`. The batch is idempotent, rejects
+authorization drift, and reports durable tombstones that the host must remove
+from its legacy display state.
+
 ## Native background helpers
 
 ### Apple
