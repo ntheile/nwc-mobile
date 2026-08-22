@@ -20,7 +20,9 @@ The package:
 - creates one cancellation bridge and one asynchronous attempt per request;
 - cancels work and chooses an open-app fallback when the NSE is expiring;
 - resolves the completion path exactly once;
-- provides an atomic, cross-process file inbox for NSE-to-app handoff; and
+- provides an atomic, cross-process file inbox for NSE-to-app handoff;
+- provides a bounded `UserDefaults` debug log for static wallet-authored
+  diagnostics; and
 - removes untrusted notification presentation fields before applying static,
   wallet-localized generic copy.
 
