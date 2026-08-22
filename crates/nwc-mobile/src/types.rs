@@ -85,9 +85,12 @@ impl Hex32 {
         }
 
         let mut decoded = [0_u8; 32];
-        for (output, pair) in decoded.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
-            let high = decode_hex_nibble(pair[0]).ok_or(DomainError::InvalidHex)?;
-            let low = decode_hex_nibble(pair[1]).ok_or(DomainError::InvalidHex)?;
+        for (index, output) in decoded.iter_mut().enumerate() {
+            let pair_start = index * 2;
+            let high =
+                decode_hex_nibble(value.as_bytes()[pair_start]).ok_or(DomainError::InvalidHex)?;
+            let low = decode_hex_nibble(value.as_bytes()[pair_start + 1])
+                .ok_or(DomainError::InvalidHex)?;
             *output = (high << 4) | low;
         }
         Ok(Self(decoded))
