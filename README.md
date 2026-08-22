@@ -133,6 +133,13 @@ engine wiring.
 Applications should start with `NwcMobileService` in Rust or `MobileNwcEngine`
 through Swift/Kotlin. These facades own the complete connection lifecycle:
 
+Application-level helpers also validate connection drafts, canonicalize relay
+storage, select conservative fee reserves, build export URIs, and derive
+non-sensitive connection presentations. The UniFFI package contains shared
+connection views, NWA session state, wake envelopes, and wake-history records,
+leaving host wallets to own only product metadata, secret storage, navigation,
+and wallet opening.
+
 - validated host connection creation and idempotent legacy migration;
 - retained NWA request review and authority-bound approval;
 - durable usage lookup and permanent revision-bound revocation;

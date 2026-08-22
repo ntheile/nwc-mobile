@@ -1,23 +1,42 @@
 # UniFFI binding generator dependency review
 
-Reviewed on 2026-08-20 for the workspace-pinned Swift and Kotlin binding
+Reviewed again on 2026-08-22 for the workspace-pinned Swift and Kotlin binding
 generator. All packages resolve from crates.io with checksums committed in
 `Cargo.lock`; none are yanked or use a Git dependency. Every newly approved
-compile-time package was published more than seven days before this review.
+compile-time package passed the configured release-age firewall before the
+lockfile was updated.
 
 ## Direct generator components
 
 | Package | Released | Publisher | Repository | Packaged VCS commit |
 | --- | --- | --- | --- | --- |
-| `uniffi_bindgen 0.29.4` | 2025-07-24 | `bendk` | `mozilla/uniffi-rs` | `00cd7e313cf73c78637161831ff17f8f53f7b824` |
-| `uniffi_udl 0.29.4` | 2025-07-24 | `bendk` | `mozilla/uniffi-rs` | `00cd7e313cf73c78637161831ff17f8f53f7b824` |
+| `uniffi_bindgen 0.31.1` | Mozilla UniFFI maintainers | `mozilla/uniffi-rs` | lockfile checksum verified |
+| `uniffi_udl 0.31.1` | Mozilla UniFFI maintainers | `mozilla/uniffi-rs` | lockfile checksum verified |
 
 The crates.io owner set for both packages is `badboy`, `mhammond`, `skhamis`,
 and `bendk`, consistent with the existing pinned UniFFI project. The generator
 is isolated in a non-publishable workspace tool and is not part of a production
 `nwc-mobile-uniffi` package-only build.
 
-## Newly approved compile-time packages
+## UniFFI 0.31 graph changes
+
+The 0.31.1 source was inspected from Cargo's verified registry cache. The
+procedural macros operate on Rust tokens and emit UniFFI metadata; the binding
+generator reads Cargo metadata and templates and writes generated bindings to
+the caller-selected output directory. No reviewed component contains a network
+client, credential lookup, or unbounded subprocess execution path.
+
+New or upgraded parser and target-support units are `askama_derive 0.14.0`,
+`askama_parser 0.14.0`, `toml 0.9.12+spec-1.1.0`, `toml_datetime
+0.7.5+spec-1.1.0`, `toml_parser 1.1.3+spec-1.1.0`, `toml_writer
+1.1.2+spec-1.1.0`, `serde_spanned 1.1.1`, `winnow 1.0.4`, `siphasher 1.0.3`,
+`rand_core 0.10.1`, `r-efi 6.0.0`, `windows-link 0.2.1`, and `windows-sys
+0.61.2`. Their manifests point to the established Askama, toml-rs,
+rust-random, r-efi, Microsoft windows-rs, and winnow repositories. Their
+compile-time roles are limited to token transformation, parsing, serialization,
+randomness traits, or target declarations.
+
+## Previously approved compile-time packages
 
 | Package | Released | Publisher / owner | Packaged VCS commit | Compile-time behavior reviewed |
 | --- | --- | --- | --- | --- |
@@ -39,7 +58,7 @@ compile-time unit.
 
 ## Minimum-Rust resolver constraints
 
-UniFFI 0.29 permits any Clap 4.x release. The unconstrained resolver selected
+UniFFI permits any Clap 4.x release. The unconstrained resolver selected
 Clap 4.6 and `clap_lex 1.1`, whose Edition 2024 manifests require Cargo 1.85.
 The tool manifest therefore pins `clap 4.5.61` and `clap_lex 1.0.0`, both
 published months before this review with Rust 1.74 minimums. It also pins

@@ -8,6 +8,11 @@ public API stabilizes.
 
 ## Unreleased
 
+- Added application-level connection validation, relay normalization, fee
+  policy, export URI construction, and non-sensitive presentations.
+- Added shared native connection, NWA session, wake-envelope, and wake-history
+  records so containing wallets do not need parallel domain models.
+- Aligned the UniFFI runtime and binding generator on the reviewed 0.31.1 ABI.
 - Added `NwcMobileService`, a batteries-included facade that owns NWA sessions,
   host connection validation, legacy migration, durable usage, revocation, and
   wake-registration refresh state.

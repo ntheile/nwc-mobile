@@ -284,6 +284,13 @@ impl HostConnectionAuthorization {
         )
         .map(|connection| connection.with_expiration(self.expires_at))
     }
+
+    /// Validates this host authorization using the default mobile wake policy.
+    pub fn validate(&self) -> Result<(), RegistryError> {
+        self.clone()
+            .into_connection(WakePolicy::default())
+            .map(drop)
+    }
 }
 
 /// One legacy host authorization and its already-consumed accounting state.
@@ -381,6 +388,23 @@ impl NwcMobileService {
     /// Lists active authorizations in stable creation order.
     pub fn active_connections(&self) -> Result<Vec<ActiveConnection>, MobileServiceError> {
         Ok(ConnectionManager::new(&self.ledger, &SystemClock).active_connections()?)
+    }
+
+    /// Lists complete non-sensitive connection presentations in stable creation order.
+    pub fn connection_presentations(
+        &self,
+    ) -> Result<Vec<crate::ConnectionPresentation>, MobileServiceError> {
+        self.active_connections()?
+            .iter()
+            .map(|connection| {
+                self.ledger
+                    .last_completed_event_at(connection.id())
+                    .map(|last_used_at| {
+                        crate::ConnectionPresentation::from_active(connection, last_used_at)
+                    })
+                    .map_err(MobileServiceError::from)
+            })
+            .collect()
     }
 
     /// Permanently revokes an exact active revision.
