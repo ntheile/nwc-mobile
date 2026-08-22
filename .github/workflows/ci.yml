@@ -89,7 +89,7 @@ jobs:
         run: ./scripts/check-generated-bindings.sh
 
   msrv:
-    name: Minimum supported Rust 1.84
+    name: Minimum supported Rust 1.90
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -98,19 +98,24 @@ jobs:
           persist-credentials: false
 
       - name: Install minimum supported Rust
-        run: rustup toolchain install 1.84.0 --profile minimal
+        run: rustup toolchain install 1.90.0 --profile minimal
 
       - name: Test with minimum supported Rust
-        run: cargo +1.84.0 test --locked --workspace --all-features
+        run: cargo +1.90.0 test --locked --workspace --all-features
 
   supply-chain:
     name: Dependency policy
     runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: 1.90.0
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Install policy Rust toolchain
+        run: rustup toolchain install 1.90.0 --profile minimal
 
       - name: Install verified cargo-deny
         shell: bash

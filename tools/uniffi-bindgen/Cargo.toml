@@ -8,8 +8,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-# Clap 4.6 uses Edition 2024 manifests and requires Rust 1.85. Keep the
-# workspace tool compatible with the repository's Rust 1.84 minimum.
+# Keep the reviewed binding-tool dependency graph pinned.
 clap = { version = "=4.5.61", default-features = false }
 clap_lex = "=1.0.0"
 smawk = "=0.3.2"

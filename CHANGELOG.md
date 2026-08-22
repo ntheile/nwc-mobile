@@ -14,4 +14,11 @@ public API stabilizes.
   reconciliation.
 - Nostr Wallet Auth parsing and revision-bound connection lifecycle.
 - UniFFI contracts with Swift NSE, Android WorkManager, and maintenance helpers.
+- An optional Bark wallet adapter implementing the complete `WalletBackend`
+  contract.
 - Locked and checksum-verified Rust and Android dependency controls.
+
+### Changed
+
+- The minimum supported Rust version is now 1.90, matching the pinned Bark
+  wallet revision used by the optional adapter.

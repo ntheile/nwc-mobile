@@ -93,6 +93,7 @@ budget.
 nwc-mobile/
 ├── crates/
 │   ├── nwc-mobile/             # Rust engine, protocol, ledger, and policy
+│   ├── nwc-mobile-bark/        # Optional Bark WalletBackend adapter
 │   ├── nwc-mobile-bolt11/      # Optional BOLT11 wallet-adapter helpers
 │   ├── nwc-mobile-http/        # HTTPS/NIP-98 wake-registration transport
 │   ├── nwc-mobile-nostr/       # Bounded WebSocket relay transport
@@ -108,6 +109,11 @@ The core engine remains independent of a network runtime. Rust hosts that use
 Tokio can opt into `nwc-mobile-nostr` for a bounded WSS transport with redirect,
 message-size, deadline, and cancellation enforcement. Native companion packages
 stay small and optional.
+
+Bark-based wallets can opt into `nwc-mobile-bark` to reuse the complete
+`WalletBackend` implementation, including invoice creation and payment,
+idempotent status lookup, transaction history conversion, fee enforcement, and
+deadline/cancellation handling.
 
 ## Host integration
 
