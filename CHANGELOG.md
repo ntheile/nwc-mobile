@@ -8,6 +8,7 @@ public API stabilizes.
 
 ## Unreleased
 
+- Added an idempotent, revision-bound host connection revocation API.
 - Added a bounded Nostr info-event publisher so host wallets no longer need to
   coordinate relay validation, signing, budgeting, and transport themselves.
 

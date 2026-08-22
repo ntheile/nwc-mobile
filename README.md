@@ -194,6 +194,10 @@ typed validation boundary. For NWA, pass that result to
 to the reviewed request, enforces the approved authority subset, constructs the
 public callback, and persists the authorization atomically.
 
+`ConnectionManager::revoke_host_connection` parses a persisted host identifier
+and performs idempotent, revision-bound permanent revocation without requiring
+the application to coordinate registry snapshots itself.
+
 Rust wallets can publish public NIP-47 capability events through
 `nwc_mobile_nostr::publish_nwc_info_event`. The bounded adapter owns secure
 relay validation, signing, timeout enforcement, and relay transport; the host

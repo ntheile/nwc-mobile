@@ -279,6 +279,24 @@ impl<'a> ConnectionManager<'a> {
             .tombstone_connection(id, expected_revision, self.clock.now())
     }
 
+    /// Permanently revokes the current revision identified by a host string.
+    ///
+    /// Repeated calls are idempotent after a tombstone exists. The manager
+    /// loads and revokes the same active snapshot so host applications do not
+    /// need to reproduce revision-bound state-machine coordination.
+    pub fn revoke_host_connection(
+        &self,
+        host_id: &str,
+    ) -> Result<Option<ConnectionTombstone>, RegistryError> {
+        let id = ConnectionId::parse(host_id.to_owned())
+            .map_err(|_| RegistryError::InvalidConnection)?;
+        match self.connection(&id)? {
+            Some(StoredConnection::Active(active)) => self.revoke(&id, active.revision()).map(Some),
+            Some(StoredConnection::Tombstoned(_)) => Ok(None),
+            None => Err(RegistryError::NotFound),
+        }
+    }
+
     /// Validates an NWA approval as a subset of the request and persists it.
     ///
     /// The public callback is constructed before the registry changes so a
@@ -491,6 +509,35 @@ mod tests {
             manager.connection(first.id()).expect("load first"),
             Some(StoredConnection::Tombstoned(_))
         ));
+    }
+
+    #[test]
+    fn host_revocation_is_revision_bound_idempotent_and_fail_closed() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        let clock = FixedClock(UnixTimestamp::from_secs(100));
+        let manager = ConnectionManager::new(&ledger, &clock);
+        manager
+            .create(connection("connection:host-revoke"))
+            .expect("create");
+
+        let tombstone = manager
+            .revoke_host_connection("connection:host-revoke")
+            .expect("revoke")
+            .expect("new tombstone");
+        assert_eq!(tombstone.id().as_str(), "connection:host-revoke");
+        assert_eq!(
+            manager.revoke_host_connection("connection:host-revoke"),
+            Ok(None)
+        );
+        assert_eq!(
+            manager.revoke_host_connection("connection:missing"),
+            Err(RegistryError::NotFound)
+        );
+        assert_eq!(
+            manager.revoke_host_connection("invalid id"),
+            Err(RegistryError::InvalidConnection)
+        );
     }
 
     #[test]
