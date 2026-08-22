@@ -128,6 +128,34 @@ engine wiring.
 
 ## Host integration
 
+### Batteries-included service facade
+
+Applications should start with `NwcMobileService` in Rust or `MobileNwcEngine`
+through Swift/Kotlin. These facades own the complete connection lifecycle:
+
+- validated host connection creation and idempotent legacy migration;
+- retained NWA request review and authority-bound approval;
+- durable usage lookup and permanent revision-bound revocation;
+- wake-registration refresh, bounded provider processing, and payment
+  reconciliation; and
+- validated wake execution through narrow wallet, relay, and secret
+  capabilities.
+
+The containing wallet maps its persisted display model into one connection
+record and supplies OS/wallet capabilities. It should not implement NWA parsing,
+connection policy, replay handling, payment accounting, registration outboxes,
+or retry state machines. A typical native integration keeps one
+`MobileNwcEngine` for the app-owned ledger and calls its lifecycle methods from
+UI actions; the iOS NSE or Android worker opens the same ledger and calls
+`executeWake`.
+
+For existing wallets, pass the complete old registry once to
+`migrateLegacyConnections`, delete records and secrets named by the returned
+report, and then treat the `nwc-mobile` ledger as authoritative. New NWA flows
+use `openNwaRequest`, render only `MobileNwaRequestPresentation`, call
+`approvePendingNwa`, deliver the verified callback if present, and finally call
+`clearPendingNwa`.
+
 A wallet supplies an implementation of a narrow Rust capability interface:
 
 ```rust,ignore

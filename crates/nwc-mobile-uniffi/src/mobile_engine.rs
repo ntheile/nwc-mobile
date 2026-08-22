@@ -7,12 +7,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nwc_mobile::{
-    ActiveConnection, BudgetInterval, BudgetPolicy, ConnectionId, ConnectionManager,
-    ConnectionPolicy, FeePolicy, LedgerError, NewConnection, NwcEncryption, NwcMethod,
-    OperationBudget, PaymentAccountingError, PaymentReconciler, PaymentReconciliationError,
-    PublicKey, RegistryError, SecureRelayUrl, SecureWakeServerUrl, StoredConnection, SystemClock,
-    UnixTimestamp, WakeEngine, WakeLedger, WakePolicy, WakeRegistrationError,
-    WakeRegistrationWorker, WakeRegistrationWorkerError,
+    ActiveConnection, BudgetInterval, ConnectionRevision, FeePolicy, HostConnectionAuthorization,
+    LedgerError, LegacyHostConnection, MobileServiceError, NwaApprovalError, NwcEncryption,
+    NwcMethod, NwcMobileService, OperationBudget, PaymentAccountingError, PaymentReconciler,
+    PaymentReconciliationError, RegistryError, SecureWakeServerUrl, StoredConnection, SystemClock,
+    WakeEngine, WakeRegistrationError, WakeRegistrationWorker, WakeRegistrationWorkerError,
 };
 
 use crate::host_bridge::{MobileHostBridge, MobileWakeRegistrationBridge};
@@ -43,6 +42,14 @@ pub enum MobileEngineError {
     StaleRevision,
     /// The connection was already permanently revoked.
     AlreadyRevoked,
+    /// An untrusted NWA request was invalid, expired, or outside policy.
+    InvalidNwaRequest,
+    /// Another NWA request is already awaiting completion.
+    NwaAlreadyPending,
+    /// No reviewed NWA request is available for approval.
+    NoPendingNwa,
+    /// The proposed NWA approval exceeded the reviewed request.
+    NwaAuthorityEscalation,
 }
 
 impl fmt::Display for MobileEngineError {
@@ -56,6 +63,10 @@ impl fmt::Display for MobileEngineError {
             Self::NotFound => "NWC connection was not found",
             Self::StaleRevision => "NWC connection revision is stale",
             Self::AlreadyRevoked => "NWC connection is already revoked",
+            Self::InvalidNwaRequest => "NWA request is invalid or outside policy",
+            Self::NwaAlreadyPending => "an NWA request is already pending",
+            Self::NoPendingNwa => "no NWA request is pending",
+            Self::NwaAuthorityEscalation => "NWA approval exceeds the reviewed request",
         })
     }
 }
@@ -184,6 +195,84 @@ pub struct MobileConnectionState {
     pub active: bool,
 }
 
+/// Non-sensitive fields safe for a native NWA approval screen.
+#[derive(Clone, Eq, PartialEq, uniffi::Record)]
+pub struct MobileNwaRequestPresentation {
+    /// Random identity binding approval to the retained request.
+    pub request_id_hex: String,
+    /// Requesting client's public key.
+    pub client_public_key_hex: String,
+    /// Sanitized, unverified requester name.
+    pub display_name: String,
+    /// Validated HTTPS icon URL, when supplied.
+    pub icon_url: Option<String>,
+    /// Verified callback host, when supplied.
+    pub requesting_app_description: Option<String>,
+    /// Verified callback target shown to the user.
+    pub callback_target_description: String,
+    /// Exact secure relay list requested by the client.
+    pub relay_urls: Vec<String>,
+    /// Requested spending limit in satoshis.
+    pub budget_limit_sat: u64,
+    /// Requested budget renewal interval.
+    pub budget_interval: MobileBudgetInterval,
+    /// Requested NWC methods in canonical order.
+    pub methods: Vec<MobileNwcMethod>,
+    /// Optional request expiration timestamp.
+    pub expires_at: Option<u64>,
+}
+
+impl fmt::Debug for MobileNwaRequestPresentation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MobileNwaRequestPresentation")
+            .field("request_id_hex", &"[redacted]")
+            .field("client_public_key_hex", &"[redacted]")
+            .field("display_name", &"[redacted]")
+            .field("has_icon", &self.icon_url.is_some())
+            .field(
+                "has_requesting_app_description",
+                &self.requesting_app_description.is_some(),
+            )
+            .field("callback_target_description", &"[redacted]")
+            .field("relay_count", &self.relay_urls.len())
+            .field("budget_limit_sat", &self.budget_limit_sat)
+            .field("budget_interval", &self.budget_interval)
+            .field("methods", &self.methods)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+/// Result of an atomically persisted NWA approval.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct MobileNwaApprovalResult {
+    /// Durable connection lifecycle state.
+    pub connection: MobileConnectionState,
+    /// Verified public callback URL, when the request supplied one.
+    pub callback_url: Option<String>,
+}
+
+/// One legacy host authorization and its already-consumed accounting state.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct MobileLegacyConnection {
+    /// Complete trusted authorization from the host's legacy registry.
+    pub authorization: MobileConnectionRequest,
+    /// Original connection creation timestamp.
+    pub created_at_seconds: u64,
+    /// Spending already consumed in the current legacy budget period.
+    pub budget_used_sat: u64,
+}
+
+/// Stale host records discovered during idempotent migration.
+#[derive(Clone, Debug, Default, Eq, PartialEq, uniffi::Record)]
+pub struct MobileMigrationReport {
+    /// Connection identifiers that are already permanently revoked.
+    pub revoked_connection_ids: Vec<String>,
+    /// Client keys whose legacy secret material may be scrubbed.
+    pub revoked_client_public_keys_hex: Vec<String>,
+}
+
 /// Non-sensitive aggregate result of one payment reconciliation pass.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, uniffi::Record)]
 pub struct MobilePaymentReconciliationReport {
@@ -234,11 +323,10 @@ impl fmt::Debug for MobileConnectionState {
 /// Long-lived, cross-process NWC engine opened over one shared SQLite ledger.
 #[derive(uniffi::Object)]
 pub struct MobileNwcEngine {
-    ledger: WakeLedger,
+    service: NwcMobileService,
     wallet: Arc<dyn MobileWalletBackend>,
     relays: Arc<dyn MobileRelayTransport>,
     secrets: Arc<dyn MobileSecretProvider>,
-    policy: WakePolicy,
 }
 
 #[uniffi::export]
@@ -252,13 +340,12 @@ impl MobileNwcEngine {
         secrets: Arc<dyn MobileSecretProvider>,
     ) -> Result<Arc<Self>, MobileEngineError> {
         validate_database_path(&database_path)?;
-        let ledger = WakeLedger::open(&database_path).map_err(MobileEngineError::from)?;
+        let service = NwcMobileService::open(&database_path).map_err(MobileEngineError::from)?;
         Ok(Arc::new(Self {
-            ledger,
+            service,
             wallet,
             relays,
             secrets,
-            policy: WakePolicy::default(),
         }))
     }
 
@@ -267,10 +354,9 @@ impl MobileNwcEngine {
         &self,
         request: MobileConnectionRequest,
     ) -> Result<MobileConnectionState, MobileEngineError> {
-        let connection = core_connection(request, self.policy)?;
-        let clock = SystemClock;
-        let active = ConnectionManager::new(&self.ledger, &clock)
-            .create(connection)
+        let active = self
+            .service
+            .create_host_connection(core_authorization(request)?)
             .map_err(MobileEngineError::from)?;
         Ok(mobile_active_connection_state(&active))
     }
@@ -280,10 +366,8 @@ impl MobileNwcEngine {
         &self,
         connection_id: String,
     ) -> Result<Option<MobileConnectionState>, MobileEngineError> {
-        let connection_id =
-            ConnectionId::parse(connection_id).map_err(|_| MobileEngineError::InvalidArgument)?;
-        let clock = SystemClock;
-        let connection = ConnectionManager::new(&self.ledger, &clock)
+        let connection = self
+            .service
             .connection(&connection_id)
             .map_err(MobileEngineError::from)?;
         connection.map(mobile_connection_state).transpose()
@@ -291,8 +375,7 @@ impl MobileNwcEngine {
 
     /// Lists active connection lifecycle states in stable creation order.
     pub fn active_connections(&self) -> Result<Vec<MobileConnectionState>, MobileEngineError> {
-        let clock = SystemClock;
-        ConnectionManager::new(&self.ledger, &clock)
+        self.service
             .active_connections()
             .map(|connections| {
                 connections
@@ -303,19 +386,70 @@ impl MobileNwcEngine {
             .map_err(MobileEngineError::from)
     }
 
+    /// Idempotently imports a complete legacy host registry snapshot.
+    pub fn migrate_legacy_connections(
+        &self,
+        connections: Vec<MobileLegacyConnection>,
+    ) -> Result<MobileMigrationReport, MobileEngineError> {
+        let connections = connections
+            .into_iter()
+            .map(|legacy| {
+                Ok(LegacyHostConnection::new(
+                    core_authorization(legacy.authorization)?,
+                    nwc_mobile::UnixTimestamp::from_secs(legacy.created_at_seconds),
+                    legacy.budget_used_sat,
+                ))
+            })
+            .collect::<Result<Vec<_>, MobileEngineError>>()?;
+        let report = self
+            .service
+            .migrate_legacy_connections(connections)
+            .map_err(MobileEngineError::from)?;
+        Ok(MobileMigrationReport {
+            revoked_connection_ids: report.revoked_connection_ids().to_vec(),
+            revoked_client_public_keys_hex: report.revoked_client_pubkeys().to_vec(),
+        })
+    }
+
+    /// Permanently and idempotently revokes a host connection identifier.
+    pub fn revoke_host_connection(&self, connection_id: String) -> Result<(), MobileEngineError> {
+        self.service
+            .revoke_host_connection(&connection_id)
+            .map_err(MobileEngineError::from)
+    }
+
+    /// Returns the latest successfully completed wake time for one connection.
+    pub fn last_completed_event_at(
+        &self,
+        connection_id: String,
+    ) -> Result<Option<u64>, MobileEngineError> {
+        self.service
+            .last_completed_event_at(&connection_id)
+            .map(|timestamp| timestamp.map(nwc_mobile::UnixTimestamp::as_secs))
+            .map_err(MobileEngineError::from)
+    }
+
+    /// Requeues active provider registrations after permission or token changes.
+    pub fn refresh_wake_registrations(&self, enabled: bool) -> Result<u64, MobileEngineError> {
+        self.service
+            .refresh_wake_registrations(enabled)
+            .and_then(|count| {
+                u64::try_from(count).map_err(|_| MobileServiceError::StateUnavailable)
+            })
+            .map_err(MobileEngineError::from)
+    }
+
     /// Permanently revokes the expected active connection revision.
     pub fn revoke_connection(
         &self,
         connection_id: String,
         expected_revision: u64,
     ) -> Result<MobileConnectionState, MobileEngineError> {
-        let connection_id =
-            ConnectionId::parse(connection_id).map_err(|_| MobileEngineError::InvalidArgument)?;
-        let clock = SystemClock;
-        let tombstone = ConnectionManager::new(&self.ledger, &clock)
-            .revoke(
+        let tombstone = self
+            .service
+            .revoke_connection(
                 &connection_id,
-                nwc_mobile::ConnectionRevision::from_value(expected_revision),
+                ConnectionRevision::from_value(expected_revision),
             )
             .map_err(MobileEngineError::from)?;
         Ok(MobileConnectionState {
@@ -323,6 +457,50 @@ impl MobileNwcEngine {
             revision: tombstone.revision().value(),
             active: false,
         })
+    }
+
+    /// Validates and retains one NWA request for explicit native review.
+    pub fn open_nwa_request(
+        &self,
+        request_uri: String,
+    ) -> Result<MobileNwaRequestPresentation, MobileEngineError> {
+        self.service
+            .open_nwa_request(&request_uri)
+            .map_err(MobileEngineError::from)
+            .and_then(mobile_nwa_presentation)
+    }
+
+    /// Returns the currently retained NWA request, when present.
+    pub fn pending_nwa_request(
+        &self,
+    ) -> Result<Option<MobileNwaRequestPresentation>, MobileEngineError> {
+        self.service
+            .pending_nwa_request()
+            .map_err(MobileEngineError::from)
+            .and_then(|request| request.map(mobile_nwa_presentation).transpose())
+    }
+
+    /// Atomically validates and persists approval of the retained NWA request.
+    pub fn approve_pending_nwa(
+        &self,
+        request: MobileConnectionRequest,
+        lud16: Option<String>,
+    ) -> Result<MobileNwaApprovalResult, MobileEngineError> {
+        let approved = self
+            .service
+            .approve_pending_nwa(core_authorization(request)?, lud16)
+            .map_err(MobileEngineError::from)?;
+        Ok(MobileNwaApprovalResult {
+            connection: mobile_active_connection_state(approved.connection()),
+            callback_url: approved.callback_url().map(str::to_owned),
+        })
+    }
+
+    /// Completes or cancels the current native NWA session.
+    pub fn clear_pending_nwa(&self) -> Result<(), MobileEngineError> {
+        self.service
+            .clear_pending_nwa()
+            .map_err(MobileEngineError::from)
     }
 
     /// Executes one validated wake within the native background budget.
@@ -341,7 +519,14 @@ impl MobileNwcEngine {
             cancellation.clone(),
         );
         let clock = SystemClock;
-        let engine = WakeEngine::new(&self.ledger, &host, &host, &host, &clock, self.policy);
+        let engine = WakeEngine::new(
+            self.service.ledger(),
+            &host,
+            &host,
+            &host,
+            &clock,
+            Default::default(),
+        );
         Ok(engine
             .execute(wake.core_input(), budget, cancellation.as_ref())
             .await
@@ -362,7 +547,7 @@ impl MobileNwcEngine {
             self.secrets.clone(),
             cancellation.clone(),
         );
-        let report = PaymentReconciler::new(&self.ledger, &host, &SystemClock)
+        let report = PaymentReconciler::new(self.service.ledger(), &host, &SystemClock)
             .reconcile(maximum_attempts, budget, cancellation.as_ref())
             .await
             .map_err(MobileEngineError::from)?;
@@ -390,10 +575,11 @@ impl MobileNwcEngine {
             .map_err(|_| MobileEngineError::InvalidArgument)?;
         let budget = operation_budget(execution_milliseconds)?;
         let bridge = MobileWakeRegistrationBridge::new(transport, cancellation.clone());
-        let report = WakeRegistrationWorker::new(&self.ledger, &bridge, &server_url, &SystemClock)
-            .run(usize::from(maximum_changes), budget, cancellation.as_ref())
-            .await
-            .map_err(MobileEngineError::from)?;
+        let report =
+            WakeRegistrationWorker::new(self.service.ledger(), &bridge, &server_url, &SystemClock)
+                .run(usize::from(maximum_changes), budget, cancellation.as_ref())
+                .await
+                .map_err(MobileEngineError::from)?;
         Ok(MobileWakeRegistrationReport {
             examined: u16::try_from(report.examined())
                 .map_err(|_| MobileEngineError::CorruptData)?,
@@ -413,21 +599,9 @@ fn operation_budget(execution_milliseconds: u64) -> Result<OperationBudget, Mobi
         .map_err(|_| MobileEngineError::InvalidArgument)
 }
 
-fn core_connection(
+fn core_authorization(
     request: MobileConnectionRequest,
-    wake_policy: WakePolicy,
-) -> Result<NewConnection, MobileEngineError> {
-    let connection_id = ConnectionId::parse(request.connection_id)
-        .map_err(|_| MobileEngineError::InvalidArgument)?;
-    let client_public_key = PublicKey::from_hex(&request.client_public_key_hex)
-        .map_err(|_| MobileEngineError::InvalidArgument)?;
-    let wallet_service_public_key = PublicKey::from_hex(&request.wallet_service_public_key_hex)
-        .map_err(|_| MobileEngineError::InvalidArgument)?;
-    let relays = request
-        .relay_urls
-        .into_iter()
-        .map(|relay| SecureRelayUrl::parse(&relay).map_err(|_| MobileEngineError::InvalidArgument))
-        .collect::<Result<Vec<_>, _>>()?;
+) -> Result<HostConnectionAuthorization, MobileEngineError> {
     let method_count = request.methods.len();
     let methods = request
         .methods
@@ -437,25 +611,67 @@ fn core_connection(
     if methods.is_empty() || methods.len() != method_count {
         return Err(MobileEngineError::InvalidArgument);
     }
-    let policy = ConnectionPolicy::new(
-        methods,
-        BudgetPolicy::new(
-            request.budget_limit_sat,
-            request.budget_interval.into(),
-            request.fee_policy.into(),
-        ),
-    );
-    NewConnection::new(
-        connection_id,
-        client_public_key,
-        wallet_service_public_key,
-        relays,
-        policy,
+    Ok(HostConnectionAuthorization::new(
+        request.connection_id,
+        request.client_public_key_hex,
+        request.wallet_service_public_key_hex,
+        request.relay_urls,
+        methods.into_iter().collect(),
+        request.budget_limit_sat,
+        request.budget_interval.into(),
+        request.fee_policy.into(),
         request.encryption.into(),
-        wake_policy,
-    )
-    .map(|connection| connection.with_expiration(request.expires_at.map(UnixTimestamp::from_secs)))
-    .map_err(MobileEngineError::from)
+        request.expires_at.map(nwc_mobile::UnixTimestamp::from_secs),
+    ))
+}
+
+fn mobile_nwa_presentation(
+    request: nwc_mobile::NwaRequestPresentation,
+) -> Result<MobileNwaRequestPresentation, MobileEngineError> {
+    Ok(MobileNwaRequestPresentation {
+        request_id_hex: request.id_hex().to_owned(),
+        client_public_key_hex: request.client_pubkey_hex().to_owned(),
+        display_name: request.display_name().to_owned(),
+        icon_url: request.icon_url().map(str::to_owned),
+        requesting_app_description: request.requesting_app_description().map(str::to_owned),
+        callback_target_description: request.callback_target_description().to_owned(),
+        relay_urls: request.relay_urls().to_vec(),
+        budget_limit_sat: request.budget_limit_sat(),
+        budget_interval: mobile_budget_interval(request.budget_interval())?,
+        methods: request
+            .methods()
+            .iter()
+            .copied()
+            .map(mobile_nwc_method)
+            .collect::<Result<Vec<_>, _>>()?,
+        expires_at: request.expires_at().map(nwc_mobile::UnixTimestamp::as_secs),
+    })
+}
+
+const fn mobile_budget_interval(
+    interval: BudgetInterval,
+) -> Result<MobileBudgetInterval, MobileEngineError> {
+    Ok(match interval {
+        BudgetInterval::Never => MobileBudgetInterval::Never,
+        BudgetInterval::Hourly => MobileBudgetInterval::Hourly,
+        BudgetInterval::Daily => MobileBudgetInterval::Daily,
+        BudgetInterval::Weekly => MobileBudgetInterval::Weekly,
+        BudgetInterval::Monthly => MobileBudgetInterval::Monthly,
+        BudgetInterval::Yearly => MobileBudgetInterval::Yearly,
+        _ => return Err(MobileEngineError::CorruptData),
+    })
+}
+
+const fn mobile_nwc_method(method: NwcMethod) -> Result<MobileNwcMethod, MobileEngineError> {
+    Ok(match method {
+        NwcMethod::GetInfo => MobileNwcMethod::GetInfo,
+        NwcMethod::GetBalance => MobileNwcMethod::GetBalance,
+        NwcMethod::MakeInvoice => MobileNwcMethod::MakeInvoice,
+        NwcMethod::PayInvoice => MobileNwcMethod::PayInvoice,
+        NwcMethod::LookupInvoice => MobileNwcMethod::LookupInvoice,
+        NwcMethod::ListTransactions => MobileNwcMethod::ListTransactions,
+        _ => return Err(MobileEngineError::CorruptData),
+    })
 }
 
 fn validate_database_path(database_path: &str) -> Result<(), MobileEngineError> {
@@ -495,6 +711,34 @@ fn mobile_active_connection_state(connection: &ActiveConnection) -> MobileConnec
         connection_id: connection.id().as_str().to_owned(),
         revision: connection.revision().value(),
         active: true,
+    }
+}
+
+impl From<MobileServiceError> for MobileEngineError {
+    fn from(error: MobileServiceError) -> Self {
+        match error {
+            MobileServiceError::Ledger(error) => Self::from(error),
+            MobileServiceError::Registry(error) => Self::from(error),
+            MobileServiceError::Nwa(_) => Self::InvalidNwaRequest,
+            MobileServiceError::NwaApproval(NwaApprovalError::AuthorityEscalation) => {
+                Self::NwaAuthorityEscalation
+            }
+            MobileServiceError::NwaApproval(NwaApprovalError::Registry(error)) => Self::from(error),
+            MobileServiceError::NwaApproval(NwaApprovalError::InvalidCallback) => {
+                Self::InvalidNwaRequest
+            }
+            MobileServiceError::Registration(WakeRegistrationError::DatabaseUnavailable) => {
+                Self::DatabaseUnavailable
+            }
+            MobileServiceError::Registration(WakeRegistrationError::InvalidBatchSize) => {
+                Self::InvalidArgument
+            }
+            MobileServiceError::Registration(_) => Self::CorruptData,
+            MobileServiceError::NwaAlreadyPending => Self::NwaAlreadyPending,
+            MobileServiceError::NoPendingNwa => Self::NoPendingNwa,
+            MobileServiceError::StateUnavailable => Self::CorruptData,
+            _ => Self::CorruptData,
+        }
     }
 }
 
@@ -557,7 +801,6 @@ impl From<WakeRegistrationWorkerError> for MobileEngineError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nwc_mobile::UnixTimestamp;
 
     const CLIENT_KEY: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
     const WALLET_KEY: &str = "c6047f9441ed7d6d3045406e95c07cd85a45b85e2accc4bb58601264c59f2aee";
@@ -613,35 +856,27 @@ mod tests {
         ));
         std::fs::create_dir_all(&directory).expect("create test directory");
         let database = directory.join("ledger.sqlite");
-        let ledger = WakeLedger::open(&database).expect("open ledger");
-        let core = core_connection(connection(), WakePolicy::default()).expect("valid connection");
-        let approved_at = UnixTimestamp::from_secs(1_750_000_000);
-        let active = ledger
-            .insert_connection(core, approved_at)
+        let service = NwcMobileService::open(&database).expect("open service");
+        let active = service
+            .create_host_connection(core_authorization(connection()).expect("authorization"))
             .expect("insert connection");
-        let tombstone = ledger
-            .tombstone_connection(
-                active.id(),
-                active.revision(),
-                UnixTimestamp::from_secs(approved_at.as_secs() + 1),
-            )
+        let tombstone = service
+            .revoke_connection(active.id().as_str(), active.revision())
             .expect("revoke connection");
 
         assert_eq!(tombstone.revision().value(), 1);
         assert!(matches!(
-            ledger.load_connection(active.id()),
+            service.connection(active.id().as_str()),
             Ok(Some(StoredConnection::Tombstoned(_)))
         ));
         assert_eq!(
-            ledger.tombstone_connection(
-                active.id(),
-                tombstone.revision(),
-                UnixTimestamp::from_secs(approved_at.as_secs() + 2)
-            ),
-            Err(RegistryError::AlreadyTombstoned)
+            service.revoke_connection(active.id().as_str(), tombstone.revision()),
+            Err(MobileServiceError::Registry(
+                RegistryError::AlreadyTombstoned
+            ))
         );
 
-        drop(ledger);
+        drop(service);
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
@@ -650,16 +885,26 @@ mod tests {
         let mut duplicate = connection();
         duplicate.methods.push(MobileNwcMethod::GetInfo);
         assert!(matches!(
-            core_connection(duplicate, WakePolicy::default()),
+            core_authorization(duplicate),
             Err(MobileEngineError::InvalidArgument)
         ));
 
         let mut insecure = connection();
         insecure.relay_urls = vec!["ws://relay.example".to_owned()];
-        assert!(matches!(
-            core_connection(insecure, WakePolicy::default()),
-            Err(MobileEngineError::InvalidArgument)
+        let directory = std::env::temp_dir().join(format!(
+            "nwc-mobile-uniffi-validation-{}",
+            std::process::id()
         ));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let service = NwcMobileService::open(directory.join("ledger.sqlite")).expect("service");
+        assert_eq!(
+            service.create_host_connection(core_authorization(insecure).expect("authorization")),
+            Err(MobileServiceError::Registry(
+                RegistryError::InvalidConnection
+            ))
+        );
+        drop(service);
+        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
     #[test]

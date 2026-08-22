@@ -8,6 +8,12 @@ public API stabilizes.
 
 ## Unreleased
 
+- Added `NwcMobileService`, a batteries-included facade that owns NWA sessions,
+  host connection validation, legacy migration, durable usage, revocation, and
+  wake-registration refresh state.
+- Extended `MobileNwcEngine` so Swift and Kotlin hosts can use the same facade
+  for NWA review/approval, legacy migration, idempotent host revocation, usage,
+  and registration refresh without recreating Rust state machines.
 - Added an idempotent, revision-bound host connection revocation API.
 - Added a bounded Nostr info-event publisher so host wallets no longer need to
   coordinate relay validation, signing, budgeting, and transport themselves.

@@ -29,8 +29,9 @@ pub use host_bridge::{
 };
 pub use mobile_engine::{
     MobileBudgetInterval, MobileConnectionRequest, MobileConnectionState, MobileEngineError,
-    MobileFeePolicy, MobileNwcEncryption, MobileNwcEngine, MobilePaymentReconciliationReport,
-    MobileWakeRegistrationReport,
+    MobileFeePolicy, MobileLegacyConnection, MobileMigrationReport, MobileNwaApprovalResult,
+    MobileNwaRequestPresentation, MobileNwcEncryption, MobileNwcEngine,
+    MobilePaymentReconciliationReport, MobileWakeRegistrationReport,
 };
 
 uniffi::setup_scaffolding!();

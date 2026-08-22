@@ -13,6 +13,7 @@ mod error;
 mod foreground;
 mod host;
 mod ledger;
+mod mobile_service;
 mod nip98;
 mod nostr_validation;
 mod nwa;
@@ -49,6 +50,10 @@ pub use host::{
     SecureWakeServerUrl, TransactionDirection, WalletBackend, WalletInfo, WalletTransaction,
 };
 pub use ledger::{ClaimOutcome, EventLease, LedgerError, TerminalEvent, TerminalKind, WakeLedger};
+pub use mobile_service::{
+    HostConnectionAuthorization, HostMigrationReport, LegacyHostConnection, MobileServiceError,
+    NwaRequestPresentation, NwcMobileService,
+};
 pub use nip98::{Nip98Authorization, Nip98AuthorizationError, Nip98SigningKey};
 pub use nostr_validation::{
     DecryptedNwcRequest, NostrEventError, NwcEncryption, NwcEventValidator, NwcSecretKey,
