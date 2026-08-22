@@ -2,6 +2,7 @@
 members = [
     "crates/nwc-mobile",
     "crates/nwc-mobile-bolt11",
+    "crates/nwc-mobile-http",
     "crates/nwc-mobile-nostr",
     "crates/nwc-mobile-tokio",
     "crates/nwc-mobile-uniffi",

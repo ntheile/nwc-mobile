@@ -94,6 +94,7 @@ nwc-mobile/
 ├── crates/
 │   ├── nwc-mobile/             # Rust engine, protocol, ledger, and policy
 │   ├── nwc-mobile-bolt11/      # Optional BOLT11 wallet-adapter helpers
+│   ├── nwc-mobile-http/        # HTTPS/NIP-98 wake-registration transport
 │   ├── nwc-mobile-nostr/       # Bounded WebSocket relay transport
 │   ├── nwc-mobile-tokio/       # Runtime deadline and cancellation enforcement
 │   └── nwc-mobile-uniffi/      # Swift/Kotlin lifecycle API
@@ -356,8 +357,11 @@ rejects plaintext HTTP, embedded credentials, fragments, malformed hosts, and
 oversized endpoints before native networking begins; transports must also
 disable redirects.
 
-Registration transports can build the required NIP-98 header with
-`Nip98Authorization::for_registration_post`. The signed kind-27235 event binds
+Tokio hosts can use `nwc-mobile-http` to validate APNs provider configuration,
+run the durable outbox pass, serialize the registration payload, reject HTTP
+redirects, and classify responses without exposing remote text. The transport
+builds the required NIP-98 header with `Nip98Authorization::for_registration_post`.
+The signed kind-27235 event binds
 the canonical endpoint, POST method, and SHA-256 request-body hash, and includes
 an explicit expiration tag fixed at 60 seconds after creation. Signing key and
 header wrappers redact debug output and zeroize their buffers on drop. Providers
