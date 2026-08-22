@@ -2,11 +2,13 @@ use std::collections::HashSet;
 use std::fmt;
 
 use nostr::nips::nip47::NostrWalletConnectURI;
-use nostr::{PublicKey as NostrPublicKey, RelayUrl, SecretKey};
+use nostr::{Keys, PublicKey as NostrPublicKey, RelayUrl, SecretKey};
+use zeroize::Zeroizing;
 
 use crate::{
-    ActiveConnection, BudgetInterval, FeePolicy, HostConnectionAuthorization, NwcEncryption,
-    NwcMethod, RegistryError, SecureRelayUrl, UnixTimestamp,
+    ActiveConnection, ApprovedNwaConnection, BudgetInterval, FeePolicy,
+    HostConnectionAuthorization, MobileServiceError, NwcEncryption, NwcMethod, NwcMobileService,
+    RegistryError, SecureRelayUrl, UnixTimestamp,
 };
 
 /// Maximum relays accepted by the default mobile application workflow.
@@ -44,6 +46,241 @@ impl fmt::Display for ApplicationError {
 }
 
 impl std::error::Error for ApplicationError {}
+
+/// Stable failure returned by the batteries-included application workflow.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ApplicationWorkflowError {
+    /// Native input could not be converted into a safe connection policy.
+    InvalidInput(ApplicationError),
+    /// The authoritative connection service rejected or could not persist the operation.
+    Service(MobileServiceError),
+    /// The platform secret store could not complete the requested operation.
+    SecretStoreUnavailable,
+    /// No wallet-managed client secret exists for the requested connection.
+    ClientSecretUnavailable,
+}
+
+impl fmt::Display for ApplicationWorkflowError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidInput(_) => "the NWC application input is invalid",
+            Self::Service(_) => "the NWC application service is unavailable",
+            Self::SecretStoreUnavailable => "the secure client-secret store is unavailable",
+            Self::ClientSecretUnavailable => "the wallet-managed NWC client secret is unavailable",
+        })
+    }
+}
+
+impl std::error::Error for ApplicationWorkflowError {}
+
+impl From<ApplicationError> for ApplicationWorkflowError {
+    fn from(error: ApplicationError) -> Self {
+        Self::InvalidInput(error)
+    }
+}
+
+impl From<MobileServiceError> for ApplicationWorkflowError {
+    fn from(error: MobileServiceError) -> Self {
+        Self::Service(error)
+    }
+}
+
+/// Platform-owned storage for wallet-managed NWC client secrets.
+///
+/// Implementations must use hardware- or OS-protected storage, must not log
+/// values, and must treat deletion of a missing key as success.
+pub trait ClientSecretStore: Send + Sync {
+    /// Loads a secret without caching it beyond the operation that requested it.
+    fn load_client_secret(
+        &self,
+        storage_key: &str,
+    ) -> Result<Option<String>, ClientSecretStoreError>;
+
+    /// Stores a newly-generated secret using device-only protection.
+    fn store_client_secret(
+        &self,
+        storage_key: &str,
+        secret: &str,
+    ) -> Result<(), ClientSecretStoreError>;
+
+    /// Deletes secret material. Missing values must be treated as already deleted.
+    fn delete_client_secret(&self, storage_key: &str) -> Result<(), ClientSecretStoreError>;
+}
+
+/// Redacted platform secret-store failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientSecretStoreError;
+
+impl fmt::Display for ClientSecretStoreError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("the platform secret store is unavailable")
+    }
+}
+
+impl std::error::Error for ClientSecretStoreError {}
+
+/// Complete input for a wallet-created, exportable NWC connection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WalletConnectionRequest {
+    wallet_service_pubkey_hex: String,
+    relay_input: String,
+    fallback_relay_input: String,
+    methods: Vec<NwcMethod>,
+    budget_limit_sat: u64,
+    budget_interval: BudgetInterval,
+    encryption: NwcEncryption,
+    expires_at: Option<UnixTimestamp>,
+    lud16: Option<String>,
+}
+
+impl WalletConnectionRequest {
+    /// Creates an application request; parsing and policy validation occur atomically at creation.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn new(
+        wallet_service_pubkey_hex: String,
+        relay_input: String,
+        fallback_relay_input: String,
+        methods: Vec<NwcMethod>,
+        budget_limit_sat: u64,
+        budget_interval: BudgetInterval,
+        encryption: NwcEncryption,
+        expires_at: Option<UnixTimestamp>,
+        lud16: Option<String>,
+    ) -> Self {
+        Self {
+            wallet_service_pubkey_hex,
+            relay_input,
+            fallback_relay_input,
+            methods,
+            budget_limit_sat,
+            budget_interval,
+            encryption,
+            expires_at,
+            lud16,
+        }
+    }
+}
+
+/// Complete input for approving the currently retained Nostr Wallet Auth request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NwaApprovalSelection {
+    request_id_hex: String,
+    wallet_service_pubkey_hex: String,
+    relay_input: String,
+    fallback_relay_input: String,
+    methods: Vec<NwcMethod>,
+    budget_limit_sat: u64,
+    budget_interval: BudgetInterval,
+    encryption: NwcEncryption,
+    expires_at: Option<UnixTimestamp>,
+    lud16: Option<String>,
+}
+
+impl NwaApprovalSelection {
+    /// Creates an approval selection bound to the exact reviewed request identifier.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn new(
+        request_id_hex: String,
+        wallet_service_pubkey_hex: String,
+        relay_input: String,
+        fallback_relay_input: String,
+        methods: Vec<NwcMethod>,
+        budget_limit_sat: u64,
+        budget_interval: BudgetInterval,
+        encryption: NwcEncryption,
+        expires_at: Option<UnixTimestamp>,
+        lud16: Option<String>,
+    ) -> Self {
+        Self {
+            request_id_hex,
+            wallet_service_pubkey_hex,
+            relay_input,
+            fallback_relay_input,
+            methods,
+            budget_limit_sat,
+            budget_interval,
+            encryption,
+            expires_at,
+            lud16,
+        }
+    }
+}
+
+/// Atomically persisted wallet-created connection plus its one-time export URI.
+pub struct CreatedWalletConnection {
+    draft: ConnectionDraft,
+    connection: ActiveConnection,
+    uri: String,
+}
+
+impl CreatedWalletConnection {
+    /// Returns the canonical connection draft used for rendering host metadata.
+    #[must_use]
+    pub const fn draft(&self) -> &ConnectionDraft {
+        &self.draft
+    }
+
+    /// Returns the authoritative durable connection state.
+    #[must_use]
+    pub const fn connection(&self) -> &ActiveConnection {
+        &self.connection
+    }
+
+    /// Returns the NIP-47 URI containing the wallet-managed client secret.
+    #[must_use]
+    pub fn uri(&self) -> &str {
+        &self.uri
+    }
+}
+
+impl fmt::Debug for CreatedWalletConnection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CreatedWalletConnection")
+            .field("draft", &self.draft)
+            .field("connection", &self.connection)
+            .field("uri", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Atomically persisted NWA approval together with its validated draft.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApprovedApplicationConnection {
+    draft: ConnectionDraft,
+    approval: ApprovedNwaConnection,
+}
+
+impl ApprovedApplicationConnection {
+    /// Returns the exact validated authority selected by the user.
+    #[must_use]
+    pub const fn draft(&self) -> &ConnectionDraft {
+        &self.draft
+    }
+
+    /// Returns the durable connection and verified callback result.
+    #[must_use]
+    pub const fn approval(&self) -> &ApprovedNwaConnection {
+        &self.approval
+    }
+}
+
+/// Result of an idempotent application-level revocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ApplicationRevocation {
+    client_secret_deleted: bool,
+}
+
+impl ApplicationRevocation {
+    /// Returns whether the platform confirmed deletion of any wallet-managed secret.
+    #[must_use]
+    pub const fn client_secret_deleted(self) -> bool {
+        self.client_secret_deleted
+    }
+}
 
 /// User-selected authority for a connection being created or approved.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -181,6 +418,24 @@ impl ConnectionDraft {
         self.authorization.clone()
     }
 
+    /// Returns the stable application connection identifier.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        self.authorization.id()
+    }
+
+    /// Returns the wallet-managed or requesting client public key.
+    #[must_use]
+    pub fn client_pubkey_hex(&self) -> &str {
+        self.authorization.client_pubkey_hex()
+    }
+
+    /// Returns the wallet service public key.
+    #[must_use]
+    pub fn wallet_service_pubkey_hex(&self) -> &str {
+        self.authorization.wallet_service_pubkey_hex()
+    }
+
     /// Returns the canonical host storage representation of the relays.
     #[must_use]
     pub fn relay_storage(&self) -> &str {
@@ -207,6 +462,138 @@ impl ConnectionDraft {
 
     fn authorization_relay_count(&self) -> usize {
         self.relay_storage.lines().count()
+    }
+}
+
+impl NwcMobileService {
+    /// Generates, securely stores, validates, and atomically persists a wallet-created connection.
+    pub fn create_wallet_connection(
+        &self,
+        request: WalletConnectionRequest,
+        secrets: &dyn ClientSecretStore,
+    ) -> Result<CreatedWalletConnection, ApplicationWorkflowError> {
+        let client_keys = Keys::generate();
+        let client_pubkey_hex = client_keys.public_key().to_hex();
+        let client_secret = Zeroizing::new(client_keys.secret_key().to_secret_hex());
+        let selection = ConnectionSelection::from_host_input(
+            &request.relay_input,
+            &request.fallback_relay_input,
+            request.methods,
+            request.budget_limit_sat,
+            request.budget_interval,
+        )?;
+        let draft = ConnectionDraft::new(
+            format!("nwc-{client_pubkey_hex}"),
+            client_pubkey_hex.clone(),
+            request.wallet_service_pubkey_hex,
+            selection,
+            request.encryption,
+            request.expires_at,
+        )?;
+        let uri = build_connection_uri(
+            draft.wallet_service_pubkey_hex(),
+            draft.authorization.relay_urls(),
+            client_secret.as_str(),
+            request.lud16,
+        )?;
+        let storage_key = client_secret_storage_key(&client_pubkey_hex);
+        secrets
+            .store_client_secret(&storage_key, client_secret.as_str())
+            .map_err(|_| ApplicationWorkflowError::SecretStoreUnavailable)?;
+        let connection = match self.create_host_connection(draft.authorization()) {
+            Ok(connection) => connection,
+            Err(error) => {
+                let _ = secrets.delete_client_secret(&storage_key);
+                return Err(error.into());
+            }
+        };
+        Ok(CreatedWalletConnection {
+            draft,
+            connection,
+            uri,
+        })
+    }
+
+    /// Applies a user selection to the exact retained NWA request and persists it atomically.
+    pub fn approve_application_nwa(
+        &self,
+        selection: NwaApprovalSelection,
+    ) -> Result<ApprovedApplicationConnection, ApplicationWorkflowError> {
+        let request = self
+            .pending_nwa_request()?
+            .ok_or(MobileServiceError::NoPendingNwa)?;
+        let authority = ConnectionSelection::from_host_input(
+            &selection.relay_input,
+            &selection.fallback_relay_input,
+            selection.methods,
+            selection.budget_limit_sat,
+            selection.budget_interval,
+        )?;
+        let client_pubkey_hex = request.client_pubkey_hex().to_owned();
+        let draft = ConnectionDraft::new(
+            format!("nwc-{client_pubkey_hex}"),
+            client_pubkey_hex,
+            selection.wallet_service_pubkey_hex,
+            authority,
+            selection.encryption,
+            selection.expires_at,
+        )?;
+        let approval = self.approve_pending_nwa(
+            &selection.request_id_hex,
+            draft.authorization(),
+            selection.lud16,
+        )?;
+        Ok(ApprovedApplicationConnection { draft, approval })
+    }
+
+    /// Builds an export URI without exposing secret handling to application orchestration.
+    pub fn export_wallet_connection_uri(
+        &self,
+        connection_id: &str,
+        lud16: Option<String>,
+        secrets: &dyn ClientSecretStore,
+    ) -> Result<String, ApplicationWorkflowError> {
+        let connection = self
+            .connection_presentations()?
+            .into_iter()
+            .find(|connection| connection.id() == connection_id)
+            .ok_or(MobileServiceError::Registry(RegistryError::NotFound))?;
+        let storage_key = client_secret_storage_key(connection.client_pubkey_hex());
+        let secret = Zeroizing::new(
+            secrets
+                .load_client_secret(&storage_key)
+                .map_err(|_| ApplicationWorkflowError::SecretStoreUnavailable)?
+                .ok_or(ApplicationWorkflowError::ClientSecretUnavailable)?,
+        );
+        build_connection_uri(
+            connection.wallet_service_pubkey_hex(),
+            connection.relay_urls(),
+            secret.as_str(),
+            lud16,
+        )
+        .map_err(Into::into)
+    }
+
+    /// Revokes a connection before best-effort removal of wallet-managed secret material.
+    pub fn revoke_application_connection(
+        &self,
+        connection_id: &str,
+        secrets: &dyn ClientSecretStore,
+    ) -> Result<ApplicationRevocation, ApplicationWorkflowError> {
+        let client_pubkey_hex = self
+            .connection_presentations()?
+            .into_iter()
+            .find(|connection| connection.id() == connection_id)
+            .map(|connection| connection.client_pubkey_hex().to_owned());
+        self.revoke_host_connection(connection_id)?;
+        let client_secret_deleted = client_pubkey_hex.is_none_or(|client_pubkey_hex| {
+            secrets
+                .delete_client_secret(&client_secret_storage_key(&client_pubkey_hex))
+                .is_ok()
+        });
+        Ok(ApplicationRevocation {
+            client_secret_deleted,
+        })
     }
 }
 
@@ -422,11 +809,77 @@ impl From<RegistryError> for ApplicationError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
     use super::*;
 
     const CLIENT: &str = "687dd8ece211539364549b1f32c63eceec1e0661009ba65cf8ff2e73ba000746";
     const WALLET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     const SECRET: &str = "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9";
+
+    #[derive(Default)]
+    struct TestSecrets(Mutex<HashMap<String, String>>);
+
+    impl ClientSecretStore for TestSecrets {
+        fn load_client_secret(
+            &self,
+            storage_key: &str,
+        ) -> Result<Option<String>, ClientSecretStoreError> {
+            Ok(self
+                .0
+                .lock()
+                .map_err(|_| ClientSecretStoreError)?
+                .get(storage_key)
+                .cloned())
+        }
+
+        fn store_client_secret(
+            &self,
+            storage_key: &str,
+            secret: &str,
+        ) -> Result<(), ClientSecretStoreError> {
+            self.0
+                .lock()
+                .map_err(|_| ClientSecretStoreError)?
+                .insert(storage_key.to_owned(), secret.to_owned());
+            Ok(())
+        }
+
+        fn delete_client_secret(&self, storage_key: &str) -> Result<(), ClientSecretStoreError> {
+            self.0
+                .lock()
+                .map_err(|_| ClientSecretStoreError)?
+                .remove(storage_key);
+            Ok(())
+        }
+    }
+
+    struct TestDatabase {
+        directory: PathBuf,
+        path: PathBuf,
+    }
+
+    impl TestDatabase {
+        fn new() -> Self {
+            let mut random = [0_u8; 8];
+            getrandom::fill(&mut random).expect("test randomness");
+            let directory = std::env::temp_dir().join(format!(
+                "nwc-mobile-application-{}",
+                u64::from_le_bytes(random)
+            ));
+            std::fs::create_dir_all(&directory).expect("test directory");
+            let path = directory.join("ledger.sqlite3");
+            Self { directory, path }
+        }
+    }
+
+    impl Drop for TestDatabase {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
 
     #[test]
     fn relay_input_is_canonical_bounded_and_secure() {
@@ -484,5 +937,51 @@ mod tests {
         assert!(uri.starts_with("nostr+walletconnect://"));
         assert!(uri.contains("relay="));
         assert!(uri.contains("lud16="));
+    }
+
+    #[test]
+    fn service_owns_wallet_connection_secret_lifecycle_and_export() {
+        let database = TestDatabase::new();
+        let service = NwcMobileService::open(&database.path).expect("service");
+        let secrets = TestSecrets::default();
+        let created = service
+            .create_wallet_connection(
+                WalletConnectionRequest::new(
+                    WALLET.to_owned(),
+                    "wss://relay.example/nwc".to_owned(),
+                    String::new(),
+                    vec![NwcMethod::GetInfo, NwcMethod::PayInvoice],
+                    1_000,
+                    BudgetInterval::Daily,
+                    NwcEncryption::Nip44V2,
+                    None,
+                    Some("wallet@example.com".to_owned()),
+                ),
+                &secrets,
+            )
+            .expect("created");
+        let connection_id = created.connection().id().as_str().to_owned();
+        assert_eq!(created.connection().id().as_str(), created.draft().id());
+        assert_eq!(
+            created.uri(),
+            service
+                .export_wallet_connection_uri(
+                    &connection_id,
+                    Some("wallet@example.com".to_owned()),
+                    &secrets,
+                )
+                .expect("export")
+        );
+
+        let revoked = service
+            .revoke_application_connection(&connection_id, &secrets)
+            .expect("revoked");
+        assert!(revoked.client_secret_deleted());
+        assert_eq!(
+            service.export_wallet_connection_uri(&connection_id, None, &secrets),
+            Err(ApplicationWorkflowError::Service(
+                MobileServiceError::Registry(RegistryError::NotFound)
+            ))
+        );
     }
 }

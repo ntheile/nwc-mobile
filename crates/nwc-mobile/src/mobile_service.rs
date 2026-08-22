@@ -268,6 +268,30 @@ impl HostConnectionAuthorization {
         }
     }
 
+    /// Returns the stable host-selected connection identifier.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Returns the authorized client public key.
+    #[must_use]
+    pub fn client_pubkey_hex(&self) -> &str {
+        &self.client_pubkey_hex
+    }
+
+    /// Returns the wallet service public key.
+    #[must_use]
+    pub fn wallet_service_pubkey_hex(&self) -> &str {
+        &self.wallet_service_pubkey_hex
+    }
+
+    /// Returns the canonical secure relay allowlist.
+    #[must_use]
+    pub fn relay_urls(&self) -> &[String] {
+        &self.relay_urls
+    }
+
     fn into_connection(self, wake_policy: WakePolicy) -> Result<NewConnection, RegistryError> {
         let policy = ConnectionPolicy::new(
             self.methods,

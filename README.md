@@ -140,6 +140,13 @@ connection views, NWA session state, wake envelopes, and wake-history records,
 leaving host wallets to own only product metadata, secret storage, navigation,
 and wallet opening.
 
+Rust hosts can implement `ClientSecretStore` over Keychain or Android Keystore
+and call `NwcMobileService::create_wallet_connection`,
+`approve_application_nwa`, `export_wallet_connection_uri`, and
+`revoke_application_connection`. These methods keep key generation, rollback,
+URI validation, request binding, durable authorization, and secret cleanup in
+one reviewed workflow instead of recreating it in each wallet.
+
 - validated host connection creation and idempotent legacy migration;
 - retained NWA request review and authority-bound approval;
 - durable usage lookup and permanent revision-bound revocation;
@@ -188,6 +195,12 @@ The native host also supplies:
 
 - the app-group or application data directory used by the shared ledger
 - scoped access to Keychain or Android Keystore-backed secrets
+
+On Apple platforms, `NwcKeychainVault` supplies the configurable device-only
+Keychain primitive and `NwcAppGroupWakeStore` coordinates the cross-process
+queue, legacy migration, data directory, and bounded diagnostic log. The host
+still owns Info.plist lookup and its application-specific NotificationCenter
+event.
 - the APNs or FCM token and platform registration metadata
 - the OS background deadline and cancellation signal
 - localized notification presentation

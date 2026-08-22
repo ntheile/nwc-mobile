@@ -103,6 +103,22 @@ impl From<MobileBudgetInterval> for BudgetInterval {
     }
 }
 
+impl TryFrom<BudgetInterval> for MobileBudgetInterval {
+    type Error = MobileEngineError;
+
+    fn try_from(interval: BudgetInterval) -> Result<Self, Self::Error> {
+        Ok(match interval {
+            BudgetInterval::Never => Self::Never,
+            BudgetInterval::Hourly => Self::Hourly,
+            BudgetInterval::Daily => Self::Daily,
+            BudgetInterval::Weekly => Self::Weekly,
+            BudgetInterval::Monthly => Self::Monthly,
+            BudgetInterval::Yearly => Self::Yearly,
+            _ => return Err(MobileEngineError::CorruptData),
+        })
+    }
+}
+
 /// Whether Lightning fees consume the connection's spending budget.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
 pub enum MobileFeePolicy {
@@ -220,6 +236,14 @@ pub struct MobileConnectionPresentation {
     pub last_used_at_seconds: Option<u64>,
 }
 
+impl TryFrom<nwc_mobile::ConnectionPresentation> for MobileConnectionPresentation {
+    type Error = MobileEngineError;
+
+    fn try_from(connection: nwc_mobile::ConnectionPresentation) -> Result<Self, Self::Error> {
+        mobile_connection_presentation(connection)
+    }
+}
+
 /// Complete non-sensitive connection state for native application rendering.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct MobileConnectionView {
@@ -298,6 +322,14 @@ pub struct MobileNwaRequestPresentation {
     pub methods: Vec<MobileNwcMethod>,
     /// Optional request expiration timestamp.
     pub expires_at: Option<u64>,
+}
+
+impl TryFrom<nwc_mobile::NwaRequestPresentation> for MobileNwaRequestPresentation {
+    type Error = MobileEngineError;
+
+    fn try_from(request: nwc_mobile::NwaRequestPresentation) -> Result<Self, Self::Error> {
+        mobile_nwa_presentation(request)
+    }
 }
 
 impl fmt::Debug for MobileNwaRequestPresentation {
@@ -756,13 +788,14 @@ fn mobile_nwa_presentation(
         callback_target_description: request.callback_target_description().to_owned(),
         relay_urls: request.relay_urls().to_vec(),
         budget_limit_sat: request.budget_limit_sat(),
-        budget_interval: mobile_budget_interval(request.budget_interval())?,
+        budget_interval: request.budget_interval().try_into()?,
         methods: request
             .methods()
             .iter()
             .copied()
-            .map(mobile_nwc_method)
-            .collect::<Result<Vec<_>, _>>()?,
+            .map(MobileNwcMethod::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| MobileEngineError::CorruptData)?,
         expires_at: request.expires_at().map(nwc_mobile::UnixTimestamp::as_secs),
     })
 }
@@ -779,10 +812,11 @@ fn mobile_connection_presentation(
             .methods()
             .iter()
             .copied()
-            .map(mobile_nwc_method)
-            .collect::<Result<Vec<_>, _>>()?,
+            .map(MobileNwcMethod::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| MobileEngineError::CorruptData)?,
         budget_limit_sat: connection.budget_limit_sat(),
-        budget_interval: mobile_budget_interval(connection.budget_interval())?,
+        budget_interval: connection.budget_interval().try_into()?,
         created_at_seconds: connection.created_at().as_secs(),
         expires_at_seconds: connection
             .expires_at()
@@ -790,32 +824,6 @@ fn mobile_connection_presentation(
         last_used_at_seconds: connection
             .last_used_at()
             .map(nwc_mobile::UnixTimestamp::as_secs),
-    })
-}
-
-const fn mobile_budget_interval(
-    interval: BudgetInterval,
-) -> Result<MobileBudgetInterval, MobileEngineError> {
-    Ok(match interval {
-        BudgetInterval::Never => MobileBudgetInterval::Never,
-        BudgetInterval::Hourly => MobileBudgetInterval::Hourly,
-        BudgetInterval::Daily => MobileBudgetInterval::Daily,
-        BudgetInterval::Weekly => MobileBudgetInterval::Weekly,
-        BudgetInterval::Monthly => MobileBudgetInterval::Monthly,
-        BudgetInterval::Yearly => MobileBudgetInterval::Yearly,
-        _ => return Err(MobileEngineError::CorruptData),
-    })
-}
-
-const fn mobile_nwc_method(method: NwcMethod) -> Result<MobileNwcMethod, MobileEngineError> {
-    Ok(match method {
-        NwcMethod::GetInfo => MobileNwcMethod::GetInfo,
-        NwcMethod::GetBalance => MobileNwcMethod::GetBalance,
-        NwcMethod::MakeInvoice => MobileNwcMethod::MakeInvoice,
-        NwcMethod::PayInvoice => MobileNwcMethod::PayInvoice,
-        NwcMethod::LookupInvoice => MobileNwcMethod::LookupInvoice,
-        NwcMethod::ListTransactions => MobileNwcMethod::ListTransactions,
-        _ => return Err(MobileEngineError::CorruptData),
     })
 }
 

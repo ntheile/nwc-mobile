@@ -31,8 +31,11 @@ mod wake_registration_worker;
 
 pub use application::{
     build_connection_uri, client_secret_storage_key, encode_connection_relays,
-    maximum_mobile_fee_sat, parse_connection_relays, ApplicationError, ConnectionDraft,
-    ConnectionPresentation, ConnectionSelection, DEFAULT_MAXIMUM_CONNECTION_RELAYS,
+    maximum_mobile_fee_sat, parse_connection_relays, ApplicationError, ApplicationRevocation,
+    ApplicationWorkflowError, ApprovedApplicationConnection, ClientSecretStore,
+    ClientSecretStoreError, ConnectionDraft, ConnectionPresentation, ConnectionSelection,
+    CreatedWalletConnection, NwaApprovalSelection, WalletConnectionRequest,
+    DEFAULT_MAXIMUM_CONNECTION_RELAYS,
 };
 pub use connection_registry::{
     ActiveConnection, ConnectionTombstone, NewConnection, RegistryError, StoredConnection,

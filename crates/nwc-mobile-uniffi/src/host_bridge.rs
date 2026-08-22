@@ -133,6 +133,22 @@ impl From<MobileNwcMethod> for NwcMethod {
     }
 }
 
+impl TryFrom<NwcMethod> for MobileNwcMethod {
+    type Error = MobileHostError;
+
+    fn try_from(method: NwcMethod) -> Result<Self, Self::Error> {
+        Ok(match method {
+            NwcMethod::GetInfo => Self::GetInfo,
+            NwcMethod::GetBalance => Self::GetBalance,
+            NwcMethod::MakeInvoice => Self::MakeInvoice,
+            NwcMethod::PayInvoice => Self::PayInvoice,
+            NwcMethod::LookupInvoice => Self::LookupInvoice,
+            NwcMethod::ListTransactions => Self::ListTransactions,
+            _ => return Err(MobileHostError::Rejected),
+        })
+    }
+}
+
 /// Wallet identity and supported methods returned by native code.
 #[derive(Clone, Eq, PartialEq, uniffi::Record)]
 pub struct MobileWalletInfo {
