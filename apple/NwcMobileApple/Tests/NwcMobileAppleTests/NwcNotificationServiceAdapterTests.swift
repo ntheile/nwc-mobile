@@ -85,6 +85,7 @@ final class NwcNotificationServiceAdapterTests: XCTestCase {
     let original = UNMutableNotificationContent()
     original.title = "remote title"
     original.body = "remote body"
+    original.userInfo = ["remote": "untrusted"]
     let request = UNNotificationRequest(
       identifier: "invalid",
       content: original,
@@ -101,6 +102,7 @@ final class NwcNotificationServiceAdapterTests: XCTestCase {
 
     XCTAssertEqual(result.value?.title, "Open wallet")
     XCTAssertEqual(result.value?.body, "Open the wallet to continue safely.")
+    XCTAssertTrue(result.value?.userInfo.isEmpty == true)
   }
 
   func testValidatedPayloadEntryPointNormalizesUserInfo() async throws {

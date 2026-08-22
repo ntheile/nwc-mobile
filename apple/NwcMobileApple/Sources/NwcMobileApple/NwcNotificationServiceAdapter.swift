@@ -121,6 +121,7 @@ public final class NwcNotificationServiceAdapter: @unchecked Sendable {
     do {
       payload = try NwcWakePayload.decode(userInfo: request.content.userInfo)
     } catch {
+      mutableContent.userInfo = [:]
       presenter.apply(.openApplication, to: mutableContent)
       contentHandler.call(mutableContent)
       return
