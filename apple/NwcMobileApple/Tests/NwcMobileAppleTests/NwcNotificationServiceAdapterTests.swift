@@ -103,6 +103,54 @@ final class NwcNotificationServiceAdapterTests: XCTestCase {
     XCTAssertEqual(result.value?.body, "Open the wallet to continue safely.")
   }
 
+  func testValidatedPayloadEntryPointNormalizesUserInfo() async throws {
+    let adapter = NwcNotificationServiceAdapter(
+      executor: ImmediateExecutor(hint: .completed),
+      cancellationFactory: { TestCancellation() },
+      executionMilliseconds: 1_000,
+      copy: copy()
+    )
+    let original = UNMutableNotificationContent()
+    original.userInfo = ["remote": "untrusted"]
+    let completed = expectation(description: "validated completion")
+    let result = LockedNotificationContent()
+
+    adapter.didReceive(
+      payload: NwcWakePayload(
+        relayURL: "wss://relay.example",
+        eventIDHex: "event-id",
+        walletServicePublicKeyHex: "wallet-key"
+      ),
+      content: original
+    ) { content in
+      result.set(content)
+      completed.fulfill()
+    }
+    await fulfillment(of: [completed], timeout: 1)
+
+    let userInfo = try XCTUnwrap(result.value?.userInfo)
+    XCTAssertNil(userInfo["remote"])
+    XCTAssertEqual(userInfo[NwcWakePayloadKey.eventID] as? String, "event-id")
+  }
+
+  func testPresenterSanitizesFallbackWithoutAnExecutor() {
+    let original = UNMutableNotificationContent()
+    original.title = "remote title"
+    original.body = "remote body"
+    original.categoryIdentifier = "remote-actions"
+
+    let content = NwcNotificationPresenter(copy: copy()).content(
+      applying: .openApplication,
+      to: original,
+      userInfo: [NwcWakePayloadKey.eventID: "event-id"]
+    )
+
+    XCTAssertEqual(content.title, "Open wallet")
+    XCTAssertEqual(content.body, "Open the wallet to continue safely.")
+    XCTAssertEqual(content.categoryIdentifier, "")
+    XCTAssertEqual(content.userInfo[NwcWakePayloadKey.eventID] as? String, "event-id")
+  }
+
   private func payload() -> [AnyHashable: Any] {
     [
       NwcWakePayloadKey.relayURL: "wss://relay.example",
