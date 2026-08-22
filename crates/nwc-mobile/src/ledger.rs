@@ -7,7 +7,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBeha
 
 use crate::{ConnectionId, ConnectionRevision, EventId, UnixTimestamp};
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 const CLAIM_TOKEN_BYTES: usize = 16;
 const MAX_RESPONSE_EVENT_BYTES: usize = 128 * 1024;
 const MAX_PRUNE_BATCH: usize = 1_000;
@@ -42,6 +42,12 @@ CREATE TABLE wake_events (
 CREATE INDEX wake_events_terminal_updated
     ON wake_events(updated_at)
     WHERE state = 'terminal';
+"#;
+
+const CREATE_COMPLETED_CONNECTION_INDEX: &str = r#"
+CREATE INDEX wake_events_completed_connection_updated
+    ON wake_events(connection_id, updated_at DESC)
+    WHERE state = 'terminal' AND terminal_kind = 'completed';
 "#;
 
 pub(crate) const CREATE_CONNECTION_SCHEMA: &str = r#"
@@ -684,6 +690,31 @@ impl WakeLedger {
         }
     }
 
+    /// Returns the latest successfully completed wake time for a connection.
+    ///
+    /// Claimed, retryable, rejected, and failed events are excluded so remote
+    /// invalid traffic cannot make an authorization appear successfully used.
+    pub fn last_completed_event_at(
+        &self,
+        connection_id: &ConnectionId,
+    ) -> Result<Option<UnixTimestamp>, LedgerError> {
+        let connection = self.lock_connection()?;
+        let timestamp: Option<i64> = connection.query_row(
+            "SELECT MAX(updated_at) FROM wake_events
+             WHERE connection_id = ?1 AND state = 'terminal'
+               AND terminal_kind = 'completed'",
+            params![connection_id.as_str()],
+            |row| row.get(0),
+        )?;
+        timestamp
+            .map(|value| {
+                u64::try_from(value)
+                    .map(UnixTimestamp::from_secs)
+                    .map_err(|_| LedgerError::CorruptData)
+            })
+            .transpose()
+    }
+
     /// Deletes a bounded batch of terminal entries older than the retention cutoff.
     pub fn prune_terminal(
         &self,
@@ -750,6 +781,10 @@ fn migrate(connection: &mut Connection) -> Result<(), LedgerError> {
     if version == 5 {
         transaction.execute_batch(ADD_CONNECTION_EXPIRATION)?;
         version = 6;
+    }
+    if version == 6 {
+        transaction.execute_batch(CREATE_COMPLETED_CONNECTION_INDEX)?;
+        version = 7;
     }
     if version != SCHEMA_VERSION {
         return Err(LedgerError::UnsupportedSchema);
@@ -1025,7 +1060,16 @@ mod tests {
         let version: i64 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("schema version");
+        let completed_connection_indexes: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE type = 'index' AND name = 'wake_events_completed_connection_updated'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("terminal connection index");
         assert_eq!(expiration_columns, 1);
+        assert_eq!(completed_connection_indexes, 1);
         assert_eq!(version, SCHEMA_VERSION);
     }
 
@@ -1097,6 +1141,71 @@ mod tests {
         assert_eq!(terminal.kind(), TerminalKind::Completed);
         assert_eq!(terminal.response_event_json(), Some("encrypted-response"));
         assert!(!format!("{terminal:?}").contains("encrypted-response"));
+    }
+
+    #[test]
+    fn last_completed_event_time_ignores_live_and_rejected_work() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        assert_eq!(
+            ledger
+                .last_completed_event_at(&connection_id())
+                .expect("empty usage"),
+            None
+        );
+
+        let ClaimOutcome::Acquired(first) = claim(&ledger, 100) else {
+            panic!("first claim not acquired");
+        };
+        assert_eq!(
+            ledger
+                .last_completed_event_at(&connection_id())
+                .expect("live usage"),
+            None
+        );
+        ledger
+            .complete_event(
+                &first,
+                TerminalKind::Rejected,
+                None,
+                UnixTimestamp::from_secs(105),
+            )
+            .expect("complete first event");
+        assert_eq!(
+            ledger
+                .last_completed_event_at(&connection_id())
+                .expect("rejected usage"),
+            None
+        );
+
+        let second_id = EventId::from_hex(&"22".repeat(32)).expect("second event id");
+        let ClaimOutcome::Acquired(second) = ledger
+            .claim_event(
+                &second_id,
+                &connection_id(),
+                ConnectionRevision::INITIAL,
+                UnixTimestamp::from_secs(106),
+                Duration::from_secs(10),
+            )
+            .expect("claim second event")
+        else {
+            panic!("second claim not acquired");
+        };
+        ledger
+            .complete_event(
+                &second,
+                TerminalKind::Completed,
+                Some("encrypted-response"),
+                UnixTimestamp::from_secs(109),
+            )
+            .expect("complete second event");
+
+        assert_eq!(
+            ledger
+                .last_completed_event_at(&connection_id())
+                .expect("latest usage"),
+            Some(UnixTimestamp::from_secs(109))
+        );
     }
 
     #[test]
