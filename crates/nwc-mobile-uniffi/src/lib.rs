@@ -28,9 +28,9 @@ pub use host_bridge::{
     MobileWalletInfo, MobileWalletTransaction,
 };
 pub use mobile_engine::{
-    MobileBudgetInterval, MobileConnectionPresentation, MobileConnectionRequest,
-    MobileConnectionState, MobileConnectionView, MobileEngineError, MobileFeePolicy,
-    MobileLegacyConnection, MobileMigrationReport, MobileNwaApprovalResult,
+    MobileBudgetInterval, MobileConnectionMetadata, MobileConnectionPresentation,
+    MobileConnectionRequest, MobileConnectionState, MobileConnectionView, MobileEngineError,
+    MobileFeePolicy, MobileLegacyConnection, MobileMigrationReport, MobileNwaApprovalResult,
     MobileNwaRequestPresentation, MobileNwaSessionState, MobileNwcEncryption, MobileNwcEngine,
     MobilePaymentReconciliationReport, MobileWakeRegistrationReport,
 };
