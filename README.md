@@ -120,6 +120,13 @@ duplicate tasks, retain retry attempts across delayed work, apply bounded
 exponential backoff to app-owned queues, and translate `WakeDisposition` into a
 single terminal-or-retry action.
 
+Application icon hosts can use `ApplicationIconUrl` and `ApplicationIconCache`
+for public-HTTPS validation, deterministic cache paths, stale temporary-file
+cleanup, atomic normalized-byte storage, and versioned local file URLs.
+`nwc-mobile-http::download_application_icon` adds a 15-second network deadline,
+disables redirects, requires an image response, and streams at most 5 MiB. The
+host remains free to normalize supported image formats before storing them.
+
 Native entry points can parse provider JSON with `WakeEnvelope`, share an
 `AtomicCancellation`, and use `run_bounded_background_wake` so wallet setup and
 engine execution consume one monotonic OS budget. Bark hosts can call

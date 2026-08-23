@@ -7,20 +7,171 @@
 #![forbid(unsafe_code)]
 
 use std::fmt;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use nwc_mobile::{
-    Clock, HostError, HostErrorKind, HostFuture, NeverCancelled, Nip98Authorization,
-    Nip98SigningKey, OperationBudget, OperationContext, SecureWakeServerUrl, SystemClock,
-    WakeLedger, WakeRegistrationChange, WakeRegistrationError, WakeRegistrationTransport,
-    WakeRegistrationWorker, WakeRegistrationWorkerError,
+    ApplicationIconUrl, Clock, HostError, HostErrorKind, HostFuture, NeverCancelled,
+    Nip98Authorization, Nip98SigningKey, OperationBudget, OperationContext, SecureWakeServerUrl,
+    SystemClock, WakeLedger, WakeRegistrationChange, WakeRegistrationError,
+    WakeRegistrationTransport, WakeRegistrationWorker, WakeRegistrationWorkerError,
+    MAX_APPLICATION_ICON_BYTES,
 };
-use nwc_mobile_tokio::run_with_context;
+use nwc_mobile_tokio::{resolve_socket_addresses, run_with_context};
 use serde::Serialize;
 
 const REGISTRATION_BATCH_SIZE: usize = 20;
 const REGISTRATION_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CONFIG_VALUE_BYTES: usize = 2_048;
+const APPLICATION_ICON_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Downloads one validated application icon with redirects and oversized bodies rejected.
+pub async fn download_application_icon(
+    remote_url: &ApplicationIconUrl,
+) -> Result<Vec<u8>, ApplicationIconDownloadError> {
+    let parsed_url = reqwest::Url::parse(remote_url.as_str())
+        .map_err(|_| ApplicationIconDownloadError::RejectedResponse)?;
+    let host = parsed_url
+        .host_str()
+        .ok_or(ApplicationIconDownloadError::RejectedResponse)?;
+    let port = parsed_url
+        .port_or_known_default()
+        .ok_or(ApplicationIconDownloadError::RejectedResponse)?;
+    let addresses = resolve_socket_addresses(host.to_owned(), port)
+        .await
+        .map_err(|_| ApplicationIconDownloadError::Unavailable)?;
+    let mut public_addresses = addresses
+        .into_iter()
+        .filter(|address| is_public_socket_address(*address))
+        .collect::<Vec<_>>();
+    public_addresses.sort_unstable();
+    public_addresses.dedup();
+    if public_addresses.is_empty() {
+        return Err(ApplicationIconDownloadError::PrivateAddress);
+    }
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(APPLICATION_ICON_TIMEOUT)
+        .resolve_to_addrs(host, &public_addresses)
+        .build()
+        .map_err(|_| ApplicationIconDownloadError::ClientUnavailable)?;
+    let mut response = client
+        .get(remote_url.as_str())
+        .send()
+        .await
+        .map_err(classify_icon_request_error)?;
+    if !response.status().is_success() {
+        return Err(ApplicationIconDownloadError::RejectedResponse);
+    }
+    let is_image = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| value.trim().to_ascii_lowercase().starts_with("image/"));
+    if !is_image {
+        return Err(ApplicationIconDownloadError::RejectedResponse);
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_APPLICATION_ICON_BYTES as u64)
+    {
+        return Err(ApplicationIconDownloadError::TooLarge);
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(classify_icon_request_error)?
+    {
+        if bytes.len().saturating_add(chunk.len()) > MAX_APPLICATION_ICON_BYTES {
+            return Err(ApplicationIconDownloadError::TooLarge);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.is_empty() {
+        return Err(ApplicationIconDownloadError::RejectedResponse);
+    }
+    Ok(bytes)
+}
+
+/// Stable application icon transport failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ApplicationIconDownloadError {
+    /// The hardened HTTP client could not be constructed.
+    ClientUnavailable,
+    /// The request timed out.
+    TimedOut,
+    /// The network is temporarily unavailable.
+    Unavailable,
+    /// Every resolved target was private or otherwise non-routable.
+    PrivateAddress,
+    /// The server rejected the request or returned a non-image response.
+    RejectedResponse,
+    /// The encoded response exceeded the shared byte bound.
+    TooLarge,
+}
+
+impl fmt::Display for ApplicationIconDownloadError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::ClientUnavailable => "application icon HTTP client is unavailable",
+            Self::TimedOut => "application icon request timed out",
+            Self::Unavailable => "application icon request is unavailable",
+            Self::PrivateAddress => "application icon address was rejected",
+            Self::RejectedResponse => "application icon response was rejected",
+            Self::TooLarge => "application icon response is too large",
+        })
+    }
+}
+
+impl std::error::Error for ApplicationIconDownloadError {}
+
+fn classify_icon_request_error(error: reqwest::Error) -> ApplicationIconDownloadError {
+    if error.is_timeout() {
+        ApplicationIconDownloadError::TimedOut
+    } else {
+        ApplicationIconDownloadError::Unavailable
+    }
+}
+
+fn is_public_socket_address(address: SocketAddr) -> bool {
+    match address.ip() {
+        IpAddr::V4(address) => is_public_ipv4(address),
+        IpAddr::V6(address) => is_public_ipv6(address),
+    }
+}
+
+fn is_public_ipv4(address: Ipv4Addr) -> bool {
+    let [first, second, third, _] = address.octets();
+    !address.is_private()
+        && !address.is_loopback()
+        && !address.is_link_local()
+        && !address.is_broadcast()
+        && !address.is_documentation()
+        && !address.is_multicast()
+        && !address.is_unspecified()
+        && first != 0
+        && first < 240
+        && !(first == 100 && (64..=127).contains(&second))
+        && !(first == 192 && second == 0 && third == 0)
+        && !(first == 198 && matches!(second, 18 | 19))
+}
+
+fn is_public_ipv6(address: Ipv6Addr) -> bool {
+    let segments = address.segments();
+    let is_global_unicast = segments[0] & 0xe000 == 0x2000;
+    let is_documentation = segments[0] == 0x2001 && segments[1] == 0x0db8;
+    let is_benchmarking = segments[0] == 0x2001 && segments[1] == 0x0002;
+    let is_orchid = segments[0] == 0x2001 && matches!(segments[1] & 0xfff0, 0x0010 | 0x0020);
+    let is_additional_documentation = segments[0] == 0x3fff && segments[1] & 0xf000 == 0;
+    is_global_unicast
+        && !is_documentation
+        && !is_benchmarking
+        && !is_orchid
+        && !is_additional_documentation
+}
 
 /// Native APNs values used to configure the shared registration transport.
 #[derive(Clone, Default, Eq, PartialEq)]
@@ -373,6 +524,35 @@ struct RegisterNwcPushPayload<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn icon_download_targets_must_be_globally_routable() {
+        for public in ["1.1.1.1:443", "8.8.8.8:443", "[2606:4700:4700::1111]:443"] {
+            assert!(is_public_socket_address(
+                public.parse().expect("public address")
+            ));
+        }
+        for private in [
+            "0.0.0.0:443",
+            "10.0.0.1:443",
+            "100.64.0.1:443",
+            "127.0.0.1:443",
+            "169.254.1.1:443",
+            "172.16.0.1:443",
+            "192.0.0.1:443",
+            "192.168.0.1:443",
+            "198.18.0.1:443",
+            "224.0.0.1:443",
+            "[::1]:443",
+            "[fe80::1]:443",
+            "[fd00::1]:443",
+            "[2001:db8::1]:443",
+        ] {
+            assert!(!is_public_socket_address(
+                private.parse().expect("private address")
+            ));
+        }
+    }
 
     fn config(server_url: &str) -> ApnsWakeRegistrationConfig {
         ApnsWakeRegistrationConfig::new(

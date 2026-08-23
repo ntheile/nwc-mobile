@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 use std::future::Future;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 use nwc_mobile::{
@@ -15,6 +16,28 @@ use nwc_mobile::{
 };
 
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const MAX_RESOLVED_SOCKET_ADDRESSES: usize = 16;
+
+/// Resolves a bounded set of socket addresses without blocking the async runtime.
+pub async fn resolve_socket_addresses(
+    host: String,
+    port: u16,
+) -> Result<Vec<SocketAddr>, HostError> {
+    tokio::task::spawn_blocking(move || {
+        let addresses = (host.as_str(), port)
+            .to_socket_addrs()
+            .map_err(|_| host_error(HostErrorKind::Unavailable))?
+            .take(MAX_RESOLVED_SOCKET_ADDRESSES)
+            .collect::<Vec<_>>();
+        if addresses.is_empty() {
+            Err(host_error(HostErrorKind::Unavailable))
+        } else {
+            Ok(addresses)
+        }
+    })
+    .await
+    .map_err(|_| host_error(HostErrorKind::Internal))?
+}
 
 /// Retries a fallible asynchronous operation with bounded exponential backoff.
 ///
