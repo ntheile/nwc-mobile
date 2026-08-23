@@ -14,8 +14,9 @@ use crate::{
     MakeInvoiceRequest, NotificationHint, NwcEventValidator, NwcMethod, OperationBudget,
     OperationContext, PayInvoiceRequest, PaymentAccountingError, PaymentFailure, PaymentHash,
     PaymentReservationOutcome, PaymentStatus, QueueReason, RejectionCode, RelayTransport,
-    RetryReason, SecretProvider, SecureRelayUrl, TerminalKind, UnixTimestamp, WakeDisposition,
-    WakeInput, WakeLedger, WakePolicy, WalletBackend, WalletTransaction,
+    RetryReason, SecretProvider, SecureRelayUrl, TerminalKind, UnixTimestamp, WakeDiagnosticCode,
+    WakeDiagnosticSink, WakeDisposition, WakeInput, WakeLedger, WakePolicy, WalletBackend,
+    WalletTransaction,
 };
 
 const ENGINE_RETRY_DELAY: Duration = Duration::from_secs(5);
@@ -38,6 +39,7 @@ pub struct WakeEngine<'a> {
     clock: &'a dyn Clock,
     validator: NwcEventValidator,
     maximum_event_bytes: usize,
+    diagnostics: Option<&'a dyn WakeDiagnosticSink>,
 }
 
 impl<'a> WakeEngine<'a> {
@@ -59,7 +61,15 @@ impl<'a> WakeEngine<'a> {
             clock,
             validator: NwcEventValidator::new(policy),
             maximum_event_bytes: policy.maximum_payload_bytes(),
+            diagnostics: None,
         }
+    }
+
+    /// Attaches a host-owned sink for bounded, non-secret execution codes.
+    #[must_use]
+    pub fn with_diagnostics(mut self, diagnostics: &'a dyn WakeDiagnosticSink) -> Self {
+        self.diagnostics = Some(diagnostics);
+        self
     }
 
     /// Validates, claims, executes, commits, and publishes one wake request.
@@ -237,6 +247,7 @@ impl<'a> WakeEngine<'a> {
                 .await;
         }
         if method == NwcMethod::PayInvoice {
+            self.record_diagnostic(WakeDiagnosticCode::PaymentRequestAccepted);
             let RequestParams::PayInvoice(payment) = request.params else {
                 return self.reject_claim(&lease, RejectionCode::InvalidRequest);
             };
@@ -359,12 +370,15 @@ impl<'a> WakeEngine<'a> {
         {
             Ok(quote) => quote,
             Err(error) if error.is_retryable() => {
-                return self.retry_claim(lease, RetryReason::WalletUnavailable)
+                self.record_diagnostic(WakeDiagnosticCode::PaymentQuoteFailed);
+                return self.retry_claim(lease, RetryReason::WalletUnavailable);
             }
             Err(error) if error.kind() == HostErrorKind::Cancelled => {
-                return self.release_to_application(lease, QueueReason::Deadline)
+                self.record_diagnostic(WakeDiagnosticCode::PaymentQuoteFailed);
+                return self.release_to_application(lease, QueueReason::Deadline);
             }
             Err(_) => {
+                self.record_diagnostic(WakeDiagnosticCode::PaymentQuoteFailed);
                 return self
                     .payment_error(
                         lease,
@@ -376,7 +390,7 @@ impl<'a> WakeEngine<'a> {
                         deadline,
                         cancellation,
                     )
-                    .await
+                    .await;
             }
         };
         let Some(principal_sat) = msat_to_sat_ceil(quote.principal().as_msat()) else {
@@ -416,6 +430,7 @@ impl<'a> WakeEngine<'a> {
         ) {
             Ok(reservation) => reservation,
             Err(PaymentAccountingError::BudgetExceeded) => {
+                self.record_diagnostic(WakeDiagnosticCode::PaymentBudgetExceeded);
                 return self
                     .payment_error(
                         lease,
@@ -427,7 +442,7 @@ impl<'a> WakeEngine<'a> {
                         deadline,
                         cancellation,
                     )
-                    .await
+                    .await;
             }
             Err(PaymentAccountingError::ConnectionUnavailable) => {
                 return self.reject_claim(lease, RejectionCode::ConnectionUnavailable)
@@ -480,7 +495,10 @@ impl<'a> WakeEngine<'a> {
             .await
         {
             Ok(status) => status,
-            Err(_) => return self.retry_claim(lease, RetryReason::WalletUnavailable),
+            Err(_) => {
+                self.record_diagnostic(WakeDiagnosticCode::PaymentStatusLookupFailed);
+                return self.retry_claim(lease, RetryReason::WalletUnavailable);
+            }
         };
         if !matches!(status, PaymentStatus::Unknown) {
             return self
@@ -523,6 +541,7 @@ impl<'a> WakeEngine<'a> {
                 .await
             }
             Err(_) => {
+                self.record_diagnostic(WakeDiagnosticCode::PaymentBackendFailed);
                 if self
                     .ledger
                     .mark_payment_pending(attempt.payment_hash(), self.clock.now())
@@ -549,6 +568,7 @@ impl<'a> WakeEngine<'a> {
     ) -> WakeDisposition {
         match status {
             PaymentStatus::Unknown | PaymentStatus::Pending => {
+                self.record_diagnostic(WakeDiagnosticCode::PaymentPending);
                 if self
                     .ledger
                     .mark_payment_pending(payment_hash, self.clock.now())
@@ -563,6 +583,7 @@ impl<'a> WakeEngine<'a> {
                 amount,
                 fee,
             } => {
+                self.record_diagnostic(WakeDiagnosticCode::PaymentSucceeded);
                 if self
                     .ledger
                     .mark_payment_succeeded(payment_hash, amount, fee, self.clock.now())
@@ -592,6 +613,12 @@ impl<'a> WakeEngine<'a> {
                 .await
             }
             PaymentStatus::Failed { reason } => {
+                self.record_diagnostic(match reason {
+                    PaymentFailure::InsufficientFunds => {
+                        WakeDiagnosticCode::PaymentInsufficientFunds
+                    }
+                    _ => WakeDiagnosticCode::PaymentBackendFailed,
+                });
                 if self
                     .ledger
                     .mark_payment_failed(payment_hash, self.clock.now())
@@ -832,11 +859,15 @@ impl<'a> WakeEngine<'a> {
             Err(_) => return queued(QueueReason::LedgerBusy),
         }
         let Some(context) = deadline.context(cancellation) else {
+            self.record_diagnostic(WakeDiagnosticCode::ResponsePublishFailed);
             return retry(ENGINE_RETRY_DELAY, RetryReason::ResponsePublishFailed);
         };
         match self.relays.publish_event(relay, event_json, context).await {
             Ok(()) => completed(),
-            Err(_) => retry(ENGINE_RETRY_DELAY, RetryReason::ResponsePublishFailed),
+            Err(_) => {
+                self.record_diagnostic(WakeDiagnosticCode::ResponsePublishFailed);
+                retry(ENGINE_RETRY_DELAY, RetryReason::ResponsePublishFailed)
+            }
         }
     }
 
@@ -898,6 +929,12 @@ impl<'a> WakeEngine<'a> {
         {
             Ok(()) => queued(reason),
             Err(_) => queued(QueueReason::LedgerBusy),
+        }
+    }
+
+    fn record_diagnostic(&self, code: WakeDiagnosticCode) {
+        if let Some(diagnostics) = self.diagnostics {
+            diagnostics.record(code);
         }
     }
 }
@@ -1773,7 +1810,9 @@ mod tests {
         relay.fail_next_publish.store(true, Ordering::SeqCst);
         let secrets = TestSecrets::wallet();
         let clock = FixedClock::new(100);
-        let engine = engine(&ledger, &wallet, &relay, &secrets, &clock);
+        let diagnostics = crate::WakeDiagnosticCollector::default();
+        let engine =
+            engine(&ledger, &wallet, &relay, &secrets, &clock).with_diagnostics(&diagnostics);
         let event = request_event(Request::get_balance(), 100);
 
         assert!(matches!(
@@ -1783,6 +1822,9 @@ mod tests {
                 ..
             }
         ));
+        assert!(diagnostics
+            .codes()
+            .contains(&WakeDiagnosticCode::ResponsePublishFailed));
         assert_eq!(wallet.balance_calls.load(Ordering::SeqCst), 1);
         clock.set(1_000);
         assert!(matches!(
@@ -2115,7 +2157,9 @@ mod tests {
         let relay = TestRelay::default();
         let secrets = TestSecrets::wallet();
         let clock = FixedClock::new(100);
-        let engine = engine(&ledger, &wallet, &relay, &secrets, &clock);
+        let diagnostics = crate::WakeDiagnosticCollector::default();
+        let engine =
+            engine(&ledger, &wallet, &relay, &secrets, &clock).with_diagnostics(&diagnostics);
         let event = request_event(
             Request::pay_invoice(nip47::PayInvoiceRequest::new("lnbc-over-budget")),
             100,
@@ -2128,6 +2172,13 @@ mod tests {
                 ..
             }
         ));
+        assert_eq!(
+            diagnostics.codes(),
+            [
+                WakeDiagnosticCode::PaymentRequestAccepted,
+                WakeDiagnosticCode::PaymentBudgetExceeded,
+            ]
+        );
         assert_eq!(wallet.status_calls.load(Ordering::SeqCst), 0);
         assert_eq!(wallet.start_calls.load(Ordering::SeqCst), 0);
     }

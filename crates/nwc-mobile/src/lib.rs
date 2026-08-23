@@ -13,6 +13,7 @@ mod application_manager;
 mod application_metadata;
 mod connection_registry;
 mod connection_service;
+mod diagnostics;
 mod engine;
 mod error;
 mod foreground;
@@ -61,6 +62,7 @@ pub use connection_service::{
     ApprovedNwaConnection, ConnectionManager, LegacyConnectionImport, LegacyMigrationResult,
     NwaApproval, NwaApprovalError,
 };
+pub use diagnostics::{WakeDiagnosticCode, WakeDiagnosticCollector, WakeDiagnosticSink};
 pub use engine::{ReadOnlyWakeEngine, WakeEngine};
 pub use error::DomainError;
 pub use foreground::{

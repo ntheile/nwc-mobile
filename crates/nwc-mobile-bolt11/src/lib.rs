@@ -222,6 +222,15 @@ mod tests {
     }
 
     #[test]
+    fn ten_sat_invoice_round_trips_through_msat_accounting() {
+        let invoice = signed_invoice(Some(10_000), current_timestamp());
+        let quote = quote_invoice_sats(&invoice.to_string(), None).expect("quote");
+
+        assert_eq!(quote.principal(), AmountMsat::from_msat(10_000));
+        assert_eq!(payment_amount_sats(&invoice, None).expect("sats"), 10);
+    }
+
+    #[test]
     fn created_invoice_preserves_metadata() {
         let invoice = signed_invoice(Some(250_000_000), current_timestamp());
         let encoded = invoice.to_string();
