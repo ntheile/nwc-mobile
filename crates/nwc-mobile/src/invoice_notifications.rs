@@ -1142,6 +1142,50 @@ impl WakeLedger {
         load_invoice(&connection, event_id)
     }
 
+    pub(crate) fn load_nwc_invoice_by_encoded_invoice(
+        &self,
+        invoice: &str,
+    ) -> Result<Option<TrackedNwcInvoice>, LedgerError> {
+        if invoice.is_empty() || invoice.len() > MAX_INVOICE_BYTES {
+            return Ok(None);
+        }
+        let connection = self.lock_connection()?;
+        connection
+            .query_row(
+                "SELECT request_event_id, payment_hash, connection_id, connection_revision,
+                        invoice, description, amount_msat, created_at, expires_at,
+                        notification_event_json
+                 FROM nwc_created_invoices
+                 WHERE invoice = ?1
+                 ORDER BY created_at DESC, request_event_id
+                 LIMIT 1",
+                params![invoice],
+                decode_invoice,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn load_nwc_invoice_by_payment_hash(
+        &self,
+        payment_hash: &PaymentHash,
+    ) -> Result<Option<TrackedNwcInvoice>, LedgerError> {
+        let connection = self.lock_connection()?;
+        connection
+            .query_row(
+                "SELECT request_event_id, payment_hash, connection_id, connection_revision,
+                        invoice, description, amount_msat, created_at, expires_at,
+                        notification_event_json
+                 FROM nwc_created_invoices
+                 WHERE payment_hash = ?1
+                 LIMIT 1",
+                params![payment_hash.as_bytes().as_slice()],
+                decode_invoice,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub(crate) fn pending_nwc_invoices(
         &self,
         maximum: usize,
