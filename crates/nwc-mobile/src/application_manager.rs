@@ -349,6 +349,11 @@ mod tests {
             .pending_nwa_request()
             .expect("pending request")
             .is_none());
+        manager
+            .open_nwa_request(&format!(
+                "nostr+walletauth://{CLIENT}?relay=wss%3A%2F%2Frelay.example%2Fsecond"
+            ))
+            .expect("replacement request");
         let _ = std::fs::remove_dir_all(directory);
     }
 }
