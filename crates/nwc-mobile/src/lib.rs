@@ -73,10 +73,11 @@ pub use foreground::{
 };
 pub use host::{
     AmountMsat, AmountSat, AtomicCancellation, CancellationSignal, CreatedInvoice, HostError,
-    HostErrorKind, HostFuture, InvoiceLookup, ListTransactionsRequest, MakeInvoiceRequest,
-    NeverCancelled, NwcNotificationType, OperationBudget, OperationContext, PayInvoiceRequest,
-    PaymentFailure, PaymentQuote, PaymentStatus, RelayTransport, SecretProvider, SecureRelayUrl,
-    SecureWakeServerUrl, TransactionDirection, WalletBackend, WalletInfo, WalletTransaction,
+    HostErrorKind, HostFuture, InvoiceLookup, InvoiceSettlementTrigger, ListTransactionsRequest,
+    MakeInvoiceRequest, NeverCancelled, NwcNotificationType, OperationBudget, OperationContext,
+    PayInvoiceRequest, PaymentFailure, PaymentQuote, PaymentStatus, RelayTransport, SecretProvider,
+    SecureRelayUrl, SecureWakeServerUrl, TransactionDirection, WalletBackend, WalletInfo,
+    WalletTransaction,
 };
 pub use invoice_notifications::{
     build_payment_received_notification_event, build_payment_sent_notification_event,

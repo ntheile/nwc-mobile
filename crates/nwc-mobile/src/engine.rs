@@ -759,6 +759,9 @@ impl<'a> WakeEngine<'a> {
                 {
                     existing
                 } else {
+                    let settlement_trigger =
+                        crate::InvoiceSettlementTrigger::generate(validated.id().clone())?;
+                    let request = request.with_settlement_trigger(settlement_trigger.clone());
                     let created = self.wallet.make_invoice(request, context).await?;
                     let tracked = crate::TrackedNwcInvoice::new(
                         validated.id().clone(),
@@ -772,7 +775,11 @@ impl<'a> WakeEngine<'a> {
                         created.expires_at(),
                     );
                     self.ledger
-                        .record_nwc_invoice(&tracked, connection.relays())
+                        .record_nwc_invoice_with_settlement_trigger(
+                            &tracked,
+                            connection.relays(),
+                            settlement_trigger.token_bytes(),
+                        )
                         .map_err(|_| HostError::new(HostErrorKind::Unavailable))?
                 };
                 diagnostic_stage("make_invoice_dispatch_completed");
@@ -1841,6 +1848,14 @@ mod tests {
         assert_eq!(requests[0].amount(), AmountMsat::from_msat(42_000));
         assert_eq!(requests[0].description(), Some("coffee"));
         assert_eq!(requests[0].expiry(), Duration::from_secs(600));
+        let settlement_trigger = requests[0]
+            .settlement_trigger()
+            .expect("settlement trigger");
+        assert_eq!(
+            settlement_trigger.request_event_id(),
+            &crate::EventId::from_bytes(*event.id.as_bytes())
+        );
+        assert_ne!(settlement_trigger.token_bytes(), &[0_u8; 32]);
         drop(requests);
 
         let published = relay.published.lock().expect("published lock");

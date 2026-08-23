@@ -1063,6 +1063,18 @@ impl WakeLedger {
         invoice: &TrackedNwcInvoice,
         relays: &[crate::SecureRelayUrl],
     ) -> Result<TrackedNwcInvoice, LedgerError> {
+        let mut settlement_trigger_token = [0_u8; SETTLEMENT_TRIGGER_TOKEN_BYTES];
+        getrandom::fill(&mut settlement_trigger_token)
+            .map_err(|_| LedgerError::RandomnessUnavailable)?;
+        self.record_nwc_invoice_with_settlement_trigger(invoice, relays, &settlement_trigger_token)
+    }
+
+    pub(crate) fn record_nwc_invoice_with_settlement_trigger(
+        &self,
+        invoice: &TrackedNwcInvoice,
+        relays: &[crate::SecureRelayUrl],
+        settlement_trigger_token: &[u8; SETTLEMENT_TRIGGER_TOKEN_BYTES],
+    ) -> Result<TrackedNwcInvoice, LedgerError> {
         if invoice.invoice.is_empty()
             || invoice.invoice.len() > MAX_INVOICE_BYTES
             || invoice
@@ -1082,9 +1094,6 @@ impl WakeLedger {
             .map_err(|_| LedgerError::ValueOutOfRange)?;
         let expires_at = i64::try_from(invoice.expires_at.as_secs())
             .map_err(|_| LedgerError::ValueOutOfRange)?;
-        let mut settlement_trigger_token = [0_u8; SETTLEMENT_TRIGGER_TOKEN_BYTES];
-        getrandom::fill(&mut settlement_trigger_token)
-            .map_err(|_| LedgerError::RandomnessUnavailable)?;
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute(

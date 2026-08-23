@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use url::Url;
+use zeroize::Zeroizing;
 
 use crate::{
     ConnectionId, DomainError, EventId, NwcMethod, NwcSecretKey, PaymentHash, PaymentPreimage,
@@ -381,12 +382,53 @@ impl WalletInfo {
     }
 }
 
+/// A single-invoice capability that lets a wallet backend signal settlement.
+#[derive(Clone, Eq, PartialEq)]
+pub struct InvoiceSettlementTrigger {
+    request_event_id: EventId,
+    token: Zeroizing<[u8; 32]>,
+}
+
+impl InvoiceSettlementTrigger {
+    pub(crate) fn generate(request_event_id: EventId) -> Result<Self, HostError> {
+        let mut token = Zeroizing::new([0_u8; 32]);
+        getrandom::fill(&mut *token).map_err(|_| HostError::new(HostErrorKind::Unavailable))?;
+        Ok(Self {
+            request_event_id,
+            token,
+        })
+    }
+
+    /// Returns the NWC request event that owns this capability.
+    #[must_use]
+    pub const fn request_event_id(&self) -> &EventId {
+        &self.request_event_id
+    }
+
+    /// Returns the random capability bytes for a trusted wallet backend.
+    #[must_use]
+    pub fn token_bytes(&self) -> &[u8; 32] {
+        &self.token
+    }
+}
+
+impl fmt::Debug for InvoiceSettlementTrigger {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InvoiceSettlementTrigger")
+            .field("request_event_id", &"[redacted]")
+            .field("token", &"[redacted]")
+            .finish()
+    }
+}
+
 /// A request to create a Lightning invoice.
 #[derive(Clone, Eq, PartialEq)]
 pub struct MakeInvoiceRequest {
     amount: AmountMsat,
     description: Option<String>,
     expiry: Duration,
+    settlement_trigger: Option<InvoiceSettlementTrigger>,
 }
 
 impl MakeInvoiceRequest {
@@ -397,7 +439,16 @@ impl MakeInvoiceRequest {
             amount,
             description,
             expiry,
+            settlement_trigger: None,
         }
+    }
+
+    pub(crate) fn with_settlement_trigger(
+        mut self,
+        settlement_trigger: InvoiceSettlementTrigger,
+    ) -> Self {
+        self.settlement_trigger = Some(settlement_trigger);
+        self
     }
 
     /// Returns the requested invoice amount.
@@ -417,6 +468,12 @@ impl MakeInvoiceRequest {
     pub const fn expiry(&self) -> Duration {
         self.expiry
     }
+
+    /// Returns the optional server-side settlement capability.
+    #[must_use]
+    pub const fn settlement_trigger(&self) -> Option<&InvoiceSettlementTrigger> {
+        self.settlement_trigger.as_ref()
+    }
 }
 
 impl fmt::Debug for MakeInvoiceRequest {
@@ -429,6 +486,7 @@ impl fmt::Debug for MakeInvoiceRequest {
                 &self.description.as_ref().map(|_| "[redacted]"),
             )
             .field("expiry", &self.expiry)
+            .field("has_settlement_trigger", &self.settlement_trigger.is_some())
             .finish()
     }
 }
@@ -846,6 +904,10 @@ mod tests {
             AmountMsat::from_msat(1_000),
             Some("attacker-controlled-description".to_string()),
             Duration::from_secs(60),
+        )
+        .with_settlement_trigger(
+            InvoiceSettlementTrigger::generate(EventId::from_hex(HEX).expect("event id"))
+                .expect("settlement trigger"),
         );
         let relay = SecureRelayUrl::parse("wss://private.example.com").expect("relay");
         let wake_server = SecureWakeServerUrl::parse("https://wake.private.example.com/register")
@@ -858,6 +920,7 @@ mod tests {
         assert!(!request_debug.contains("secret-invoice"));
         assert!(!request_debug.contains(HEX));
         assert!(!make_invoice_debug.contains("attacker-controlled"));
+        assert!(!make_invoice_debug.contains(HEX));
         assert!(!relay_debug.contains("private.example.com"));
         assert!(!wake_server_debug.contains("private.example.com"));
     }
