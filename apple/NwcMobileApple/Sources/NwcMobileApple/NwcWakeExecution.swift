@@ -1,5 +1,15 @@
 import Foundation
 
+/// A non-sensitive NIP-47 method category used only for static presentation.
+public enum NwcWakeRequestAction: Sendable, Equatable {
+  case getInfo
+  case getBalance
+  case payInvoice
+  case makeInvoice
+  case lookupInvoice
+  case listTransactions
+}
+
 /// Generic presentation guidance returned after Rust-owned wake policy runs.
 ///
 /// The enum deliberately carries no invoice, amount, counterparty, relay, or
@@ -7,6 +17,7 @@ import Foundation
 public enum NwcWakePresentationHint: Sendable, Equatable {
   case processing
   case completed
+  case request(NwcWakeRequestAction)
   case openApplication
 }
 

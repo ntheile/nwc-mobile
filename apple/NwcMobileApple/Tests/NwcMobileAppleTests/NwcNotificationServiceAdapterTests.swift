@@ -106,6 +106,33 @@ final class NwcNotificationServiceAdapterTests: XCTestCase {
     XCTAssertTrue(result.value?.userInfo.isEmpty == true)
   }
 
+  func testRequestHintUsesStaticActionSpecificCopy() async throws {
+    let adapter = NwcNotificationServiceAdapter(
+      executor: ImmediateExecutor(hint: .request(.payInvoice)),
+      cancellationFactory: { TestCancellation() },
+      executionMilliseconds: 1_000,
+      copy: copy()
+    )
+    let original = UNMutableNotificationContent()
+    original.title = "remote title"
+    original.body = "remote amount and invoice"
+    original.userInfo = payload()
+    let request = UNNotificationRequest(identifier: "action", content: original, trigger: nil)
+    let completed = expectation(description: "action completion")
+    let result = LockedNotificationContent()
+
+    adapter.didReceive(request) { content in
+      result.set(content)
+      completed.fulfill()
+    }
+    await fulfillment(of: [completed], timeout: 1)
+
+    let content = try XCTUnwrap(result.value)
+    XCTAssertEqual(content.title, "Request handled")
+    XCTAssertEqual(content.body, "Paying Invoice")
+    XCTAssertEqual(content.interruptionLevel, .passive)
+  }
+
   func testValidatedPayloadEntryPointNormalizesUserInfo() async throws {
     let adapter = NwcNotificationServiceAdapter(
       executor: ImmediateExecutor(hint: .completed),
@@ -169,6 +196,12 @@ final class NwcNotificationServiceAdapterTests: XCTestCase {
       processingBody: "Open the wallet for details.",
       completedTitle: "Request handled",
       completedBody: "Open the wallet for details.",
+      getInfoBody: "Getting Info",
+      getBalanceBody: "Getting Balance",
+      payInvoiceBody: "Paying Invoice",
+      makeInvoiceBody: "Creating Invoice",
+      lookupInvoiceBody: "Fetching Invoice",
+      listTransactionsBody: "Fetching Transactions",
       openApplicationTitle: "Open wallet",
       openApplicationBody: "Open the wallet to continue safely."
     )

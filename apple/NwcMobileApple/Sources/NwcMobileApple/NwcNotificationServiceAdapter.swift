@@ -9,6 +9,12 @@ public struct NwcNotificationCopy: Sendable, Equatable {
   public let processingBody: String
   public let completedTitle: String
   public let completedBody: String
+  public let getInfoBody: String
+  public let getBalanceBody: String
+  public let payInvoiceBody: String
+  public let makeInvoiceBody: String
+  public let lookupInvoiceBody: String
+  public let listTransactionsBody: String
   public let openApplicationTitle: String
   public let openApplicationBody: String
 
@@ -17,6 +23,12 @@ public struct NwcNotificationCopy: Sendable, Equatable {
     processingBody: String,
     completedTitle: String,
     completedBody: String,
+    getInfoBody: String,
+    getBalanceBody: String,
+    payInvoiceBody: String,
+    makeInvoiceBody: String,
+    lookupInvoiceBody: String,
+    listTransactionsBody: String,
     openApplicationTitle: String,
     openApplicationBody: String
   ) {
@@ -24,6 +36,12 @@ public struct NwcNotificationCopy: Sendable, Equatable {
     self.processingBody = processingBody
     self.completedTitle = completedTitle
     self.completedBody = completedBody
+    self.getInfoBody = getInfoBody
+    self.getBalanceBody = getBalanceBody
+    self.payInvoiceBody = payInvoiceBody
+    self.makeInvoiceBody = makeInvoiceBody
+    self.lookupInvoiceBody = lookupInvoiceBody
+    self.listTransactionsBody = listTransactionsBody
     self.openApplicationTitle = openApplicationTitle
     self.openApplicationBody = openApplicationBody
   }
@@ -86,10 +104,31 @@ public struct NwcNotificationPresenter: Sendable {
       content.interruptionLevel = .passive
       content.title = copy.completedTitle
       content.body = copy.completedBody
+    case .request(let action):
+      content.interruptionLevel = .passive
+      content.title = copy.completedTitle
+      content.body = requestBody(for: action)
     case .openApplication:
       content.interruptionLevel = .active
       content.title = copy.openApplicationTitle
       content.body = copy.openApplicationBody
+    }
+  }
+
+  private func requestBody(for action: NwcWakeRequestAction) -> String {
+    switch action {
+    case .getInfo:
+      copy.getInfoBody
+    case .getBalance:
+      copy.getBalanceBody
+    case .payInvoice:
+      copy.payInvoiceBody
+    case .makeInvoice:
+      copy.makeInvoiceBody
+    case .lookupInvoice:
+      copy.lookupInvoiceBody
+    case .listTransactions:
+      copy.listTransactionsBody
     }
   }
 }

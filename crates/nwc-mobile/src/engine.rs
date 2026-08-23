@@ -167,6 +167,7 @@ impl<'a> WakeEngine<'a> {
                         &connection,
                         &relay,
                         terminal.response_event_json(),
+                        NotificationHint::Completed,
                         &deadline,
                         cancellation,
                     )
@@ -799,7 +800,10 @@ impl<'a> WakeEngine<'a> {
             )
             .await;
         match disposition {
-            WakeDisposition::Completed { .. } => rejected(rejection),
+            WakeDisposition::Completed { notification } => WakeDisposition::Rejected {
+                code: rejection,
+                notification,
+            },
             other => other,
         }
     }
@@ -815,6 +819,7 @@ impl<'a> WakeEngine<'a> {
         deadline: &OperationDeadline,
         cancellation: &dyn CancellationSignal,
     ) -> WakeDisposition {
+        let notification = notification_for_method(response.result_type);
         let response_json = response.as_json();
         let secret = match self.secrets.load_nwc_secret(connection.id()) {
             Ok(secret) => secret,
@@ -838,8 +843,15 @@ impl<'a> WakeEngine<'a> {
             Ok(()) => {}
             Err(error) => return self.completion_failed(lease, error),
         }
-        self.republish_terminal(connection, relay, Some(&event_json), deadline, cancellation)
-            .await
+        self.republish_terminal(
+            connection,
+            relay,
+            Some(&event_json),
+            notification,
+            deadline,
+            cancellation,
+        )
+        .await
     }
 
     async fn republish_terminal(
@@ -847,6 +859,7 @@ impl<'a> WakeEngine<'a> {
         connection: &ActiveConnection,
         relay: &SecureRelayUrl,
         event_json: Option<&str>,
+        notification: NotificationHint,
         deadline: &OperationDeadline,
         cancellation: &dyn CancellationSignal,
     ) -> WakeDisposition {
@@ -863,7 +876,7 @@ impl<'a> WakeEngine<'a> {
             return retry(ENGINE_RETRY_DELAY, RetryReason::ResponsePublishFailed);
         };
         match self.relays.publish_event(relay, event_json, context).await {
-            Ok(()) => completed(),
+            Ok(()) => completed(notification),
             Err(_) => {
                 self.record_diagnostic(WakeDiagnosticCode::ResponsePublishFailed);
                 retry(ENGINE_RETRY_DELAY, RetryReason::ResponsePublishFailed)
@@ -1208,9 +1221,14 @@ const fn protocol_error_message(code: ErrorCode) -> &'static str {
     }
 }
 
-const fn completed() -> WakeDisposition {
-    WakeDisposition::Completed {
-        notification: NotificationHint::Completed,
+const fn completed(notification: NotificationHint) -> WakeDisposition {
+    WakeDisposition::Completed { notification }
+}
+
+fn notification_for_method(method: Method) -> NotificationHint {
+    match domain_method(method) {
+        Some(method) => NotificationHint::Request { method },
+        None => NotificationHint::Completed,
     }
 }
 
@@ -1648,10 +1666,14 @@ mod tests {
         let engine = engine(&ledger, &wallet, &relay, &secrets, &clock);
         let event = request_event(Request::get_balance(), 100);
 
-        assert!(matches!(
+        assert_eq!(
             execute(&engine, wake(&event, RELAY, true)),
-            WakeDisposition::Completed { .. }
-        ));
+            WakeDisposition::Completed {
+                notification: NotificationHint::Request {
+                    method: NwcMethod::GetBalance,
+                },
+            }
+        );
         assert_eq!(wallet.balance_calls.load(Ordering::SeqCst), 1);
         let published = relay.published.lock().expect("published lock");
         assert_eq!(published.len(), 1);

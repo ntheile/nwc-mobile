@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use crate::NwcMethod;
+
 /// A native notification presentation category.
 ///
 /// Hosts map this value to localized, generic text. It never contains remote
@@ -11,6 +13,14 @@ pub enum NotificationHint {
     Processing,
     /// The request completed without requiring user attention.
     Completed,
+    /// A validated NIP-47 request completed without requiring user attention.
+    ///
+    /// Native hosts use only the typed method to select static, localized copy.
+    /// No request parameters or wallet response values cross this boundary.
+    Request {
+        /// The completed NIP-47 method.
+        method: NwcMethod,
+    },
     /// The containing application should be opened to continue safely.
     OpenApplication,
 }
