@@ -7,6 +7,7 @@ use std::future::{poll_fn, Future};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::task::Poll;
+use std::time::{Duration, Instant};
 
 use bark::actions::lightning::pay::{LightningSend, LightningSendState};
 use bark::actions::lightning::receive::{LightningReceive, LightningReceiveState};
@@ -27,8 +28,11 @@ use nwc_mobile_bolt11::{
     created_invoice, exact_sats, parse_invoice, payment_amount_sats, quote_invoice_sats,
     sats_to_msats,
 };
-use nwc_mobile_tokio::run_with_context;
+use nwc_mobile_tokio::{run_with_context, sleep};
 use serde_json::Value;
+
+const PAYMENT_SETTLE_TIMEOUT: Duration = Duration::from_secs(22);
+const PAYMENT_POLL_INTERVAL: Duration = Duration::from_millis(750);
 
 /// Adapts an already-open Bark wallet to the `nwc-mobile` host contract.
 #[derive(Clone)]
@@ -209,7 +213,7 @@ impl WalletBackend for BarkWalletBackend {
                 context,
                 run_with_bark_mailbox(
                     self.wallet.clone(),
-                    payment_status_without_mailbox(&self.wallet, payment_hash),
+                    wait_for_payment_terminal(&self.wallet, payment_hash),
                 ),
             )
             .await
@@ -277,7 +281,7 @@ impl WalletBackend for BarkWalletBackend {
                         self.record_diagnostic(WakeDiagnosticCode::PaymentBackendFailed);
                         host_error(HostErrorKind::Internal)
                     })?;
-                payment_status_without_mailbox(&self.wallet, payment_hash).await
+                wait_for_payment_terminal(&self.wallet, payment_hash).await
             };
             run_with_context(context, run_with_bark_mailbox(self.wallet.clone(), payment)).await
         })
@@ -358,14 +362,10 @@ async fn payment_status_without_mailbox(
     wallet: &Wallet,
     payment_hash: BarkPaymentHash,
 ) -> Result<PaymentStatus, HostError> {
-    // A Bark lightning send is a durable state machine. Merely reading its
-    // checkpoint leaves `PaymentInitiated` parked forever when the host has no
-    // long-lived wallet sync loop, as is the case inside an iOS notification
-    // service extension. Drive it until a terminal result; the surrounding
-    // `OperationContext` cancels this future at the host's background deadline,
-    // while Bark persists every parked checkpoint for the next wake.
+    // Drive one nonblocking step and release Bark's action lock. The mailbox
+    // processor may need that same lock to apply the server-delivered preimage.
     let state = wallet
-        .check_lightning_payment(payment_hash, true)
+        .check_lightning_payment(payment_hash, false)
         .await
         .map_err(|_| host_error(HostErrorKind::Internal))?;
     match state {
@@ -401,6 +401,20 @@ async fn payment_status_without_mailbox(
                 .transpose()?
                 .unwrap_or(PaymentStatus::Unknown))
         }
+    }
+}
+
+async fn wait_for_payment_terminal(
+    wallet: &Wallet,
+    payment_hash: BarkPaymentHash,
+) -> Result<PaymentStatus, HostError> {
+    let deadline = Instant::now() + PAYMENT_SETTLE_TIMEOUT;
+    loop {
+        let status = payment_status_without_mailbox(wallet, payment_hash).await?;
+        if !matches!(status, PaymentStatus::Pending) || Instant::now() >= deadline {
+            return Ok(status);
+        }
+        sleep(PAYMENT_POLL_INTERVAL).await;
     }
 }
 
