@@ -332,7 +332,11 @@ impl WalletBackend for BarkWalletBackend {
     ) -> HostFuture<'a, Result<Option<WalletTransaction>, HostError>> {
         Box::pin(async move {
             let payment_hash = lookup_payment_hash(&request)?;
-            run_with_context(context, lookup_transaction(&self.wallet, payment_hash)).await
+            run_with_context(
+                context,
+                sync_then_lookup_transaction(&self.wallet, payment_hash),
+            )
+            .await
         })
     }
 
@@ -343,6 +347,10 @@ impl WalletBackend for BarkWalletBackend {
     ) -> HostFuture<'a, Result<Vec<WalletTransaction>, HostError>> {
         Box::pin(async move {
             run_with_context(context, async {
+                // Bark's history and pending receive tables are local views. Refresh
+                // the durable mailbox first so an NWC client never receives a stale
+                // transaction list after the application has been suspended.
+                self.wallet.sync().await;
                 let mut transactions = self
                     .wallet
                     .history()
@@ -519,6 +527,18 @@ async fn lookup_transaction(
         LightningSendState::InProgress(send) => Ok(transaction_from_pending_send(&send)),
         LightningSendState::Paid(_) | LightningSendState::Unknown => Ok(None),
     }
+}
+
+async fn sync_then_lookup_transaction(
+    wallet: &Wallet,
+    payment_hash: BarkPaymentHash,
+) -> Result<Option<WalletTransaction>, HostError> {
+    // `lightning_receive_state` only reads Bark's local database. A killed or
+    // suspended mobile host must first drain the durable Ark mailbox so an
+    // accepted Lightning receive is claimed and persisted before we report its
+    // NIP-47 state. The caller's OperationContext bounds the entire refresh.
+    wallet.sync().await;
+    lookup_transaction(wallet, payment_hash).await
 }
 
 fn transaction_from_movement(movement: &Movement) -> Option<WalletTransaction> {

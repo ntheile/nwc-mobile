@@ -463,6 +463,7 @@ pub async fn update_invoice_settlement_monitor(
             relay: relay.as_str(),
             expires_at: monitor_until,
             enabled: !monitor.completed(),
+            trigger_token_hash: monitor.trigger_token_hash(),
         };
         let body = serde_json::to_vec(&payload)
             .map_err(|_| WakeHttpRegistrationError::ClientUnavailable)?;
@@ -653,6 +654,7 @@ struct InvoiceSettlementMonitorPayload<'a> {
     relay: &'a str,
     expires_at: u64,
     enabled: bool,
+    trigger_token_hash: &'a str,
 }
 
 #[cfg(test)]

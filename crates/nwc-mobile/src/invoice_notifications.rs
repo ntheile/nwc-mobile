@@ -1,5 +1,6 @@
 use std::fmt;
 
+use nostr::hashes::{sha256, Hash};
 use nostr::nips::nip47::{
     Notification, NotificationResult, NotificationType, PaymentNotification, TransactionState,
     TransactionType,
@@ -19,6 +20,16 @@ const MAX_DESCRIPTION_BYTES: usize = 4_096;
 const MAX_NOTIFICATION_EVENT_BYTES: usize = 128 * 1_024;
 const DEFAULT_BATCH_SIZE: usize = 20;
 const SETTLEMENT_RECONCILIATION_GRACE_SECONDS: u64 = 24 * 60 * 60;
+const SETTLEMENT_TRIGGER_TOKEN_BYTES: usize = 32;
+
+pub(crate) const ADD_INVOICE_SETTLEMENT_TRIGGER: &str = r#"
+ALTER TABLE nwc_created_invoices ADD COLUMN settlement_trigger_token BLOB
+    CHECK(settlement_trigger_token IS NULL OR
+          (typeof(settlement_trigger_token) = 'blob' AND length(settlement_trigger_token) = 32));
+UPDATE nwc_created_invoices
+SET settlement_trigger_token = randomblob(32)
+WHERE settlement_trigger_token IS NULL;
+"#;
 
 pub(crate) const CREATE_INVOICE_NOTIFICATION_SCHEMA: &str = r#"
 CREATE TABLE nwc_created_invoices (
@@ -253,6 +264,7 @@ pub struct InvoiceSettlementMonitor {
     relays: Vec<crate::SecureRelayUrl>,
     expires_at: UnixTimestamp,
     completed: bool,
+    trigger_token_hash: String,
 }
 
 impl InvoiceSettlementMonitor {
@@ -290,6 +302,12 @@ impl InvoiceSettlementMonitor {
     #[must_use]
     pub const fn completed(&self) -> bool {
         self.completed
+    }
+
+    /// Returns the SHA-256 commitment to the single-invoice wake capability.
+    #[must_use]
+    pub fn trigger_token_hash(&self) -> &str {
+        &self.trigger_token_hash
     }
 }
 
@@ -815,7 +833,8 @@ impl WakeLedger {
         let row = connection
             .query_row(
                 "SELECT i.request_event_id, c.client_pubkey, c.wallet_service_pubkey,
-                        i.expires_at, i.completed_at IS NOT NULL
+                        i.expires_at, i.completed_at IS NOT NULL,
+                        i.settlement_trigger_token
                  FROM nwc_created_invoices i
                  JOIN connections c ON c.connection_id = i.connection_id
                     AND c.revision = i.connection_revision
@@ -828,11 +847,12 @@ impl WakeLedger {
                         row.get::<_, Vec<u8>>(2)?,
                         row.get::<_, i64>(3)?,
                         row.get::<_, bool>(4)?,
+                        row.get::<_, Vec<u8>>(5)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((request, client, wallet, expires_at, completed)) = row else {
+        let Some((request, client, wallet, expires_at, completed, trigger_token)) = row else {
             return Ok(None);
         };
         let fixed = |value: Vec<u8>| value.try_into().map_err(|_| LedgerError::CorruptData);
@@ -858,6 +878,7 @@ impl WakeLedger {
                 u64::try_from(expires_at).map_err(|_| LedgerError::CorruptData)?,
             ),
             completed,
+            trigger_token_hash: sha256::Hash::hash(&trigger_token).to_string(),
         }))
     }
 
@@ -1061,13 +1082,17 @@ impl WakeLedger {
             .map_err(|_| LedgerError::ValueOutOfRange)?;
         let expires_at = i64::try_from(invoice.expires_at.as_secs())
             .map_err(|_| LedgerError::ValueOutOfRange)?;
+        let mut settlement_trigger_token = [0_u8; SETTLEMENT_TRIGGER_TOKEN_BYTES];
+        getrandom::fill(&mut settlement_trigger_token)
+            .map_err(|_| LedgerError::RandomnessUnavailable)?;
         let mut connection = self.lock_connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute(
             "INSERT INTO nwc_created_invoices (
                 request_event_id, payment_hash, connection_id, connection_revision,
-                invoice, description, amount_msat, created_at, expires_at, last_checked_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?8)
+                invoice, description, amount_msat, created_at, expires_at, last_checked_at,
+                settlement_trigger_token
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?8, ?10)
              ON CONFLICT(request_event_id) DO NOTHING",
             params![
                 invoice.request_event_id.as_bytes().as_slice(),
@@ -1079,6 +1104,7 @@ impl WakeLedger {
                 amount,
                 created_at,
                 expires_at,
+                settlement_trigger_token.as_slice(),
             ],
         )?;
         let existing = load_invoice(&transaction, &invoice.request_event_id)?
