@@ -3,8 +3,10 @@
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeSet;
+use std::future::{poll_fn, Future};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::task::Poll;
 
 use bark::actions::lightning::pay::{LightningSend, LightningSendState};
 use bark::actions::lightning::receive::{LightningReceive, LightningReceiveState};
@@ -203,7 +205,14 @@ impl WalletBackend for BarkWalletBackend {
     ) -> HostFuture<'a, Result<PaymentStatus, HostError>> {
         Box::pin(async move {
             let payment_hash = bark_payment_hash(payment_hash)?;
-            run_with_context(context, payment_status(&self.wallet, payment_hash)).await
+            run_with_context(
+                context,
+                run_with_bark_mailbox(
+                    self.wallet.clone(),
+                    payment_status_without_mailbox(&self.wallet, payment_hash),
+                ),
+            )
+            .await
         })
     }
 
@@ -216,8 +225,8 @@ impl WalletBackend for BarkWalletBackend {
             let invoice = parse_invoice(request.invoice())?;
             let amount_sat = payment_amount_sats(&invoice, request.amount())?;
             let payment_hash: BarkPaymentHash = (*invoice.payment_hash()).into();
-            run_with_context(context, async {
-                let existing = payment_status(&self.wallet, payment_hash).await?;
+            let payment = async {
+                let existing = payment_status_without_mailbox(&self.wallet, payment_hash).await?;
                 if !matches!(existing, PaymentStatus::Unknown) {
                     return Ok(existing);
                 }
@@ -268,9 +277,9 @@ impl WalletBackend for BarkWalletBackend {
                         self.record_diagnostic(WakeDiagnosticCode::PaymentBackendFailed);
                         host_error(HostErrorKind::Internal)
                     })?;
-                payment_status(&self.wallet, payment_hash).await
-            })
-            .await
+                payment_status_without_mailbox(&self.wallet, payment_hash).await
+            };
+            run_with_context(context, run_with_bark_mailbox(self.wallet.clone(), payment)).await
         })
     }
 
@@ -345,7 +354,7 @@ impl WalletBackend for BarkWalletBackend {
     }
 }
 
-async fn payment_status(
+async fn payment_status_without_mailbox(
     wallet: &Wallet,
     payment_hash: BarkPaymentHash,
 ) -> Result<PaymentStatus, HostError> {
@@ -393,6 +402,31 @@ async fn payment_status(
                 .unwrap_or(PaymentStatus::Unknown))
         }
     }
+}
+
+/// Keeps Bark's durable mailbox stream alive while a bounded payment operation runs.
+///
+/// The full wallet app normally owns this stream. Short-lived native workers such as
+/// an iOS notification service extension must run it explicitly so the server's
+/// payment-finished message can settle the checkpoint and persist the preimage.
+async fn run_with_bark_mailbox<T>(wallet: Wallet, operation: impl Future<Output = T>) -> T {
+    let mut operation = Box::pin(operation);
+    let mut mailbox = Box::pin(async move {
+        let _ = wallet
+            .subscribe_process_mailbox_messages(None, Default::default())
+            .await;
+    });
+    let mut mailbox_active = true;
+    poll_fn(move |context| {
+        if let Poll::Ready(result) = operation.as_mut().poll(context) {
+            return Poll::Ready(result);
+        }
+        if mailbox_active && mailbox.as_mut().poll(context).is_ready() {
+            mailbox_active = false;
+        }
+        Poll::Pending
+    })
+    .await
 }
 
 fn payment_status_from_movement(movement: &Movement) -> Result<PaymentStatus, HostError> {
