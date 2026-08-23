@@ -791,9 +791,37 @@ impl<'a> WakeEngine<'a> {
                 })
             }
             RequestParams::LookupInvoice(request) => {
-                let lookup = parse_lookup_request(request).map_err(HostError::new)?;
+                // A freshly created Bark invoice can be durably visible in the
+                // nwc-mobile ledger before another short-lived native process
+                // observes its wallet checkpoint. Resolve exact wallet-created
+                // selectors through the ledger first so this transient view
+                // cannot turn the client's first lookup into a terminal
+                // NotFound response that stops settlement polling.
+                let tracked = if let Some(invoice) = request.invoice.as_deref() {
+                    self.ledger
+                        .load_nwc_invoice_by_encoded_invoice(invoice)
+                        .map_err(|_| HostError::new(HostErrorKind::Unavailable))?
+                } else if let Some(payment_hash) = request.payment_hash.as_deref() {
+                    let payment_hash = PaymentHash::from_hex(payment_hash)
+                        .map_err(|_| HostError::new(HostErrorKind::Rejected))?;
+                    self.ledger
+                        .load_nwc_invoice_by_payment_hash(&payment_hash)
+                        .map_err(|_| HostError::new(HostErrorKind::Unavailable))?
+                } else {
+                    None
+                };
+                let lookup = tracked.as_ref().map_or_else(
+                    || parse_lookup_request(request).map_err(HostError::new),
+                    |invoice| Ok(InvoiceLookup::PaymentHash(invoice.payment_hash().clone())),
+                )?;
                 let transaction = self.wallet.lookup_invoice(lookup, context).await?;
                 let response = transaction
+                    .or_else(|| {
+                        tracked
+                            .as_ref()
+                            .filter(|invoice| invoice.expires_at() > self.clock.now())
+                            .map(pending_tracked_invoice_transaction)
+                    })
                     .map(transaction_response)
                     .transpose()
                     .map_err(HostError::new)?
@@ -1139,6 +1167,18 @@ fn transaction_response(
             .map(|time| Timestamp::from(time.as_secs())),
         metadata: None,
     })
+}
+
+fn pending_tracked_invoice_transaction(invoice: &crate::TrackedNwcInvoice) -> WalletTransaction {
+    WalletTransaction {
+        payment_hash: Some(invoice.payment_hash().clone()),
+        direction: crate::TransactionDirection::Incoming,
+        amount: invoice.amount(),
+        fee: AmountMsat::default(),
+        created_at: invoice.created_at(),
+        settled_at: None,
+        status: PaymentStatus::Pending,
+    }
 }
 
 fn domain_method(method: Method) -> Option<NwcMethod> {
@@ -1499,6 +1539,7 @@ mod tests {
         balance_calls: AtomicUsize,
         invoice_requests: Mutex<Vec<MakeInvoiceRequest>>,
         lookup_requests: Mutex<Vec<InvoiceLookup>>,
+        lookup_returns_none: AtomicBool,
         revoke_on_balance: Mutex<Option<(&'a WakeLedger, ConnectionId, crate::ConnectionRevision)>>,
         quote: Mutex<Option<PaymentQuote>>,
         payment_statuses: Mutex<VecDeque<Result<PaymentStatus, HostError>>>,
@@ -1619,6 +1660,9 @@ mod tests {
                 .lock()
                 .expect("lookup requests lock")
                 .push(request);
+            if self.lookup_returns_none.load(Ordering::SeqCst) {
+                return Box::pin(async { Ok(None) });
+            }
             Box::pin(async {
                 Ok(Some(WalletTransaction {
                     payment_hash: Some(PaymentHash::from_bytes([8_u8; 32])),
@@ -1921,6 +1965,63 @@ mod tests {
                 .as_slice(),
             [InvoiceLookup::Invoice(invoice)] if invoice == "lnbc-alby-dual-selector"
         ));
+    }
+
+    #[test]
+    fn freshly_created_invoice_stays_pending_during_transient_wallet_miss() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        insert_connection(&ledger);
+        let wallet = TestWallet::default();
+        let relay = TestRelay::default();
+        let secrets = TestSecrets::wallet();
+        let clock = FixedClock::new(100);
+        let engine = engine(&ledger, &wallet, &relay, &secrets, &clock);
+        let create = request_event(
+            Request::make_invoice(nip47::MakeInvoiceRequest {
+                amount: 42_000,
+                description: Some("coffee".to_string()),
+                description_hash: None,
+                expiry: Some(600),
+            }),
+            100,
+        );
+        assert!(matches!(
+            execute(&engine, wake(&create, RELAY, true)),
+            WakeDisposition::Completed { .. }
+        ));
+
+        wallet
+            .lookup_requests
+            .lock()
+            .expect("lookup requests lock")
+            .clear();
+        wallet.lookup_returns_none.store(true, Ordering::SeqCst);
+        let lookup = request_event(
+            Request::lookup_invoice(nip47::LookupInvoiceRequest {
+                // The encoded invoice remains authoritative when a client
+                // redundantly supplies a mismatched hash.
+                payment_hash: Some(PaymentHash::from_bytes([9_u8; 32]).to_hex()),
+                invoice: Some("lnbc420n1test".to_owned()),
+            }),
+            100,
+        );
+
+        assert_eq!(
+            execute(&engine, wake(&lookup, RELAY, true)),
+            WakeDisposition::Completed {
+                notification: NotificationHint::Request {
+                    method: NwcMethod::LookupInvoice,
+                },
+            }
+        );
+        let requests = wallet.lookup_requests.lock().expect("lookup requests lock");
+        assert!(!requests.is_empty());
+        assert!(requests.iter().all(|request| matches!(
+            request,
+            InvoiceLookup::PaymentHash(hash)
+                if hash == &PaymentHash::from_bytes([8_u8; 32])
+        )));
     }
 
     #[test]
