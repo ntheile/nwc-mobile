@@ -612,6 +612,14 @@ impl NwcMobileService {
             .ledger
             .requeue_active_wake_registrations_with_state(enabled, SystemClock.now())?)
     }
+
+    /// Requeues capability info events for every active connection and approved relay.
+    ///
+    /// Hosts call this once after an application upgrade so clients observe newly
+    /// supported methods or notifications even when an older event was acknowledged.
+    pub fn refresh_nwc_info_events(&self) -> Result<usize, MobileServiceError> {
+        Ok(self.ledger.requeue_active_nwc_info_events()?)
+    }
 }
 
 impl fmt::Debug for NwcMobileService {
@@ -768,6 +776,20 @@ mod tests {
             .expect("connection presentation")
             .pending_info_event_relays()
             .is_empty());
+        assert_eq!(service.refresh_nwc_info_events().expect("refresh info"), 1);
+        assert_eq!(
+            service.refresh_nwc_info_events().expect("deduplicate info"),
+            0
+        );
+        assert_eq!(
+            service
+                .connection_presentations()
+                .expect("presentations")
+                .pop()
+                .expect("connection presentation")
+                .pending_info_event_relays(),
+            &["wss://relay.example/nwc".to_owned()]
+        );
 
         let unapproved = ApplicationConnectionMetadata::new(
             "Example App",
