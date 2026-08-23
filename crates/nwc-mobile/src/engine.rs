@@ -1,9 +1,9 @@
 use std::time::Duration;
 
 use nostr::nips::nip47::{
-    self, ErrorCode, GetBalanceResponse, GetInfoResponse, LookupInvoiceResponse, Method,
-    NIP47Error, PayInvoiceResponse, Request, RequestParams, Response, ResponseResult,
-    TransactionState, TransactionType,
+    self, ErrorCode, GetBalanceResponse, GetInfoResponse, LookupInvoiceResponse,
+    MakeInvoiceResponse, Method, NIP47Error, PayInvoiceResponse, Request, RequestParams, Response,
+    ResponseResult, TransactionState, TransactionType,
 };
 use nostr::{JsonUtil, Timestamp};
 
@@ -11,8 +11,8 @@ use crate::time::OperationDeadline;
 use crate::{
     ActiveConnection, AmountMsat, AmountSat, CancellationSignal, ClaimOutcome, Clock, EventLease,
     HostError, HostErrorKind, InvoiceLookup, LedgerError, ListTransactionsRequest,
-    NotificationHint, NwcEventValidator, NwcMethod, OperationBudget, OperationContext,
-    PayInvoiceRequest, PaymentAccountingError, PaymentFailure, PaymentHash,
+    MakeInvoiceRequest, NotificationHint, NwcEventValidator, NwcMethod, OperationBudget,
+    OperationContext, PayInvoiceRequest, PaymentAccountingError, PaymentFailure, PaymentHash,
     PaymentReservationOutcome, PaymentStatus, QueueReason, RejectionCode, RelayTransport,
     RetryReason, SecretProvider, SecureRelayUrl, TerminalKind, UnixTimestamp, WakeDisposition,
     WakeInput, WakeLedger, WakePolicy, WalletBackend, WalletTransaction,
@@ -21,8 +21,11 @@ use crate::{
 const ENGINE_RETRY_DELAY: Duration = Duration::from_secs(5);
 const DEFAULT_LIST_LIMIT: u16 = 20;
 const MAX_LIST_LIMIT: u16 = 100;
+const DEFAULT_INVOICE_EXPIRY: Duration = Duration::from_secs(60 * 60);
+const MAX_INVOICE_EXPIRY: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const MAX_INVOICE_DESCRIPTION_BYTES: usize = 1_024;
 
-/// Executes authenticated, durable NIP-47 reads and invoice payments.
+/// Executes authenticated, durable NIP-47 reads, invoice creation, and invoice payments.
 ///
 /// The containing application owns relay, secret-storage, wallet, clock, and
 /// cancellation capabilities. This engine owns validation order, replay state,
@@ -232,7 +235,7 @@ impl<'a> WakeEngine<'a> {
                 )
                 .await;
         }
-        if !is_read_only(method) {
+        if !is_direct_request(method) {
             return self
                 .respond_with_error(
                     &lease,
@@ -620,7 +623,7 @@ impl<'a> WakeEngine<'a> {
         request: Request,
         connection: &ActiveConnection,
         context: OperationContext<'_>,
-    ) -> Result<ReadOnlyRequestResult, HostError> {
+    ) -> Result<DirectRequestResult, HostError> {
         match request.params {
             RequestParams::GetInfo => {
                 let info = self.wallet.get_info(context).await?;
@@ -631,7 +634,7 @@ impl<'a> WakeEngine<'a> {
                     })
                     .map(protocol_method)
                     .collect();
-                Ok(ReadOnlyRequestResult {
+                Ok(DirectRequestResult {
                     method: Method::GetInfo,
                     result: ResponseResult::GetInfo(GetInfoResponse {
                         alias: None,
@@ -647,10 +650,28 @@ impl<'a> WakeEngine<'a> {
             }
             RequestParams::GetBalance => {
                 let balance = self.wallet.get_balance(context).await?;
-                Ok(ReadOnlyRequestResult {
+                Ok(DirectRequestResult {
                     method: Method::GetBalance,
                     result: ResponseResult::GetBalance(GetBalanceResponse {
                         balance: balance.as_msat(),
+                    }),
+                })
+            }
+            RequestParams::MakeInvoice(request) => {
+                let (request, description) =
+                    parse_make_invoice_request(request).map_err(HostError::new)?;
+                let created = self.wallet.make_invoice(request, context).await?;
+                Ok(DirectRequestResult {
+                    method: Method::MakeInvoice,
+                    result: ResponseResult::MakeInvoice(MakeInvoiceResponse {
+                        invoice: created.invoice().to_owned(),
+                        payment_hash: Some(created.payment_hash().to_hex()),
+                        description,
+                        description_hash: None,
+                        preimage: None,
+                        amount: Some(created.amount().as_msat()),
+                        created_at: Some(Timestamp::from(self.clock.now().as_secs())),
+                        expires_at: Some(Timestamp::from(created.expires_at().as_secs())),
                     }),
                 })
             }
@@ -662,7 +683,7 @@ impl<'a> WakeEngine<'a> {
                     .transpose()
                     .map_err(HostError::new)?
                     .ok_or_else(|| HostError::new(HostErrorKind::NotFound))?;
-                Ok(ReadOnlyRequestResult {
+                Ok(DirectRequestResult {
                     method: Method::LookupInvoice,
                     result: ResponseResult::LookupInvoice(response),
                 })
@@ -675,7 +696,7 @@ impl<'a> WakeEngine<'a> {
                     .map(transaction_response)
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(HostError::new)?;
-                Ok(ReadOnlyRequestResult {
+                Ok(DirectRequestResult {
                     method: Method::ListTransactions,
                     result: ResponseResult::ListTransactions(responses),
                 })
@@ -853,9 +874,36 @@ impl<'a> WakeEngine<'a> {
 /// Compatibility name for the engine introduced with read-only execution.
 pub type ReadOnlyWakeEngine<'a> = WakeEngine<'a>;
 
-struct ReadOnlyRequestResult {
+struct DirectRequestResult {
     method: Method,
     result: ResponseResult,
+}
+
+fn parse_make_invoice_request(
+    request: nip47::MakeInvoiceRequest,
+) -> Result<(MakeInvoiceRequest, Option<String>), HostErrorKind> {
+    if request.amount == 0 || request.description_hash.is_some() {
+        return Err(HostErrorKind::Rejected);
+    }
+    let description = request.description;
+    if description
+        .as_ref()
+        .is_some_and(|description| description.len() > MAX_INVOICE_DESCRIPTION_BYTES)
+    {
+        return Err(HostErrorKind::Rejected);
+    }
+    let expiry = Duration::from_secs(request.expiry.unwrap_or(DEFAULT_INVOICE_EXPIRY.as_secs()));
+    if expiry.is_zero() || expiry > MAX_INVOICE_EXPIRY {
+        return Err(HostErrorKind::Rejected);
+    }
+    Ok((
+        MakeInvoiceRequest::new(
+            AmountMsat::from_msat(request.amount),
+            description.clone(),
+            expiry,
+        ),
+        description,
+    ))
 }
 
 fn parse_lookup_request(
@@ -961,18 +1009,19 @@ fn protocol_method(method: NwcMethod) -> Method {
     }
 }
 
-fn is_read_only(method: NwcMethod) -> bool {
+fn is_direct_request(method: NwcMethod) -> bool {
     matches!(
         method,
         NwcMethod::GetInfo
             | NwcMethod::GetBalance
+            | NwcMethod::MakeInvoice
             | NwcMethod::LookupInvoice
             | NwcMethod::ListTransactions
     )
 }
 
 fn is_engine_supported(method: NwcMethod) -> bool {
-    method == NwcMethod::PayInvoice || is_read_only(method)
+    method == NwcMethod::PayInvoice || is_direct_request(method)
 }
 
 fn event_rejection(error: crate::NostrEventError) -> RejectionCode {
@@ -1077,8 +1126,8 @@ mod tests {
     use super::*;
     use crate::{
         AmountMsat, BudgetInterval, BudgetPolicy, ConnectionId, ConnectionPolicy, CreatedInvoice,
-        FeePolicy, HostFuture, MakeInvoiceRequest, NewConnection, PayInvoiceRequest, PaymentQuote,
-        PublicKey, WalletInfo,
+        FeePolicy, HostFuture, NewConnection, PayInvoiceRequest, PaymentQuote, PublicKey,
+        WalletInfo,
     };
 
     const CLIENT_SECRET: [u8; 32] = [1_u8; 32];
@@ -1232,6 +1281,7 @@ mod tests {
     #[derive(Default)]
     struct TestWallet<'a> {
         balance_calls: AtomicUsize,
+        invoice_requests: Mutex<Vec<MakeInvoiceRequest>>,
         revoke_on_balance: Mutex<Option<(&'a WakeLedger, ConnectionId, crate::ConnectionRevision)>>,
         quote: Mutex<Option<PaymentQuote>>,
         payment_statuses: Mutex<VecDeque<Result<PaymentStatus, HostError>>>,
@@ -1252,6 +1302,7 @@ mod tests {
                     [
                         NwcMethod::GetInfo,
                         NwcMethod::GetBalance,
+                        NwcMethod::MakeInvoice,
                         NwcMethod::PayInvoice,
                     ],
                 ))
@@ -1275,10 +1326,21 @@ mod tests {
 
         fn make_invoice<'a>(
             &'a self,
-            _request: MakeInvoiceRequest,
+            request: MakeInvoiceRequest,
             _context: OperationContext<'a>,
         ) -> HostFuture<'a, Result<CreatedInvoice, HostError>> {
-            unavailable()
+            self.invoice_requests
+                .lock()
+                .expect("invoice requests lock")
+                .push(request);
+            Box::pin(async {
+                Ok(CreatedInvoice::new(
+                    "lnbc420n1test".to_string(),
+                    PaymentHash::from_bytes([8_u8; 32]),
+                    AmountMsat::from_msat(42_000),
+                    UnixTimestamp::from_secs(700),
+                ))
+            })
         }
 
         fn quote_payment<'a>(
@@ -1376,6 +1438,7 @@ mod tests {
                         [
                             NwcMethod::GetInfo,
                             NwcMethod::GetBalance,
+                            NwcMethod::MakeInvoice,
                             NwcMethod::LookupInvoice,
                             NwcMethod::ListTransactions,
                             NwcMethod::PayInvoice,
@@ -1488,7 +1551,7 @@ mod tests {
     }
 
     #[test]
-    fn get_info_advertises_authorized_pay_invoice_support() {
+    fn get_info_advertises_authorized_invoice_support() {
         let database = TestDatabase::new();
         let ledger = WakeLedger::open(&database.path).expect("ledger");
         insert_connection(&ledger);
@@ -1517,7 +1580,93 @@ mod tests {
             response.result,
             Some(ResponseResult::GetInfo(info))
                 if info.methods.contains(&Method::PayInvoice)
+                    && info.methods.contains(&Method::MakeInvoice)
         ));
+    }
+
+    #[test]
+    fn make_invoice_round_trip_calls_host_and_returns_created_invoice() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        insert_connection(&ledger);
+        let wallet = TestWallet::default();
+        let relay = TestRelay::default();
+        let secrets = TestSecrets::wallet();
+        let clock = FixedClock::new(100);
+        let engine = engine(&ledger, &wallet, &relay, &secrets, &clock);
+        let event = request_event(
+            Request::make_invoice(nip47::MakeInvoiceRequest {
+                amount: 42_000,
+                description: Some("coffee".to_string()),
+                description_hash: None,
+                expiry: Some(600),
+            }),
+            100,
+        );
+
+        assert!(matches!(
+            execute(&engine, wake(&event, RELAY, true)),
+            WakeDisposition::Completed { .. }
+        ));
+        let requests = wallet
+            .invoice_requests
+            .lock()
+            .expect("invoice requests lock");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].amount(), AmountMsat::from_msat(42_000));
+        assert_eq!(requests[0].description(), Some("coffee"));
+        assert_eq!(requests[0].expiry(), Duration::from_secs(600));
+        drop(requests);
+
+        let published = relay.published.lock().expect("published lock");
+        let response_event = Event::from_json(&published[0]).expect("response event");
+        let plaintext = nostr::nips::nip44::decrypt(
+            client_keys().secret_key(),
+            &response_event.pubkey,
+            &response_event.content,
+        )
+        .expect("decrypt response");
+        let response = Response::from_json(plaintext).expect("NIP-47 response");
+        assert!(matches!(
+            response.result,
+            Some(ResponseResult::MakeInvoice(result))
+                if result.invoice == "lnbc420n1test"
+                    && result.payment_hash == Some(PaymentHash::from_bytes([8_u8; 32]).to_hex())
+                    && result.amount == Some(42_000)
+                    && result.expires_at == Some(Timestamp::from(700))
+        ));
+    }
+
+    #[test]
+    fn make_invoice_request_bounds_fail_closed() {
+        assert!(parse_make_invoice_request(nip47::MakeInvoiceRequest {
+            amount: 0,
+            description: None,
+            description_hash: None,
+            expiry: None,
+        })
+        .is_err());
+        assert!(parse_make_invoice_request(nip47::MakeInvoiceRequest {
+            amount: 1_000,
+            description: Some("x".repeat(MAX_INVOICE_DESCRIPTION_BYTES + 1)),
+            description_hash: None,
+            expiry: None,
+        })
+        .is_err());
+        assert!(parse_make_invoice_request(nip47::MakeInvoiceRequest {
+            amount: 1_000,
+            description: None,
+            description_hash: Some("unsupported".to_string()),
+            expiry: None,
+        })
+        .is_err());
+        assert!(parse_make_invoice_request(nip47::MakeInvoiceRequest {
+            amount: 1_000,
+            description: None,
+            description_hash: None,
+            expiry: Some(MAX_INVOICE_EXPIRY.as_secs() + 1),
+        })
+        .is_err());
     }
 
     #[test]
