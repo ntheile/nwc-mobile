@@ -63,7 +63,6 @@ public struct NwcNotificationPresenter: Sendable {
     content.threadIdentifier = "nwc"
     content.badge = nil
     content.sound = nil
-    content.interruptionLevel = .active
     content.relevanceScore = 0
     content.targetContentIdentifier = nil
     content.summaryArgument = ""
@@ -77,12 +76,18 @@ public struct NwcNotificationPresenter: Sendable {
 
     switch hint {
     case .processing:
+      content.interruptionLevel = .active
       content.title = copy.processingTitle
       content.body = copy.processingBody
     case .completed:
+      // A successful background request requires no attention. Keep the alert
+      // passive so it is grouped quietly in Notification Center without a
+      // banner, sound, or interruption.
+      content.interruptionLevel = .passive
       content.title = copy.completedTitle
       content.body = copy.completedBody
     case .openApplication:
+      content.interruptionLevel = .active
       content.title = copy.openApplicationTitle
       content.body = copy.openApplicationBody
     }
