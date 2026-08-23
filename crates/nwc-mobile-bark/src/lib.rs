@@ -34,6 +34,8 @@ use serde_json::Value;
 
 const PAYMENT_SETTLE_TIMEOUT: Duration = Duration::from_secs(22);
 const PAYMENT_POLL_INTERVAL: Duration = Duration::from_millis(750);
+const INVOICE_SETTLEMENT_MAX_WAIT: Duration = Duration::from_secs(25);
+const INVOICE_SETTLEMENT_COMPLETION_RESERVE: Duration = Duration::from_secs(3);
 const INVOICE_SETTLEMENT_POLL_INTERVAL: Duration = Duration::from_millis(750);
 
 /// Adapts an already-open Bark wallet to the `nwc-mobile` host contract.
@@ -42,6 +44,7 @@ pub struct BarkWalletBackend {
     wallet: Wallet,
     service_pubkey: PublicKey,
     diagnostics: Option<Arc<dyn WakeDiagnosticSink>>,
+    await_invoice_settlement: bool,
 }
 
 impl BarkWalletBackend {
@@ -52,6 +55,7 @@ impl BarkWalletBackend {
             wallet,
             service_pubkey,
             diagnostics: None,
+            await_invoice_settlement: false,
         }
     }
     /// Creates an adapter that emits bounded, non-secret execution codes.
@@ -65,7 +69,13 @@ impl BarkWalletBackend {
             wallet,
             service_pubkey,
             diagnostics: Some(diagnostics),
+            await_invoice_settlement: false,
         }
+    }
+
+    fn awaiting_invoice_settlement(mut self) -> Self {
+        self.await_invoice_settlement = true;
+        self
     }
 
     fn record_diagnostic(&self, code: WakeDiagnosticCode) {
@@ -246,7 +256,8 @@ pub async fn run_bark_invoice_notification_worker(
     budget: OperationBudget,
     cancellation: &dyn CancellationSignal,
 ) -> Result<InvoiceNotificationWorkerReport, InvoiceNotificationError> {
-    let wallet = BarkWalletBackend::new(wallet, wallet_service_pubkey);
+    let wallet =
+        BarkWalletBackend::new(wallet, wallet_service_pubkey).awaiting_invoice_settlement();
     InvoiceNotificationWorker::new(ledger, &wallet, relays, secrets, &SystemClock)
         .run_invoice(request_event_id, budget, cancellation)
         .await
@@ -412,9 +423,18 @@ impl WalletBackend for BarkWalletBackend {
     ) -> HostFuture<'a, Result<Option<WalletTransaction>, HostError>> {
         Box::pin(async move {
             let payment_hash = lookup_payment_hash(&request)?;
+            let settlement_wait = self
+                .await_invoice_settlement
+                .then(|| invoice_settlement_wait(context))
+                .filter(|wait| !wait.is_zero());
             let result = run_with_context(
                 context,
-                reconcile_then_lookup_transaction(&self.wallet, payment_hash),
+                reconcile_then_lookup_transaction(
+                    &self.wallet,
+                    payment_hash,
+                    context,
+                    settlement_wait,
+                ),
             )
             .await;
             match &result {
@@ -629,6 +649,8 @@ async fn lookup_transaction(
 async fn reconcile_then_lookup_transaction(
     wallet: &Wallet,
     payment_hash: BarkPaymentHash,
+    context: OperationContext<'_>,
+    settlement_wait: Option<Duration>,
 ) -> Result<Option<WalletTransaction>, HostError> {
     // A settled receive is already durable and needs no network refresh. This
     // fast path also lets the notification worker publish payment_received in
@@ -639,23 +661,86 @@ async fn reconcile_then_lookup_transaction(
         return Ok(transaction_from_receive_state(&receive));
     }
 
+    let settlement_deadline = settlement_wait.map(|wait| Instant::now() + wait);
+
     // Preserve the full wallet refresh used by Rebel's original NWC receive
     // flow. Mailbox-only sync is insufficient when Bark also needs refreshed
-    // Ark state to drive the receive action. Bark performs mailbox ingestion
-    // and its broad receive pass concurrently, so explicitly drive this exact
-    // invoice after the full sync completes. This ordering both restores the
-    // original prerequisites and prevents the mailbox/claim race.
-    wallet.sync().await;
-    if let Ok(receive) = wallet
-        .try_claim_lightning_receive(payment_hash, false)
-        .await
-    {
-        return Ok(transaction_from_receive_state(&receive));
+    // Ark state to drive the receive action. A server-scheduled settlement
+    // wake keeps driving this exact invoice until it settles or the bounded
+    // wait expires; ordinary lookup_invoice requests still perform one pass.
+    if let Some(deadline) = settlement_deadline {
+        if let Some(sync_context) = context_before(deadline, context) {
+            let sync_result = run_with_context(sync_context, async {
+                wallet.sync().await;
+                Ok(())
+            })
+            .await;
+            if sync_result.is_err_and(|error| error.kind() == HostErrorKind::Cancelled) {
+                return Err(host_error(HostErrorKind::Cancelled));
+            }
+        }
+    } else {
+        wallet.sync().await;
+    }
+
+    loop {
+        let claim_result = if let Some(deadline) = settlement_deadline {
+            let Some(claim_context) = context_before(deadline, context) else {
+                break;
+            };
+            run_with_context(claim_context, async {
+                wallet
+                    .try_claim_lightning_receive(payment_hash, false)
+                    .await
+                    .map_err(|_| host_error(HostErrorKind::Internal))
+            })
+            .await
+        } else {
+            wallet
+                .try_claim_lightning_receive(payment_hash, false)
+                .await
+                .map_err(|_| host_error(HostErrorKind::Internal))
+        };
+
+        match claim_result {
+            Ok(receive @ LightningReceiveState::Settled(_)) => {
+                return Ok(transaction_from_receive_state(&receive));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == HostErrorKind::Cancelled => return Err(error),
+            Err(_) => {}
+        }
+
+        let Some(deadline) = settlement_deadline else {
+            break;
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        sleep(remaining.min(INVOICE_SETTLEMENT_POLL_INTERVAL)).await;
     }
 
     // Preserve outgoing and history-only lookup behavior, and return the last
     // durable incoming state when a transient claim attempt could not advance.
     lookup_transaction(wallet, payment_hash).await
+}
+
+fn invoice_settlement_wait(context: OperationContext<'_>) -> Duration {
+    context
+        .budget()
+        .timeout()
+        .saturating_sub(INVOICE_SETTLEMENT_COMPLETION_RESERVE)
+        .min(INVOICE_SETTLEMENT_MAX_WAIT)
+}
+
+fn context_before<'a>(
+    deadline: Instant,
+    context: OperationContext<'a>,
+) -> Option<OperationContext<'a>> {
+    OperationBudget::new(deadline.saturating_duration_since(Instant::now()))
+        .ok()
+        .map(|budget| OperationContext::new(budget, context.cancellation()))
 }
 
 fn transaction_from_movement(movement: &Movement) -> Option<WalletTransaction> {
@@ -917,6 +1002,28 @@ mod tests {
             code: nwc_mobile::RejectionCode::InvalidRequest,
             notification: NotificationHint::OpenApplication,
         }));
+    }
+
+    #[test]
+    fn invoice_settlement_wait_preserves_completion_time_and_caps_polling() {
+        let cancellation = nwc_mobile::NeverCancelled;
+        let context = OperationContext::new(
+            OperationBudget::new(Duration::from_secs(40)).expect("budget"),
+            &cancellation,
+        );
+        assert_eq!(invoice_settlement_wait(context), Duration::from_secs(25));
+
+        let context = OperationContext::new(
+            OperationBudget::new(Duration::from_secs(20)).expect("budget"),
+            &cancellation,
+        );
+        assert_eq!(invoice_settlement_wait(context), Duration::from_secs(17));
+
+        let context = OperationContext::new(
+            OperationBudget::new(Duration::from_secs(2)).expect("budget"),
+            &cancellation,
+        );
+        assert!(invoice_settlement_wait(context).is_zero());
     }
 
     #[test]
