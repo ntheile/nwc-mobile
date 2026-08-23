@@ -8,6 +8,7 @@
 
 use std::future::Future;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use nwc_mobile::{
@@ -17,6 +18,72 @@ use nwc_mobile::{
 
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const MAX_RESOLVED_SOCKET_ADDRESSES: usize = 16;
+const NATIVE_RUNTIME_THREAD_NAME: &str = "nwc-mobile-native";
+
+static NATIVE_RUNTIME_HANDLE: OnceLock<Option<tokio::runtime::Handle>> = OnceLock::new();
+
+struct AbortTaskOnDrop<T> {
+    handle: Option<tokio::task::JoinHandle<T>>,
+}
+
+impl<T> Drop for AbortTaskOnDrop<T> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+/// Executes a Tokio-backed future for a native host that has no Tokio runtime.
+///
+/// Rust async entry points called by Swift or Kotlin can await the returned
+/// future directly. The operation itself runs on one process-wide runtime
+/// thread, so native entry points do not need to create a runtime or rely on the
+/// caller's executor. Dropping this future aborts the spawned operation. Runtime
+/// startup and task failures are returned as non-sensitive host errors.
+pub async fn run_on_native_runtime<F, T>(operation: F) -> Result<T, HostError>
+where
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let handle = native_runtime_handle().ok_or_else(|| host_error(HostErrorKind::Internal))?;
+    let mut task = AbortTaskOnDrop {
+        handle: Some(handle.spawn(operation)),
+    };
+    let result = task
+        .handle
+        .as_mut()
+        .ok_or_else(|| host_error(HostErrorKind::Internal))?
+        .await
+        .map_err(|_| host_error(HostErrorKind::Internal));
+    task.handle.take();
+    result
+}
+
+fn native_runtime_handle() -> Option<&'static tokio::runtime::Handle> {
+    NATIVE_RUNTIME_HANDLE
+        .get_or_init(|| {
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            std::thread::Builder::new()
+                .name(NATIVE_RUNTIME_THREAD_NAME.to_owned())
+                .spawn(move || {
+                    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    else {
+                        let _ = sender.send(None);
+                        return;
+                    };
+                    let handle = runtime.handle().clone();
+                    if sender.send(Some(handle)).is_ok() {
+                        runtime.block_on(std::future::pending::<()>());
+                    }
+                })
+                .ok()?;
+            receiver.recv().ok().flatten()
+        })
+        .as_ref()
+}
 
 /// Resolves a bounded set of socket addresses without blocking the async runtime.
 pub async fn resolve_socket_addresses(
@@ -159,10 +226,84 @@ const fn host_error(kind: HostErrorKind) -> HostError {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
 
     use nwc_mobile::{NeverCancelled, OperationBudget};
 
     use super::*;
+
+    struct ThreadWaker(std::thread::Thread);
+
+    impl Wake for ThreadWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    fn block_on_without_runtime<F: Future>(future: F) -> F::Output {
+        let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
+        let mut context = Context::from_waker(&waker);
+        let mut future = Box::pin(future);
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(output) => return output,
+                Poll::Pending => std::thread::park(),
+            }
+        }
+    }
+
+    #[test]
+    fn native_runtime_runs_bounded_wake_for_non_tokio_caller() {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let disposition = block_on_without_runtime(run_on_native_runtime(async {
+            run_bounded_background_wake(Duration::from_secs(1), &NeverCancelled, |_| async {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                WakeDisposition::Completed {
+                    notification: nwc_mobile::NotificationHint::Completed,
+                }
+            })
+            .await
+        }))
+        .expect("native runtime");
+
+        assert!(matches!(disposition, WakeDisposition::Completed { .. }));
+    }
+
+    struct DropSignal(mpsc::SyncSender<()>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    #[test]
+    fn dropping_native_runtime_future_aborts_spawned_operation() {
+        let (started_sender, started_receiver) = mpsc::sync_channel(1);
+        let (dropped_sender, dropped_receiver) = mpsc::sync_channel(1);
+        let mut future = Box::pin(run_on_native_runtime(async move {
+            let _drop_signal = DropSignal(dropped_sender);
+            let _ = started_sender.send(());
+            std::future::pending::<()>().await;
+        }));
+        let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
+        let mut context = Context::from_waker(&waker);
+
+        assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+        started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("spawned operation started");
+        drop(future);
+        dropped_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("spawned operation aborted");
+    }
 
     #[tokio::test]
     async fn exponential_retry_returns_success_without_extra_attempts() {
