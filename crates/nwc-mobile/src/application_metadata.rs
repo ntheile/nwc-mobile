@@ -178,6 +178,19 @@ impl WakeLedger {
         Ok(())
     }
 
+    pub(crate) fn requeue_active_nwc_info_events(&self) -> Result<usize, LedgerError> {
+        Ok(self.lock_connection()?.execute(
+            "INSERT INTO nwc_info_outbox (connection_id, relay_url)
+             SELECT c.connection_id, r.relay_url
+             FROM connections c
+             JOIN connection_relays r ON r.connection_id = c.connection_id
+             JOIN connection_metadata m ON m.connection_id = c.connection_id
+             WHERE c.status = 'active'
+             ON CONFLICT(connection_id, relay_url) DO NOTHING",
+            [],
+        )?)
+    }
+
     pub(crate) fn current_budget_usage(
         &self,
         connection: &ActiveConnection,
