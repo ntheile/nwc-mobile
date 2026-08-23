@@ -139,6 +139,9 @@ impl NwcApplicationManager {
         &mut self,
         selection: NwaApprovalSelection,
     ) -> Result<ApprovedNwaApplication, ApplicationWorkflowError> {
+        if self.nwa_callback.is_pending() {
+            return Err(ApplicationWorkflowError::CallbackPending);
+        }
         let connection = self.service.approve_application_nwa(selection)?;
         let callback = self
             .nwa_callback
@@ -243,9 +246,11 @@ impl NwcApplicationManager {
     }
 
     /// Clears process-local callback and registration coordination for a reset wallet session.
-    pub fn reset_session(&mut self) {
+    pub fn reset_session(&mut self) -> Result<(), MobileServiceError> {
+        self.service.clear_pending_nwa()?;
         self.nwa_callback.clear();
         self.registration.reset();
+        Ok(())
     }
 }
 
@@ -269,6 +274,22 @@ pub fn registration_retry_delay(next_attempt_at: u64, now: UnixTimestamp) -> Dur
 mod tests {
     use super::*;
 
+    fn test_manager() -> (PathBuf, NwcApplicationManager) {
+        let mut random = [0_u8; 8];
+        getrandom::fill(&mut random).expect("test randomness");
+        let suffix = random
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let directory = std::env::temp_dir().join(format!(
+            "nwc-application-manager-{}-{suffix}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).expect("test directory");
+        let manager = NwcApplicationManager::open(&directory).expect("manager");
+        (directory, manager)
+    }
+
     #[test]
     fn database_path_is_stable_and_scoped_to_the_host_directory() {
         assert_eq!(
@@ -287,5 +308,47 @@ mod tests {
             registration_retry_delay(110, UnixTimestamp::from_secs(100)),
             Duration::from_secs(10)
         );
+    }
+
+    #[test]
+    fn pending_callback_blocks_another_approval() {
+        let (directory, mut manager) = test_manager();
+        manager
+            .nwa_callback
+            .begin(Some("https://app.example/callback".to_owned()));
+        let selection = NwaApprovalSelection::new(
+            "request".to_owned(),
+            "invalid".to_owned(),
+            "wss://relay.example/nwc".to_owned(),
+            String::new(),
+            Vec::new(),
+            0,
+            crate::BudgetInterval::Never,
+            crate::NwcEncryption::LegacyNip04,
+            None,
+            None,
+        );
+        assert_eq!(
+            manager.approve_nwa(selection).unwrap_err(),
+            ApplicationWorkflowError::CallbackPending
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn session_reset_clears_retained_nwa_request() {
+        const CLIENT: &str = "687dd8ece211539364549b1f32c63eceec1e0661009ba65cf8ff2e73ba000746";
+        let (directory, mut manager) = test_manager();
+        manager
+            .open_nwa_request(&format!(
+                "nostr+walletauth://{CLIENT}?relay=wss%3A%2F%2Frelay.example%2Fnwc"
+            ))
+            .expect("request");
+        manager.reset_session().expect("reset");
+        assert!(manager
+            .pending_nwa_request()
+            .expect("pending request")
+            .is_none());
+        let _ = std::fs::remove_dir_all(directory);
     }
 }

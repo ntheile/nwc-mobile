@@ -59,6 +59,8 @@ pub enum ApplicationWorkflowError {
     SecretStoreUnavailable,
     /// No wallet-managed client secret exists for the requested connection.
     ClientSecretUnavailable,
+    /// A previously approved native callback still awaits completion.
+    CallbackPending,
 }
 
 impl fmt::Display for ApplicationWorkflowError {
@@ -68,6 +70,7 @@ impl fmt::Display for ApplicationWorkflowError {
             Self::Service(_) => "the NWC application service is unavailable",
             Self::SecretStoreUnavailable => "the secure client-secret store is unavailable",
             Self::ClientSecretUnavailable => "the wallet-managed NWC client secret is unavailable",
+            Self::CallbackPending => "the previous NWA callback is still pending",
         })
     }
 }

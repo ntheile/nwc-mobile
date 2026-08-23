@@ -1,10 +1,8 @@
-use rusqlite::{params, OptionalExtension};
-use url::Url;
-
 use crate::{
-    ActiveConnection, Clock, ConnectionId, LedgerError, RegistryError, SecureRelayUrl, SystemClock,
-    UnixTimestamp, WakeLedger,
+    nwa::validated_public_icon_url, ActiveConnection, Clock, ConnectionId, LedgerError,
+    RegistryError, SecureRelayUrl, SystemClock, UnixTimestamp, WakeLedger,
 };
+use rusqlite::{params, OptionalExtension};
 
 const MAX_DISPLAY_NAME_BYTES: usize = 256;
 const MAX_ICON_URL_BYTES: usize = 2_048;
@@ -28,19 +26,14 @@ impl ApplicationConnectionMetadata {
         if display_name.is_empty() || display_name.len() > MAX_DISPLAY_NAME_BYTES {
             return Err(RegistryError::InvalidConnection);
         }
-        if let Some(icon) = icon_url.as_deref() {
-            if icon.len() > MAX_ICON_URL_BYTES {
-                return Err(RegistryError::InvalidConnection);
-            }
-            let parsed = Url::parse(icon).map_err(|_| RegistryError::InvalidConnection)?;
-            if parsed.scheme() != "https"
-                || parsed.host_str().is_none()
-                || !parsed.username().is_empty()
-                || parsed.password().is_some()
-            {
-                return Err(RegistryError::InvalidConnection);
-            }
-        }
+        let icon_url = icon_url
+            .map(|icon| {
+                if icon.len() > MAX_ICON_URL_BYTES {
+                    return Err(RegistryError::InvalidConnection);
+                }
+                validated_public_icon_url(&icon).ok_or(RegistryError::InvalidConnection)
+            })
+            .transpose()?;
         let pending_info_event_relays = pending_info_event_relays
             .into_iter()
             .map(|relay| {
@@ -126,6 +119,15 @@ impl WakeLedger {
             ],
         )?;
         for relay in metadata.pending_info_event_relays() {
+            let approved: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM connection_relays
+                 WHERE connection_id = ?1 AND relay_url = ?2)",
+                params![connection_id.as_str(), relay],
+                |row| row.get(0),
+            )?;
+            if !approved {
+                return Err(LedgerError::CorruptData);
+            }
             transaction.execute(
                 "INSERT INTO nwc_info_outbox (connection_id, relay_url) VALUES (?1, ?2)
                  ON CONFLICT(connection_id, relay_url) DO NOTHING",
@@ -208,5 +210,27 @@ impl WakeLedger {
             spent_sat: u64::try_from(used).map_err(|_| LedgerError::CorruptData)?,
             period_started_at: UnixTimestamp::from_secs(period_started_at),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metadata_rejects_non_public_icon_targets() {
+        for icon in [
+            "https://127.0.0.1/icon.png",
+            "https://localhost/icon.png",
+            "https://app.example/icon.png#fragment",
+            "https://app.example:8443/icon.png",
+        ] {
+            assert!(ApplicationConnectionMetadata::new(
+                "Example",
+                Some(icon.to_owned()),
+                Vec::new(),
+            )
+            .is_err());
+        }
     }
 }

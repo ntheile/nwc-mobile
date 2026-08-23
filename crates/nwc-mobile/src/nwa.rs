@@ -672,6 +672,10 @@ fn parse_icon_url(raw: Option<&str>) -> Option<Url> {
     Some(url)
 }
 
+pub(crate) fn validated_public_icon_url(raw: &str) -> Option<String> {
+    parse_icon_url(Some(raw)).map(Into::into)
+}
+
 fn is_public_domain(host: &str) -> bool {
     let host = host.to_ascii_lowercase();
     if !host.contains('.') || host == "localhost" || host.ends_with(".local") || host.contains(':')

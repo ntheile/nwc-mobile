@@ -768,5 +768,15 @@ mod tests {
             .expect("connection presentation")
             .pending_info_event_relays()
             .is_empty());
+
+        let unapproved = ApplicationConnectionMetadata::new(
+            "Example App",
+            None,
+            vec!["wss://unapproved.example/nwc".to_owned()],
+        )
+        .expect("well-formed metadata");
+        assert!(service
+            .set_connection_metadata("connection:service", unapproved)
+            .is_err());
     }
 }
