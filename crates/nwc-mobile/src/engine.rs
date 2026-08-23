@@ -294,7 +294,10 @@ impl<'a> WakeEngine<'a> {
         let Some(context) = deadline.context(cancellation) else {
             return self.release_to_application(&lease, QueueReason::Deadline);
         };
-        let result = match self.execute_request(request, &connection, context).await {
+        let result = match self
+            .execute_request(request, &connection, &validated, context)
+            .await
+        {
             Ok(result) => result,
             Err(error) if error.is_retryable() => {
                 return self.retry_claim(&lease, RetryReason::WalletUnavailable)
@@ -512,6 +515,7 @@ impl<'a> WakeEngine<'a> {
                     connection,
                     validated,
                     relay,
+                    &payment.invoice,
                     attempt.payment_hash(),
                     status,
                     deadline,
@@ -526,7 +530,7 @@ impl<'a> WakeEngine<'a> {
             return self.retry_claim(lease, RetryReason::WalletUnavailable);
         };
         let request = PayInvoiceRequest::new(
-            payment.invoice,
+            payment.invoice.clone(),
             explicit_amount,
             AmountSat::from_sat(attempt.fee_reserve_sat()),
             validated.id().clone(),
@@ -538,6 +542,7 @@ impl<'a> WakeEngine<'a> {
                     connection,
                     validated,
                     relay,
+                    &payment.invoice,
                     attempt.payment_hash(),
                     status,
                     deadline,
@@ -566,6 +571,7 @@ impl<'a> WakeEngine<'a> {
         connection: &ActiveConnection,
         validated: &crate::ValidatedNwcEvent,
         relay: &SecureRelayUrl,
+        invoice: &str,
         payment_hash: &PaymentHash,
         status: PaymentStatus,
         deadline: &OperationDeadline,
@@ -589,9 +595,28 @@ impl<'a> WakeEngine<'a> {
                 fee,
             } => {
                 self.record_diagnostic(WakeDiagnosticCode::PaymentSucceeded);
+                let settled_at = self.clock.now();
                 if self
                     .ledger
-                    .mark_payment_succeeded(payment_hash, amount, fee, self.clock.now())
+                    .mark_payment_succeeded(payment_hash, amount, fee, settled_at)
+                    .is_err()
+                {
+                    return self.release_to_application(lease, QueueReason::LedgerBusy);
+                }
+                let notification = crate::TrackedNwcPayment::new(
+                    validated.id().clone(),
+                    payment_hash.clone(),
+                    connection,
+                    invoice.to_owned(),
+                    amount,
+                    fee,
+                    preimage.clone(),
+                    settled_at,
+                    settled_at,
+                );
+                if self
+                    .ledger
+                    .record_nwc_sent_payment(&notification, connection.relays())
                     .is_err()
                 {
                     return self.release_to_application(lease, QueueReason::LedgerBusy);
@@ -676,6 +701,7 @@ impl<'a> WakeEngine<'a> {
         &self,
         request: Request,
         connection: &ActiveConnection,
+        validated: &crate::ValidatedNwcEvent,
         context: OperationContext<'_>,
     ) -> Result<DirectRequestResult, HostError> {
         match request.params {
@@ -705,7 +731,10 @@ impl<'a> WakeEngine<'a> {
                         block_height: None,
                         block_hash: None,
                         methods,
-                        notifications: Vec::new(),
+                        notifications: info
+                            .notifications()
+                            .map(|notification| notification.as_str().to_owned())
+                            .collect(),
                     }),
                 })
             }
@@ -722,19 +751,42 @@ impl<'a> WakeEngine<'a> {
                 diagnostic_stage("make_invoice_dispatch_started");
                 let (request, description) =
                     parse_make_invoice_request(request).map_err(HostError::new)?;
-                let created = self.wallet.make_invoice(request, context).await?;
+                let created_at = self.clock.now();
+                let tracked = if let Some(existing) =
+                    self.ledger
+                        .load_nwc_invoice(validated.id())
+                        .map_err(|_| HostError::new(HostErrorKind::Unavailable))?
+                {
+                    existing
+                } else {
+                    let created = self.wallet.make_invoice(request, context).await?;
+                    let tracked = crate::TrackedNwcInvoice::new(
+                        validated.id().clone(),
+                        created.payment_hash().clone(),
+                        connection.id().clone(),
+                        connection.revision(),
+                        created.invoice().to_owned(),
+                        description.clone(),
+                        created.amount(),
+                        created_at,
+                        created.expires_at(),
+                    );
+                    self.ledger
+                        .record_nwc_invoice(&tracked, connection.relays())
+                        .map_err(|_| HostError::new(HostErrorKind::Unavailable))?
+                };
                 diagnostic_stage("make_invoice_dispatch_completed");
                 Ok(DirectRequestResult {
                     method: Method::MakeInvoice,
                     result: ResponseResult::MakeInvoice(MakeInvoiceResponse {
-                        invoice: created.invoice().to_owned(),
-                        payment_hash: Some(created.payment_hash().to_hex()),
-                        description,
+                        invoice: tracked.invoice().to_owned(),
+                        payment_hash: Some(tracked.payment_hash().to_hex()),
+                        description: tracked.description().map(str::to_owned),
                         description_hash: None,
                         preimage: None,
-                        amount: Some(created.amount().as_msat()),
-                        created_at: Some(Timestamp::from(self.clock.now().as_secs())),
-                        expires_at: Some(Timestamp::from(created.expires_at().as_secs())),
+                        amount: Some(tracked.amount().as_msat()),
+                        created_at: Some(Timestamp::from(tracked.created_at().as_secs())),
+                        expires_at: Some(Timestamp::from(tracked.expires_at().as_secs())),
                     }),
                 })
             }
@@ -1465,7 +1517,11 @@ mod tests {
                         NwcMethod::MakeInvoice,
                         NwcMethod::PayInvoice,
                     ],
-                ))
+                )
+                .with_notifications([
+                    crate::NwcNotificationType::PaymentReceived,
+                    crate::NwcNotificationType::PaymentSent,
+                ]))
             })
         }
 
@@ -1749,6 +1805,7 @@ mod tests {
             Some(ResponseResult::GetInfo(info))
                 if info.methods.contains(&Method::PayInvoice)
                     && info.methods.contains(&Method::MakeInvoice)
+                    && info.notifications == vec!["payment_received", "payment_sent"]
         ));
     }
 
@@ -1803,6 +1860,12 @@ mod tests {
                     && result.amount == Some(42_000)
                     && result.expires_at == Some(Timestamp::from(700))
         ));
+        let tracked = ledger.pending_nwc_invoices(10).expect("tracked invoices");
+        assert_eq!(tracked.len(), 1);
+        assert_eq!(
+            tracked[0].request_event_id(),
+            &crate::EventId::from_bytes(*event.id.as_bytes())
+        );
     }
 
     #[test]
@@ -2168,6 +2231,13 @@ mod tests {
             .expect("settled attempt");
         assert_eq!(settled.state(), crate::DurablePaymentState::Succeeded);
         assert_eq!(settled.charged_sat(), Some(601));
+        assert_eq!(
+            ledger
+                .pending_nwc_sent_payments(10)
+                .expect("sent notifications")
+                .len(),
+            1
+        );
         let published = relay.published.lock().expect("published lock");
         assert_eq!(published.len(), 2);
         let response_event =

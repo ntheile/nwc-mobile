@@ -22,8 +22,8 @@ mod mobile_engine;
 pub use host_bridge::{
     MobileCancellation, MobileCreatedInvoice, MobileHostError, MobileInvoiceLookup,
     MobileListTransactionsRequest, MobileMakeInvoiceRequest, MobileNwcMethod,
-    MobilePayInvoiceRequest, MobilePaymentFailure, MobilePaymentQuote, MobilePaymentStatus,
-    MobileRelayTransport, MobileSecretProvider, MobileTransactionDirection,
+    MobileNwcNotificationType, MobilePayInvoiceRequest, MobilePaymentFailure, MobilePaymentQuote,
+    MobilePaymentStatus, MobileRelayTransport, MobileSecretProvider, MobileTransactionDirection,
     MobileWakeRegistrationChange, MobileWakeRegistrationTransport, MobileWalletBackend,
     MobileWalletInfo, MobileWalletTransaction,
 };
