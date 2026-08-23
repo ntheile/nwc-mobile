@@ -11,9 +11,9 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use nwc_mobile::{
-    ApplicationIconUrl, Clock, HostError, HostErrorKind, HostFuture, NeverCancelled,
-    Nip98Authorization, Nip98SigningKey, OperationBudget, OperationContext, SecureWakeServerUrl,
-    SystemClock, WakeLedger, WakeRegistrationChange, WakeRegistrationError,
+    ApplicationIconUrl, Clock, EventId, HostError, HostErrorKind, HostFuture, LedgerError,
+    NeverCancelled, Nip98Authorization, Nip98SigningKey, OperationBudget, OperationContext,
+    SecureWakeServerUrl, SystemClock, WakeLedger, WakeRegistrationChange, WakeRegistrationError,
     WakeRegistrationTransport, WakeRegistrationWorker, WakeRegistrationWorkerError,
     MAX_APPLICATION_ICON_BYTES,
 };
@@ -24,6 +24,7 @@ const REGISTRATION_BATCH_SIZE: usize = 20;
 const REGISTRATION_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CONFIG_VALUE_BYTES: usize = 2_048;
 const APPLICATION_ICON_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_SETTLEMENT_MONITOR_DURATION: Duration = Duration::from_secs(2 * 60 * 60);
 
 /// Downloads one validated application icon with redirects and oversized bodies rejected.
 pub async fn download_application_icon(
@@ -340,6 +341,8 @@ pub enum WakeHttpRegistrationError {
     Worker(WakeRegistrationWorkerError),
     /// The next durable registration timestamp could not be read.
     Outbox(WakeRegistrationError),
+    /// Invoice settlement-monitor metadata could not be read.
+    Ledger(LedgerError),
 }
 
 impl fmt::Display for WakeHttpRegistrationError {
@@ -349,6 +352,7 @@ impl fmt::Display for WakeHttpRegistrationError {
             Self::InvalidBudget => "wake registration operation budget is invalid",
             Self::Worker(_) => "wake registration worker failed",
             Self::Outbox(_) => "wake registration outbox is unavailable",
+            Self::Ledger(_) => "invoice settlement monitor storage is unavailable",
         })
     }
 }
@@ -378,6 +382,78 @@ pub async fn run_registration_worker(
         deferred: report.deferred(),
         next_attempt_at,
     })
+}
+
+/// Enables or disables the server's opaque settlement checks for one NWC invoice.
+///
+/// The request deliberately excludes invoice, amount, memo, payment hash, and
+/// settlement data. A completed notification disables the idempotent monitor.
+pub async fn update_invoice_settlement_monitor(
+    ledger: &WakeLedger,
+    config: ReadyApnsWakeRegistrationConfig,
+    event_id: &EventId,
+    signing_key: Nip98SigningKey,
+) -> Result<bool, WakeHttpRegistrationError> {
+    let monitor = ledger
+        .nwc_invoice_monitor(event_id)
+        .map_err(WakeHttpRegistrationError::Ledger)?;
+    let Some(monitor) = monitor else {
+        return Ok(false);
+    };
+    if signing_key
+        .public_key()
+        .map_err(|_| WakeHttpRegistrationError::ClientUnavailable)?
+        != *monitor.wallet_service_pubkey()
+    {
+        return Err(WakeHttpRegistrationError::ClientUnavailable);
+    }
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(REGISTRATION_OPERATION_TIMEOUT)
+        .build()
+        .map_err(|_| WakeHttpRegistrationError::ClientUnavailable)?;
+    let url = settlement_monitor_endpoint_url(&config.server_url)
+        .map_err(|_| WakeHttpRegistrationError::ClientUnavailable)?;
+    let endpoint = SecureWakeServerUrl::parse(url.as_str())
+        .map_err(|_| WakeHttpRegistrationError::ClientUnavailable)?;
+    let monitor_until = monitor.expires_at().as_secs().min(
+        SystemClock
+            .now()
+            .as_secs()
+            .saturating_add(MAX_SETTLEMENT_MONITOR_DURATION.as_secs()),
+    );
+    for relay in monitor.relays() {
+        let payload = InvoiceSettlementMonitorPayload {
+            id: &config.install_id,
+            request_event_id: &monitor.request_event_id().to_hex(),
+            client_pubkey: &monitor.client_pubkey().to_hex(),
+            wallet_service_pubkey: &monitor.wallet_service_pubkey().to_hex(),
+            relay: relay.as_str(),
+            expires_at: monitor_until,
+            enabled: !monitor.completed(),
+        };
+        let body = serde_json::to_vec(&payload)
+            .map_err(|_| WakeHttpRegistrationError::ClientUnavailable)?;
+        let auth = Nip98Authorization::for_registration_post(
+            &endpoint,
+            &body,
+            &signing_key,
+            SystemClock.now(),
+        )
+        .map_err(|_| WakeHttpRegistrationError::ClientUnavailable)?;
+        let response = client
+            .post(url.clone())
+            .header(reqwest::header::AUTHORIZATION, auth.as_header_value())
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| WakeHttpRegistrationError::ClientUnavailable)?;
+        if !response.status().is_success() {
+            return Err(WakeHttpRegistrationError::ClientUnavailable);
+        }
+    }
+    Ok(true)
 }
 
 struct NwcPushTransport {
@@ -481,6 +557,21 @@ fn registration_endpoint_url(server_url: &SecureWakeServerUrl) -> Result<reqwest
         .map_err(|_| HostError::new(HostErrorKind::Internal))
 }
 
+fn settlement_monitor_endpoint_url(
+    server_url: &SecureWakeServerUrl,
+) -> Result<reqwest::Url, HostError> {
+    let mut base_url = reqwest::Url::parse(server_url.as_str())
+        .map_err(|_| HostError::new(HostErrorKind::Internal))?;
+    if !base_url.path().ends_with('/') {
+        let mut path = base_url.path().to_owned();
+        path.push('/');
+        base_url.set_path(&path);
+    }
+    base_url
+        .join("monitor-nwc-invoice")
+        .map_err(|_| HostError::new(HostErrorKind::Internal))
+}
+
 impl WakeRegistrationTransport for NwcPushTransport {
     fn apply<'a>(
         &'a self,
@@ -518,6 +609,17 @@ struct RegisterNwcPushPayload<'a> {
     wallet_service_pubkey: &'a str,
     relay: &'a str,
     name: &'static str,
+    enabled: bool,
+}
+
+#[derive(Serialize)]
+struct InvoiceSettlementMonitorPayload<'a> {
+    id: &'a str,
+    request_event_id: &'a str,
+    client_pubkey: &'a str,
+    wallet_service_pubkey: &'a str,
+    relay: &'a str,
+    expires_at: u64,
     enabled: bool,
 }
 
@@ -601,6 +703,17 @@ mod tests {
         assert_eq!(
             endpoint.as_str(),
             "https://wake.example.com/wake/register-nwc-push"
+        );
+    }
+
+    #[test]
+    fn settlement_endpoint_preserves_server_path_prefix() {
+        let server = SecureWakeServerUrl::parse("https://wake.example.com/wake")
+            .expect("secure wake server");
+        let endpoint = settlement_monitor_endpoint_url(&server).expect("settlement endpoint");
+        assert_eq!(
+            endpoint.as_str(),
+            "https://wake.example.com/wake/monitor-nwc-invoice"
         );
     }
 }

@@ -17,11 +17,13 @@ use bark::{FeeEstimate, Wallet};
 use bitcoin::Amount;
 use nwc_mobile::{
     AmountMsat, CancellationSignal, CreatedInvoice, HostError, HostErrorKind, HostFuture,
-    InvoiceLookup, ListTransactionsRequest, MakeInvoiceRequest, NwcMethod, OperationBudget,
-    OperationContext, PayInvoiceRequest, PaymentFailure, PaymentHash, PaymentPreimage,
-    PaymentQuote, PaymentStatus, PublicKey, RelayTransport, SecretProvider, SystemClock,
-    TransactionDirection, UnixTimestamp, WakeDiagnosticCode, WakeDiagnosticSink, WakeDisposition,
-    WakeEngine, WakeInput, WakeLedger, WakePolicy, WalletBackend, WalletInfo, WalletTransaction,
+    InvoiceLookup, InvoiceNotificationError, InvoiceNotificationWorker,
+    InvoiceNotificationWorkerReport, ListTransactionsRequest, MakeInvoiceRequest, NwcMethod,
+    NwcNotificationType, OperationBudget, OperationContext, PayInvoiceRequest, PaymentFailure,
+    PaymentHash, PaymentPreimage, PaymentQuote, PaymentStatus, PublicKey, RelayTransport,
+    SecretProvider, SystemClock, TransactionDirection, UnixTimestamp, WakeDiagnosticCode,
+    WakeDiagnosticSink, WakeDisposition, WakeEngine, WakeInput, WakeLedger, WakePolicy,
+    WalletBackend, WalletInfo, WalletTransaction,
 };
 use nwc_mobile_bolt11::{
     created_invoice, exact_sats, parse_invoice, payment_amount_sats, quote_invoice_sats,
@@ -87,8 +89,9 @@ pub async fn execute_bark_wake(
     budget: OperationBudget,
     cancellation: &dyn CancellationSignal,
 ) -> WakeDisposition {
+    let started = Instant::now();
     let wallet = BarkWalletBackend::new(wallet, input.wallet_service_pubkey().clone());
-    WakeEngine::new(
+    let disposition = WakeEngine::new(
         ledger,
         &wallet,
         relays,
@@ -97,7 +100,15 @@ pub async fn execute_bark_wake(
         WakePolicy::default(),
     )
     .execute(input, budget, cancellation)
-    .await
+    .await;
+    if let Ok(notification_budget) =
+        OperationBudget::new(budget.timeout().saturating_sub(started.elapsed()))
+    {
+        let _ = InvoiceNotificationWorker::new(ledger, &wallet, relays, secrets, &SystemClock)
+            .run(notification_budget, cancellation)
+            .await;
+    }
+    disposition
 }
 
 /// Executes one wake while reporting bounded, non-secret diagnostic codes.
@@ -112,12 +123,13 @@ pub async fn execute_bark_wake_with_diagnostics(
     cancellation: &dyn CancellationSignal,
     diagnostics: Arc<dyn WakeDiagnosticSink>,
 ) -> WakeDisposition {
+    let started = Instant::now();
     let wallet = BarkWalletBackend::with_diagnostics(
         wallet,
         input.wallet_service_pubkey().clone(),
         Arc::clone(&diagnostics),
     );
-    WakeEngine::new(
+    let disposition = WakeEngine::new(
         ledger,
         &wallet,
         relays,
@@ -127,7 +139,31 @@ pub async fn execute_bark_wake_with_diagnostics(
     )
     .with_diagnostics(diagnostics.as_ref())
     .execute(input, budget, cancellation)
-    .await
+    .await;
+    if let Ok(notification_budget) =
+        OperationBudget::new(budget.timeout().saturating_sub(started.elapsed()))
+    {
+        let _ = InvoiceNotificationWorker::new(ledger, &wallet, relays, secrets, &SystemClock)
+            .run(notification_budget, cancellation)
+            .await;
+    }
+    disposition
+}
+
+/// Reconciles Bark invoices and durably publishes pending NIP-47 payment notifications.
+pub async fn run_bark_notification_worker(
+    ledger: &WakeLedger,
+    wallet: Wallet,
+    wallet_service_pubkey: PublicKey,
+    relays: &dyn RelayTransport,
+    secrets: &dyn SecretProvider,
+    budget: OperationBudget,
+    cancellation: &dyn CancellationSignal,
+) -> Result<InvoiceNotificationWorkerReport, InvoiceNotificationError> {
+    let wallet = BarkWalletBackend::new(wallet, wallet_service_pubkey);
+    InvoiceNotificationWorker::new(ledger, &wallet, relays, secrets, &SystemClock)
+        .run(budget, cancellation)
+        .await
 }
 
 impl WalletBackend for BarkWalletBackend {
@@ -137,10 +173,13 @@ impl WalletBackend for BarkWalletBackend {
     ) -> HostFuture<'a, Result<WalletInfo, HostError>> {
         Box::pin(async move {
             run_with_context(context, async {
-                Ok(WalletInfo::new(
-                    Some(self.service_pubkey.clone()),
-                    supported_methods(),
-                ))
+                Ok(
+                    WalletInfo::new(Some(self.service_pubkey.clone()), supported_methods())
+                        .with_notifications([
+                            NwcNotificationType::PaymentReceived,
+                            NwcNotificationType::PaymentSent,
+                        ]),
+                )
             })
             .await
         })

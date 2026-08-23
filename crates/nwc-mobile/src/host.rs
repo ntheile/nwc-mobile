@@ -316,6 +316,28 @@ impl fmt::Debug for SecureWakeServerUrl {
 pub struct WalletInfo {
     public_key: Option<PublicKey>,
     methods: BTreeSet<NwcMethod>,
+    notifications: BTreeSet<NwcNotificationType>,
+}
+
+/// NIP-47 notification types a wallet backend can durably deliver.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[non_exhaustive]
+pub enum NwcNotificationType {
+    /// A created invoice settled and funds were received.
+    PaymentReceived,
+    /// An outgoing invoice payment settled successfully.
+    PaymentSent,
+}
+
+impl NwcNotificationType {
+    /// Returns the canonical NIP-47 notification name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PaymentReceived => "payment_received",
+            Self::PaymentSent => "payment_sent",
+        }
+    }
 }
 
 impl WalletInfo {
@@ -328,7 +350,18 @@ impl WalletInfo {
         Self {
             public_key,
             methods: methods.into_iter().collect(),
+            notifications: BTreeSet::new(),
         }
+    }
+
+    /// Declares notification types the backend can durably deliver.
+    #[must_use]
+    pub fn with_notifications(
+        mut self,
+        notifications: impl IntoIterator<Item = NwcNotificationType>,
+    ) -> Self {
+        self.notifications = notifications.into_iter().collect();
+        self
     }
 
     /// Returns the wallet public key when the backend exposes one.
@@ -340,6 +373,11 @@ impl WalletInfo {
     /// Iterates over methods implemented by the wallet backend.
     pub fn methods(&self) -> impl ExactSizeIterator<Item = NwcMethod> + '_ {
         self.methods.iter().copied()
+    }
+
+    /// Iterates over notification types implemented by the wallet backend.
+    pub fn notifications(&self) -> impl ExactSizeIterator<Item = NwcNotificationType> + '_ {
+        self.notifications.iter().copied()
     }
 }
 

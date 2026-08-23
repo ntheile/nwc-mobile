@@ -18,6 +18,7 @@ mod engine;
 mod error;
 mod foreground;
 mod host;
+mod invoice_notifications;
 mod ledger;
 mod mobile_service;
 mod nip98;
@@ -73,9 +74,14 @@ pub use foreground::{
 pub use host::{
     AmountMsat, AmountSat, AtomicCancellation, CancellationSignal, CreatedInvoice, HostError,
     HostErrorKind, HostFuture, InvoiceLookup, ListTransactionsRequest, MakeInvoiceRequest,
-    NeverCancelled, OperationBudget, OperationContext, PayInvoiceRequest, PaymentFailure,
-    PaymentQuote, PaymentStatus, RelayTransport, SecretProvider, SecureRelayUrl,
+    NeverCancelled, NwcNotificationType, OperationBudget, OperationContext, PayInvoiceRequest,
+    PaymentFailure, PaymentQuote, PaymentStatus, RelayTransport, SecretProvider, SecureRelayUrl,
     SecureWakeServerUrl, TransactionDirection, WalletBackend, WalletInfo, WalletTransaction,
+};
+pub use invoice_notifications::{
+    build_payment_received_notification_event, build_payment_sent_notification_event,
+    InvoiceNotificationError, InvoiceNotificationWorker, InvoiceNotificationWorkerReport,
+    InvoiceSettlementMonitor, TrackedNwcInvoice, TrackedNwcPayment,
 };
 pub use ledger::{ClaimOutcome, EventLease, LedgerError, TerminalEvent, TerminalKind, WakeLedger};
 pub use mobile_service::{
@@ -88,7 +94,9 @@ pub use nostr_validation::{
     ValidatedNwcEvent,
 };
 pub use nwa::{NwaCallback, NwaError, NwaParsePolicy, NwaRequest, NwaRequestId};
-pub use nwc_info::{build_nwc_info_event, NwcInfoEventError};
+pub use nwc_info::{
+    build_nwc_info_event, build_nwc_info_event_with_notifications, NwcInfoEventError,
+};
 pub use outcome::{
     NotificationHint, QueueReason, RejectionCode, RetryReason, WakeDisposition, WakeDispositionKind,
 };

@@ -9,9 +9,10 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use nwc_mobile::{
-    build_nwc_info_event, Clock, EventId, HostError, HostErrorKind, HostFuture, NeverCancelled,
-    NwcEncryption, NwcMethod, NwcSecretKey, OperationBudget, OperationContext, PublicKey,
-    RelayTransport, SecureRelayUrl, SystemClock, UnixTimestamp,
+    build_nwc_info_event, build_nwc_info_event_with_notifications, Clock, EventId, HostError,
+    HostErrorKind, HostFuture, NeverCancelled, NwcEncryption, NwcMethod, NwcNotificationType,
+    NwcSecretKey, OperationBudget, OperationContext, PublicKey, RelayTransport, SecureRelayUrl,
+    SystemClock, UnixTimestamp,
 };
 use nwc_mobile_tokio::run_with_context;
 use serde_json::{json, Value};
@@ -50,6 +51,37 @@ pub async fn publish_nwc_info_event(
         SystemClock.now(),
         timeout,
     )?;
+    NostrRelayTransport
+        .publish_event(
+            &relay,
+            &event_json,
+            OperationContext::new(budget, &NeverCancelled),
+        )
+        .await
+}
+
+/// Publishes one wallet-info event with notification capability advertisement.
+pub async fn publish_nwc_info_event_with_notifications(
+    relay_url: &str,
+    wallet_service_secret: &NwcSecretKey,
+    client_pubkey: Option<&PublicKey>,
+    methods: Vec<NwcMethod>,
+    notifications: Vec<NwcNotificationType>,
+    encryption: NwcEncryption,
+    timeout: Duration,
+) -> Result<(), HostError> {
+    let relay =
+        SecureRelayUrl::parse(relay_url).map_err(|_| host_error(HostErrorKind::Rejected))?;
+    let event_json = build_nwc_info_event_with_notifications(
+        wallet_service_secret,
+        client_pubkey,
+        methods,
+        notifications,
+        encryption,
+        SystemClock.now(),
+    )
+    .map_err(|_| host_error(HostErrorKind::Rejected))?;
+    let budget = OperationBudget::new(timeout).map_err(|_| host_error(HostErrorKind::Rejected))?;
     NostrRelayTransport
         .publish_event(
             &relay,

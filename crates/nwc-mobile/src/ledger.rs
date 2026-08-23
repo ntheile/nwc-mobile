@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 
+use crate::invoice_notifications::CREATE_INVOICE_NOTIFICATION_SCHEMA;
 use crate::{ConnectionId, ConnectionRevision, EventId, NwcMethod, UnixTimestamp};
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 const CLAIM_TOKEN_BYTES: usize = 16;
 const MAX_RESPONSE_EVENT_BYTES: usize = 128 * 1024;
 const MAX_PRUNE_BATCH: usize = 1_000;
@@ -870,6 +871,10 @@ fn migrate(connection: &mut Connection) -> Result<(), LedgerError> {
     if version == 8 {
         transaction.execute_batch(ADD_WAKE_REQUEST_METHOD)?;
         version = 9;
+    }
+    if version == 9 {
+        transaction.execute_batch(CREATE_INVOICE_NOTIFICATION_SCHEMA)?;
+        version = 10;
     }
     if version != SCHEMA_VERSION {
         return Err(LedgerError::UnsupportedSchema);

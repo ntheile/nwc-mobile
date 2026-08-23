@@ -156,6 +156,24 @@ pub struct MobileWalletInfo {
     pub public_key_hex: Option<String>,
     /// Methods the backend actually implements.
     pub methods: Vec<MobileNwcMethod>,
+    /// NIP-47 notification types the native backend can durably deliver.
+    pub notifications: Vec<MobileNwcNotificationType>,
+}
+
+/// NIP-47 notification types exposed by the native wallet backend.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+pub enum MobileNwcNotificationType {
+    PaymentReceived,
+    PaymentSent,
+}
+
+impl From<MobileNwcNotificationType> for nwc_mobile::NwcNotificationType {
+    fn from(value: MobileNwcNotificationType) -> Self {
+        match value {
+            MobileNwcNotificationType::PaymentReceived => Self::PaymentReceived,
+            MobileNwcNotificationType::PaymentSent => Self::PaymentSent,
+        }
+    }
 }
 
 impl fmt::Debug for MobileWalletInfo {
@@ -164,6 +182,7 @@ impl fmt::Debug for MobileWalletInfo {
             .debug_struct("MobileWalletInfo")
             .field("has_public_key", &self.public_key_hex.is_some())
             .field("methods", &self.methods)
+            .field("notifications", &self.notifications)
             .finish()
     }
 }
@@ -649,10 +668,10 @@ impl WalletBackend for MobileHostBridge {
                 .map(|key| PublicKey::from_hex(&key))
                 .transpose()
                 .map_err(|_| rejected())?;
-            Ok(WalletInfo::new(
-                public_key,
-                info.methods.into_iter().map(NwcMethod::from),
-            ))
+            Ok(
+                WalletInfo::new(public_key, info.methods.into_iter().map(NwcMethod::from))
+                    .with_notifications(info.notifications.into_iter().map(Into::into)),
+            )
         })
     }
 
@@ -1014,6 +1033,7 @@ mod tests {
             Ok(MobileWalletInfo {
                 public_key_hex: Some(HEX.to_owned()),
                 methods: vec![MobileNwcMethod::GetInfo, MobileNwcMethod::PayInvoice],
+                notifications: vec![],
             })
         }
 

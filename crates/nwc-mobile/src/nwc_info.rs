@@ -5,7 +5,9 @@ use nostr::{
     EventBuilder, JsonUtil, Keys, Kind, PublicKey as NostrPublicKey, Tag, TagKind, Timestamp,
 };
 
-use crate::{NwcEncryption, NwcMethod, NwcSecretKey, PublicKey, UnixTimestamp};
+use crate::{
+    NwcEncryption, NwcMethod, NwcNotificationType, NwcSecretKey, PublicKey, UnixTimestamp,
+};
 
 /// A stable failure while constructing a signed NIP-47 info event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,16 +44,49 @@ pub fn build_nwc_info_event(
     encryption: NwcEncryption,
     created_at: UnixTimestamp,
 ) -> Result<String, NwcInfoEventError> {
+    build_nwc_info_event_with_notifications(
+        wallet_secret,
+        client_pubkey,
+        methods,
+        [],
+        encryption,
+        created_at,
+    )
+}
+
+/// Builds a NIP-47 wallet-info event including supported notification types.
+pub fn build_nwc_info_event_with_notifications(
+    wallet_secret: &NwcSecretKey,
+    client_pubkey: Option<&PublicKey>,
+    methods: impl IntoIterator<Item = NwcMethod>,
+    notifications: impl IntoIterator<Item = NwcNotificationType>,
+    encryption: NwcEncryption,
+    created_at: UnixTimestamp,
+) -> Result<String, NwcInfoEventError> {
     let methods = methods.into_iter().collect::<BTreeSet<_>>();
     if methods.is_empty() {
         return Err(NwcInfoEventError::NoMethods);
     }
-    let content = methods
+    let mut content = methods
         .into_iter()
         .map(NwcMethod::as_str)
         .collect::<Vec<_>>()
         .join(" ");
+    let notifications = notifications.into_iter().collect::<BTreeSet<_>>();
+    if !notifications.is_empty() {
+        content.push_str(" notifications");
+    }
     let mut tags = Vec::new();
+    if !notifications.is_empty() {
+        tags.push(Tag::custom(
+            TagKind::custom("notifications"),
+            [notifications
+                .into_iter()
+                .map(NwcNotificationType::as_str)
+                .collect::<Vec<_>>()
+                .join(" ")],
+        ));
+    }
     if encryption == NwcEncryption::Nip44V2 {
         tags.push(Tag::custom(
             TagKind::custom("encryption"),
@@ -135,6 +170,34 @@ mod tests {
             let fields = tag.as_slice();
             fields.first().is_some_and(|field| field == "encryption")
                 && fields.get(1).is_some_and(|field| field == "nip44_v2")
+        }));
+    }
+
+    #[test]
+    fn info_event_advertises_only_supported_notifications() {
+        let wallet_secret = NwcSecretKey::from_bytes([7_u8; 32]).expect("wallet secret");
+        let json = build_nwc_info_event_with_notifications(
+            &wallet_secret,
+            None,
+            [NwcMethod::GetInfo, NwcMethod::MakeInvoice],
+            [
+                NwcNotificationType::PaymentSent,
+                NwcNotificationType::PaymentReceived,
+                NwcNotificationType::PaymentReceived,
+            ],
+            NwcEncryption::Nip44V2,
+            UnixTimestamp::from_secs(1_700_000_000),
+        )
+        .expect("info event");
+        let event = Event::from_json(json).expect("event json");
+
+        assert_eq!(event.content, "get_info make_invoice notifications");
+        assert!(event.tags.iter().any(|tag| {
+            let fields = tag.as_slice();
+            fields.first().is_some_and(|field| field == "notifications")
+                && fields
+                    .get(1)
+                    .is_some_and(|field| field == "payment_received payment_sent")
         }));
     }
 
