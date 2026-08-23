@@ -14,8 +14,8 @@ use crate::{
     MakeInvoiceRequest, NotificationHint, NwcEventValidator, NwcMethod, OperationBudget,
     OperationContext, PayInvoiceRequest, PaymentAccountingError, PaymentFailure, PaymentHash,
     PaymentReservationOutcome, PaymentStatus, QueueReason, RejectionCode, RelayTransport,
-    RetryReason, SecretProvider, SecureRelayUrl, TerminalKind, UnixTimestamp, WakeDisposition,
-    WakeDiagnosticCode, WakeDiagnosticSink, WakeInput, WakeLedger, WakePolicy, WalletBackend,
+    RetryReason, SecretProvider, SecureRelayUrl, TerminalKind, UnixTimestamp, WakeDiagnosticCode,
+    WakeDiagnosticSink, WakeDisposition, WakeInput, WakeLedger, WakePolicy, WalletBackend,
     WalletTransaction,
 };
 
@@ -371,11 +371,11 @@ impl<'a> WakeEngine<'a> {
             Ok(quote) => quote,
             Err(error) if error.is_retryable() => {
                 self.record_diagnostic(WakeDiagnosticCode::PaymentQuoteFailed);
-                return self.retry_claim(lease, RetryReason::WalletUnavailable)
+                return self.retry_claim(lease, RetryReason::WalletUnavailable);
             }
             Err(error) if error.kind() == HostErrorKind::Cancelled => {
                 self.record_diagnostic(WakeDiagnosticCode::PaymentQuoteFailed);
-                return self.release_to_application(lease, QueueReason::Deadline)
+                return self.release_to_application(lease, QueueReason::Deadline);
             }
             Err(_) => {
                 self.record_diagnostic(WakeDiagnosticCode::PaymentQuoteFailed);
@@ -390,7 +390,7 @@ impl<'a> WakeEngine<'a> {
                         deadline,
                         cancellation,
                     )
-                    .await
+                    .await;
             }
         };
         let Some(principal_sat) = msat_to_sat_ceil(quote.principal().as_msat()) else {
@@ -442,7 +442,7 @@ impl<'a> WakeEngine<'a> {
                         deadline,
                         cancellation,
                     )
-                    .await
+                    .await;
             }
             Err(PaymentAccountingError::ConnectionUnavailable) => {
                 return self.reject_claim(lease, RejectionCode::ConnectionUnavailable)
@@ -1811,8 +1811,8 @@ mod tests {
         let secrets = TestSecrets::wallet();
         let clock = FixedClock::new(100);
         let diagnostics = crate::WakeDiagnosticCollector::default();
-        let engine = engine(&ledger, &wallet, &relay, &secrets, &clock)
-            .with_diagnostics(&diagnostics);
+        let engine =
+            engine(&ledger, &wallet, &relay, &secrets, &clock).with_diagnostics(&diagnostics);
         let event = request_event(Request::get_balance(), 100);
 
         assert!(matches!(
@@ -2158,8 +2158,8 @@ mod tests {
         let secrets = TestSecrets::wallet();
         let clock = FixedClock::new(100);
         let diagnostics = crate::WakeDiagnosticCollector::default();
-        let engine = engine(&ledger, &wallet, &relay, &secrets, &clock)
-            .with_diagnostics(&diagnostics);
+        let engine =
+            engine(&ledger, &wallet, &relay, &secrets, &clock).with_diagnostics(&diagnostics);
         let event = request_event(
             Request::pay_invoice(nip47::PayInvoiceRequest::new("lnbc-over-budget")),
             100,

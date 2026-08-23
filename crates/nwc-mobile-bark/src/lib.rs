@@ -662,33 +662,21 @@ mod tests {
         );
 
         assert_eq!(
-            payment_preflight_failure(
-                &fee,
-                Some(Amount::from_sat(500)),
-                Amount::from_sat(500),
-            ),
+            payment_preflight_failure(&fee, Some(Amount::from_sat(500)), Amount::from_sat(500),),
             Some((
                 PaymentFailure::InsufficientFunds,
                 WakeDiagnosticCode::PaymentInsufficientFunds,
             ))
         );
         assert_eq!(
-            payment_preflight_failure(
-                &fee,
-                Some(Amount::from_sat(1_000)),
-                Amount::from_sat(500),
-            ),
+            payment_preflight_failure(&fee, Some(Amount::from_sat(1_000)), Amount::from_sat(500),),
             Some((
                 PaymentFailure::Other,
                 WakeDiagnosticCode::PaymentFeeLimitExceeded,
             ))
         );
         assert_eq!(
-            payment_preflight_failure(
-                &fee,
-                Some(Amount::from_sat(1_000)),
-                Amount::from_sat(600),
-            ),
+            payment_preflight_failure(&fee, Some(Amount::from_sat(1_000)), Amount::from_sat(600),),
             None
         );
     }
