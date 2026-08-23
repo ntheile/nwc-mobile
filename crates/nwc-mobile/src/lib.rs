@@ -8,6 +8,7 @@
 
 mod application;
 mod application_coordinator;
+mod application_icon_cache;
 mod application_manager;
 mod application_metadata;
 mod connection_registry;
@@ -44,6 +45,9 @@ pub use application_coordinator::{
     ApplicationRegistrationBegin, ApplicationRegistrationCompletion,
     ApplicationRegistrationCoordinator, ApplicationRegistrationPass, NwaCallbackBegin,
     NwaCallbackCompletion, NwaCallbackCoordinator,
+};
+pub use application_icon_cache::{
+    ApplicationIconCache, ApplicationIconCacheError, ApplicationIconUrl, MAX_APPLICATION_ICON_BYTES,
 };
 pub use application_manager::{
     registration_retry_delay, ApprovedNwaApplication, NwcApplicationManager, RegistrationStart,
