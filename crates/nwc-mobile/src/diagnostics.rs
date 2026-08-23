@@ -28,6 +28,14 @@ pub enum WakeDiagnosticCode {
     PaymentPending,
     /// The wallet reported a successful payment.
     PaymentSucceeded,
+    /// An invoice lookup found no matching wallet transaction.
+    InvoiceLookupNotFound,
+    /// An invoice lookup found a transaction that has not settled yet.
+    InvoiceLookupPending,
+    /// An invoice lookup found a settled transaction.
+    InvoiceLookupSettled,
+    /// The wallet backend could not complete an invoice lookup.
+    InvoiceLookupFailed,
     /// A durable NIP-47 response could not be published to the relay.
     ResponsePublishFailed,
 }
@@ -46,6 +54,10 @@ impl WakeDiagnosticCode {
             Self::PaymentBackendFailed => "payment_backend_failed",
             Self::PaymentPending => "payment_pending",
             Self::PaymentSucceeded => "payment_succeeded",
+            Self::InvoiceLookupNotFound => "invoice_lookup_not_found",
+            Self::InvoiceLookupPending => "invoice_lookup_pending",
+            Self::InvoiceLookupSettled => "invoice_lookup_settled",
+            Self::InvoiceLookupFailed => "invoice_lookup_failed",
             Self::ResponsePublishFailed => "response_publish_failed",
         }
     }

@@ -326,11 +326,28 @@ impl WalletBackend for BarkWalletBackend {
     ) -> HostFuture<'a, Result<Option<WalletTransaction>, HostError>> {
         Box::pin(async move {
             let payment_hash = lookup_payment_hash(&request)?;
-            run_with_context(
+            let result = run_with_context(
                 context,
                 reconcile_then_lookup_transaction(&self.wallet, payment_hash),
             )
-            .await
+            .await;
+            match &result {
+                Ok(Some(transaction))
+                    if matches!(transaction.status, PaymentStatus::Succeeded { .. }) =>
+                {
+                    self.record_diagnostic(WakeDiagnosticCode::InvoiceLookupSettled);
+                }
+                Ok(Some(_)) => {
+                    self.record_diagnostic(WakeDiagnosticCode::InvoiceLookupPending);
+                }
+                Ok(None) => {
+                    self.record_diagnostic(WakeDiagnosticCode::InvoiceLookupNotFound);
+                }
+                Err(_) => {
+                    self.record_diagnostic(WakeDiagnosticCode::InvoiceLookupFailed);
+                }
+            }
+            result
         })
     }
 
@@ -536,14 +553,13 @@ async fn reconcile_then_lookup_transaction(
         return Ok(transaction_from_receive_state(&receive));
     }
 
-    // Bark's broad `sync()` drives mailbox ingestion and pending receives
-    // concurrently. For a newly paid invoice, the receive pass can therefore
-    // inspect AwaitingPayment before the mailbox pass records the incoming
-    // HTLC, leaving lookup_invoice pending until some later wallet lifecycle
-    // work happens. A killed or suspended mobile host has no such lifecycle.
-    // Drain the mailbox first, then explicitly drive this exact invoice. The
-    // caller's OperationContext bounds both operations to the native wake.
-    let _ = wallet.sync_mailbox().await;
+    // Preserve the full wallet refresh used by Rebel's original NWC receive
+    // flow. Mailbox-only sync is insufficient when Bark also needs refreshed
+    // Ark state to drive the receive action. Bark performs mailbox ingestion
+    // and its broad receive pass concurrently, so explicitly drive this exact
+    // invoice after the full sync completes. This ordering both restores the
+    // original prerequisites and prevents the mailbox/claim race.
+    wallet.sync().await;
     if let Ok(receive) = wallet
         .try_claim_lightning_receive(payment_hash, false)
         .await
