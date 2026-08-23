@@ -173,10 +173,7 @@ impl WalletBackend for BarkWalletBackend {
     ) -> HostFuture<'a, Result<WalletInfo, HostError>> {
         Box::pin(async move {
             run_with_context(context, async {
-                Ok(
-                    WalletInfo::new(Some(self.service_pubkey.clone()), supported_methods())
-                        .with_notifications(supported_notifications()),
-                )
+                Ok(wallet_info(self.service_pubkey.clone()))
             })
             .await
         })
@@ -695,6 +692,11 @@ fn supported_notifications() -> [NwcNotificationType; 1] {
     [NwcNotificationType::PaymentSent]
 }
 
+fn wallet_info(service_pubkey: PublicKey) -> WalletInfo {
+    WalletInfo::new(Some(service_pubkey), supported_methods())
+        .with_notifications(supported_notifications())
+}
+
 fn payment_preflight_failure(
     fee: &FeeEstimate,
     spendable: Option<Amount>,
@@ -762,10 +764,15 @@ mod tests {
     }
 
     #[test]
-    fn receive_settlement_relies_on_lookup_polling() {
+    fn wallet_info_requires_lookup_polling_for_receive_settlement() {
+        let service_pubkey =
+            PublicKey::from_hex("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+                .expect("service public key");
         assert_eq!(
-            supported_notifications(),
-            [NwcNotificationType::PaymentSent]
+            wallet_info(service_pubkey)
+                .notifications()
+                .collect::<Vec<_>>(),
+            vec![NwcNotificationType::PaymentSent]
         );
     }
 
