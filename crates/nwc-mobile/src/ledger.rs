@@ -7,7 +7,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBeha
 
 use crate::{ConnectionId, ConnectionRevision, EventId, UnixTimestamp};
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 const CLAIM_TOKEN_BYTES: usize = 16;
 const MAX_RESPONSE_EVENT_BYTES: usize = 128 * 1024;
 const MAX_PRUNE_BATCH: usize = 1_000;
@@ -209,6 +209,26 @@ CREATE INDEX payment_attempts_reconciliation_queue
 const ADD_CONNECTION_EXPIRATION: &str = r#"
 ALTER TABLE connections ADD COLUMN expires_at INTEGER
     CHECK(expires_at IS NULL OR expires_at > created_at);
+"#;
+
+const CREATE_APPLICATION_METADATA_SCHEMA: &str = r#"
+CREATE TABLE connection_metadata (
+    connection_id TEXT PRIMARY KEY NOT NULL
+                  REFERENCES connections(connection_id) ON DELETE RESTRICT,
+    display_name  TEXT NOT NULL
+                  CHECK(length(CAST(display_name AS BLOB)) BETWEEN 1 AND 256),
+    icon_url      TEXT
+                  CHECK(icon_url IS NULL OR
+                        length(CAST(icon_url AS BLOB)) BETWEEN 1 AND 2048)
+) STRICT;
+
+CREATE TABLE nwc_info_outbox (
+    connection_id TEXT NOT NULL
+                  REFERENCES connections(connection_id) ON DELETE RESTRICT,
+    relay_url     TEXT NOT NULL
+                  CHECK(length(CAST(relay_url AS BLOB)) BETWEEN 1 AND 2048),
+    PRIMARY KEY(connection_id, relay_url)
+) STRICT;
 "#;
 
 /// A stable, non-sensitive durable-ledger error.
@@ -785,6 +805,10 @@ fn migrate(connection: &mut Connection) -> Result<(), LedgerError> {
     if version == 6 {
         transaction.execute_batch(CREATE_COMPLETED_CONNECTION_INDEX)?;
         version = 7;
+    }
+    if version == 7 {
+        transaction.execute_batch(CREATE_APPLICATION_METADATA_SCHEMA)?;
+        version = 8;
     }
     if version != SCHEMA_VERSION {
         return Err(LedgerError::UnsupportedSchema);

@@ -320,6 +320,56 @@ impl MobileConnectionView {
         mobile_connection_view(approved.draft(), approved.approval().connection(), metadata)
     }
 
+    /// Builds a render-ready view from the authoritative durable presentation.
+    ///
+    /// The host supplies only ephemeral cache state and whether its platform secret store owns an
+    /// exportable client secret. Display metadata, accounting, and publication state come from the
+    /// shared ledger.
+    pub fn from_presentation(
+        presentation: nwc_mobile::ConnectionPresentation,
+        fallback_name: String,
+        icon_display_url: Option<String>,
+        wallet_managed_secret: bool,
+    ) -> Result<Self, MobileEngineError> {
+        let budget_interval: MobileBudgetInterval = presentation.budget_interval().try_into()?;
+        let name = presentation
+            .display_name()
+            .map(str::to_owned)
+            .unwrap_or(fallback_name);
+        Ok(Self {
+            id: presentation.id().to_owned(),
+            name,
+            icon_url: presentation.icon_url().map(str::to_owned),
+            icon_display_url,
+            relay: presentation.relay_storage(),
+            wallet_managed_secret,
+            service_pubkey: presentation.wallet_service_pubkey_hex().to_owned(),
+            client_pubkey: presentation.client_pubkey_hex().to_owned(),
+            budget_sat: presentation.budget_limit_sat(),
+            spent_sat: presentation.spent_sat(),
+            budget_display: display_sats(presentation.budget_limit_sat()),
+            spent_display: display_sats(presentation.spent_sat()),
+            budget_interval,
+            budget_interval_display: display_budget_interval(budget_interval).to_owned(),
+            permissions: presentation
+                .methods()
+                .iter()
+                .copied()
+                .map(MobileNwcMethod::try_from)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| MobileEngineError::CorruptData)?,
+            created_at: presentation.created_at().as_secs(),
+            last_used_at: presentation
+                .last_used_at()
+                .map(nwc_mobile::UnixTimestamp::as_secs),
+            expires_at: presentation
+                .expires_at()
+                .map(nwc_mobile::UnixTimestamp::as_secs),
+            budget_period_started_at: presentation.budget_period_started_at().as_secs(),
+            pending_info_event_relays: presentation.pending_info_event_relays().to_vec(),
+        })
+    }
+
     /// Returns the exact method allowlist in canonical order.
     #[must_use]
     pub fn enabled_permissions(&self) -> Vec<MobileNwcMethod> {
