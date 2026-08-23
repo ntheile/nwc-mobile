@@ -22,22 +22,42 @@ const NATIVE_RUNTIME_THREAD_NAME: &str = "nwc-mobile-native";
 
 static NATIVE_RUNTIME_HANDLE: OnceLock<Option<tokio::runtime::Handle>> = OnceLock::new();
 
+struct AbortTaskOnDrop<T> {
+    handle: Option<tokio::task::JoinHandle<T>>,
+}
+
+impl<T> Drop for AbortTaskOnDrop<T> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
 /// Executes a Tokio-backed future for a native host that has no Tokio runtime.
 ///
-/// Swift and Kotlin async executors can poll the returned future directly. The
-/// operation itself runs on one process-wide runtime thread, so native entry
-/// points do not need to create a runtime or rely on the caller's executor.
-/// Runtime startup and task failures are returned as non-sensitive host errors.
+/// Rust async entry points called by Swift or Kotlin can await the returned
+/// future directly. The operation itself runs on one process-wide runtime
+/// thread, so native entry points do not need to create a runtime or rely on the
+/// caller's executor. Dropping this future aborts the spawned operation. Runtime
+/// startup and task failures are returned as non-sensitive host errors.
 pub async fn run_on_native_runtime<F, T>(operation: F) -> Result<T, HostError>
 where
     F: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
     let handle = native_runtime_handle().ok_or_else(|| host_error(HostErrorKind::Internal))?;
-    handle
-        .spawn(operation)
+    let mut task = AbortTaskOnDrop {
+        handle: Some(handle.spawn(operation)),
+    };
+    let result = task
+        .handle
+        .as_mut()
+        .ok_or_else(|| host_error(HostErrorKind::Internal))?
         .await
-        .map_err(|_| host_error(HostErrorKind::Internal))
+        .map_err(|_| host_error(HostErrorKind::Internal));
+    task.handle.take();
+    result
 }
 
 fn native_runtime_handle() -> Option<&'static tokio::runtime::Handle> {
@@ -206,6 +226,7 @@ const fn host_error(kind: HostErrorKind) -> HostError {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
 
@@ -252,6 +273,36 @@ mod tests {
         .expect("native runtime");
 
         assert!(matches!(disposition, WakeDisposition::Completed { .. }));
+    }
+
+    struct DropSignal(mpsc::SyncSender<()>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    #[test]
+    fn dropping_native_runtime_future_aborts_spawned_operation() {
+        let (started_sender, started_receiver) = mpsc::sync_channel(1);
+        let (dropped_sender, dropped_receiver) = mpsc::sync_channel(1);
+        let mut future = Box::pin(run_on_native_runtime(async move {
+            let _drop_signal = DropSignal(dropped_sender);
+            let _ = started_sender.send(());
+            std::future::pending::<()>().await;
+        }));
+        let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
+        let mut context = Context::from_waker(&waker);
+
+        assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+        started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("spawned operation started");
+        drop(future);
+        dropped_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("spawned operation aborted");
     }
 
     #[tokio::test]
