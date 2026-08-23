@@ -266,6 +266,38 @@ impl fmt::Debug for ReadyApnsWakeRegistrationConfig {
     }
 }
 
+/// Validated public routing values used to schedule invoice settlement checks.
+#[derive(Clone, Eq, PartialEq)]
+pub struct InvoiceSettlementMonitorConfig {
+    server_url: SecureWakeServerUrl,
+    install_id: String,
+}
+
+impl InvoiceSettlementMonitorConfig {
+    /// Validates the wake-server URL and stable native installation identifier.
+    pub fn new(
+        server_url: Option<String>,
+        install_id: String,
+    ) -> Result<Self, WakeHttpConfigError> {
+        let server_url = required_bounded(server_url.as_deref())?;
+        let install_id = required_bounded(Some(&install_id))?;
+        Ok(Self {
+            server_url: SecureWakeServerUrl::parse(server_url)
+                .map_err(|_| WakeHttpConfigError::InsecureServerUrl)?,
+            install_id: install_id.to_owned(),
+        })
+    }
+}
+
+impl fmt::Debug for InvoiceSettlementMonitorConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InvoiceSettlementMonitorConfig")
+            .field("server_url", &self.server_url)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A stable, non-sensitive configuration failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -390,7 +422,7 @@ pub async fn run_registration_worker(
 /// settlement data. A completed notification disables the idempotent monitor.
 pub async fn update_invoice_settlement_monitor(
     ledger: &WakeLedger,
-    config: ReadyApnsWakeRegistrationConfig,
+    config: InvoiceSettlementMonitorConfig,
     event_id: &EventId,
     signing_key: Nip98SigningKey,
 ) -> Result<bool, WakeHttpRegistrationError> {
@@ -683,6 +715,28 @@ mod tests {
             invalid_environment.ready().expect_err("environment"),
             WakeHttpConfigError::InvalidEnvironment
         );
+    }
+
+    #[test]
+    fn settlement_config_requires_only_public_routing_values() {
+        let config = InvoiceSettlementMonitorConfig::new(
+            Some("https://wake.example.com/base".to_owned()),
+            "install-123".to_owned(),
+        )
+        .expect("settlement config");
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("wake.example.com"));
+        assert!(!debug.contains("install-123"));
+        assert!(InvoiceSettlementMonitorConfig::new(
+            Some("http://wake.example.com".to_owned()),
+            "install-123".to_owned(),
+        )
+        .is_err());
+        assert!(InvoiceSettlementMonitorConfig::new(
+            Some("https://wake.example.com".to_owned()),
+            String::new(),
+        )
+        .is_err());
     }
 
     #[test]
