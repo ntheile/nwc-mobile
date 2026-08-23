@@ -1064,7 +1064,11 @@ fn parse_lookup_request(
         (Some(hash), None) => PaymentHash::from_hex(&hash)
             .map(InvoiceLookup::PaymentHash)
             .map_err(|_| HostErrorKind::Rejected),
-        (None, Some(invoice)) if !invoice.is_empty() && invoice.len() <= 16_384 => {
+        (_, Some(invoice)) if !invoice.is_empty() && invoice.len() <= 16_384 => {
+            // NIP-47 clients may include both selectors. Keep the behavior of
+            // Rebel's original NWC implementation and treat the encoded invoice
+            // as authoritative; the wallet backend derives its payment hash from
+            // the invoice instead of trusting the redundant request field.
             Ok(InvoiceLookup::Invoice(invoice))
         }
         _ => Err(HostErrorKind::Rejected),
@@ -1494,6 +1498,7 @@ mod tests {
     struct TestWallet<'a> {
         balance_calls: AtomicUsize,
         invoice_requests: Mutex<Vec<MakeInvoiceRequest>>,
+        lookup_requests: Mutex<Vec<InvoiceLookup>>,
         revoke_on_balance: Mutex<Option<(&'a WakeLedger, ConnectionId, crate::ConnectionRevision)>>,
         quote: Mutex<Option<PaymentQuote>>,
         payment_statuses: Mutex<VecDeque<Result<PaymentStatus, HostError>>>,
@@ -1607,10 +1612,24 @@ mod tests {
 
         fn lookup_invoice<'a>(
             &'a self,
-            _request: InvoiceLookup,
+            request: InvoiceLookup,
             _context: OperationContext<'a>,
         ) -> HostFuture<'a, Result<Option<WalletTransaction>, HostError>> {
-            unavailable()
+            self.lookup_requests
+                .lock()
+                .expect("lookup requests lock")
+                .push(request);
+            Box::pin(async {
+                Ok(Some(WalletTransaction {
+                    payment_hash: Some(PaymentHash::from_bytes([8_u8; 32])),
+                    direction: crate::TransactionDirection::Incoming,
+                    amount: AmountMsat::from_msat(42_000),
+                    fee: AmountMsat::from_msat(0),
+                    created_at: UnixTimestamp::from_secs(100),
+                    settled_at: None,
+                    status: PaymentStatus::Pending,
+                }))
+            })
         }
 
         fn list_transactions<'a>(
@@ -1866,6 +1885,42 @@ mod tests {
             tracked[0].request_event_id(),
             &crate::EventId::from_bytes(*event.id.as_bytes())
         );
+    }
+
+    #[test]
+    fn lookup_invoice_accepts_alby_dual_selector_request() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        insert_connection(&ledger);
+        let wallet = TestWallet::default();
+        let relay = TestRelay::default();
+        let secrets = TestSecrets::wallet();
+        let clock = FixedClock::new(100);
+        let engine = engine(&ledger, &wallet, &relay, &secrets, &clock);
+        let event = request_event(
+            Request::lookup_invoice(nip47::LookupInvoiceRequest {
+                payment_hash: Some(PaymentHash::from_bytes([8_u8; 32]).to_hex()),
+                invoice: Some("lnbc-alby-dual-selector".to_owned()),
+            }),
+            100,
+        );
+
+        assert_eq!(
+            execute(&engine, wake(&event, RELAY, true)),
+            WakeDisposition::Completed {
+                notification: NotificationHint::Request {
+                    method: NwcMethod::LookupInvoice,
+                },
+            }
+        );
+        assert!(matches!(
+            wallet
+                .lookup_requests
+                .lock()
+                .expect("lookup requests lock")
+                .as_slice(),
+            [InvoiceLookup::Invoice(invoice)] if invoice == "lnbc-alby-dual-selector"
+        ));
     }
 
     #[test]
@@ -2334,7 +2389,7 @@ mod tests {
     }
 
     #[test]
-    fn read_only_request_bounds_fail_closed() {
+    fn read_only_request_selectors_are_compatible_and_bounded() {
         let hash = crate::PaymentHash::from_bytes([9_u8; 32]);
         assert!(matches!(
             parse_lookup_request(nip47::LookupInvoiceRequest {
@@ -2343,10 +2398,31 @@ mod tests {
             }),
             Ok(InvoiceLookup::PaymentHash(_))
         ));
+        assert!(matches!(
+            parse_lookup_request(nip47::LookupInvoiceRequest {
+                payment_hash: Some(hash.to_hex()),
+                invoice: Some("lnbc-alby-dual-selector".to_owned()),
+            }),
+            Ok(InvoiceLookup::Invoice(invoice)) if invoice == "lnbc-alby-dual-selector"
+        ));
+        assert!(matches!(
+            parse_lookup_request(nip47::LookupInvoiceRequest {
+                payment_hash: None,
+                invoice: Some("lnbc-alby-invoice-selector".to_owned()),
+            }),
+            Ok(InvoiceLookup::Invoice(invoice)) if invoice == "lnbc-alby-invoice-selector"
+        ));
+        assert_eq!(
+            parse_lookup_request(nip47::LookupInvoiceRequest {
+                payment_hash: None,
+                invoice: None,
+            }),
+            Err(HostErrorKind::Rejected)
+        );
         assert_eq!(
             parse_lookup_request(nip47::LookupInvoiceRequest {
                 payment_hash: Some(hash.to_hex()),
-                invoice: Some("lnbc-conflicting-selector".to_owned()),
+                invoice: Some("x".repeat(16_385)),
             }),
             Err(HostErrorKind::Rejected)
         );
