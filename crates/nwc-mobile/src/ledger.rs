@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 
-use crate::{ConnectionId, ConnectionRevision, EventId, UnixTimestamp};
+use crate::{ConnectionId, ConnectionRevision, EventId, NwcMethod, UnixTimestamp};
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 const CLAIM_TOKEN_BYTES: usize = 16;
 const MAX_RESPONSE_EVENT_BYTES: usize = 128 * 1024;
 const MAX_PRUNE_BATCH: usize = 1_000;
@@ -48,6 +48,13 @@ const CREATE_COMPLETED_CONNECTION_INDEX: &str = r#"
 CREATE INDEX wake_events_completed_connection_updated
     ON wake_events(connection_id, updated_at DESC)
     WHERE state = 'terminal' AND terminal_kind = 'completed';
+"#;
+
+const ADD_WAKE_REQUEST_METHOD: &str = r#"
+ALTER TABLE wake_events ADD COLUMN request_method TEXT
+    CHECK(request_method IS NULL OR request_method IN
+          ('get_info', 'get_balance', 'make_invoice', 'pay_invoice',
+           'lookup_invoice', 'list_transactions'));
 "#;
 
 pub(crate) const CREATE_CONNECTION_SCHEMA: &str = r#"
@@ -355,6 +362,7 @@ pub struct TerminalEvent {
     event_id: EventId,
     kind: TerminalKind,
     response_event_json: Option<String>,
+    request_method: Option<NwcMethod>,
     completed_at: UnixTimestamp,
 }
 
@@ -375,6 +383,12 @@ impl TerminalEvent {
     #[must_use]
     pub fn response_event_json(&self) -> Option<&str> {
         self.response_event_json.as_deref()
+    }
+
+    /// Returns the non-sensitive NIP-47 method retained for native presentation.
+    #[must_use]
+    pub const fn request_method(&self) -> Option<NwcMethod> {
+        self.request_method
     }
 
     /// Returns when the request entered its terminal state.
@@ -419,6 +433,7 @@ struct ExistingEvent {
     available_at: Option<i64>,
     terminal_kind: Option<String>,
     response_event_json: Option<String>,
+    request_method: Option<String>,
     updated_at: i64,
 }
 
@@ -627,7 +642,8 @@ impl WakeLedger {
         let updated = connection.execute(
             "UPDATE wake_events
              SET state = 'terminal', claim_token = NULL, available_at = NULL,
-                 updated_at = ?4, terminal_kind = ?3, response_event_json = ?5
+                 updated_at = ?4, terminal_kind = ?3, response_event_json = ?5,
+                 request_method = NULL
              WHERE event_id = ?1 AND state = 'claimed' AND claim_token = ?2
                AND available_at > ?4",
             params![
@@ -654,6 +670,45 @@ impl WakeLedger {
         response_event_json: &str,
         now: UnixTimestamp,
     ) -> Result<(), LedgerError> {
+        self.complete_event_for_active_connection_inner(
+            lease,
+            connection_id,
+            connection_revision,
+            response_event_json,
+            None,
+            now,
+        )
+    }
+
+    /// Commits a successful NIP-47 response and its safe presentation method.
+    pub fn complete_nwc_event_for_active_connection(
+        &self,
+        lease: &EventLease,
+        connection_id: &ConnectionId,
+        connection_revision: ConnectionRevision,
+        response_event_json: &str,
+        request_method: NwcMethod,
+        now: UnixTimestamp,
+    ) -> Result<(), LedgerError> {
+        self.complete_event_for_active_connection_inner(
+            lease,
+            connection_id,
+            connection_revision,
+            response_event_json,
+            Some(request_method),
+            now,
+        )
+    }
+
+    fn complete_event_for_active_connection_inner(
+        &self,
+        lease: &EventLease,
+        connection_id: &ConnectionId,
+        connection_revision: ConnectionRevision,
+        response_event_json: &str,
+        request_method: Option<NwcMethod>,
+        now: UnixTimestamp,
+    ) -> Result<(), LedgerError> {
         if response_event_json.len() > MAX_RESPONSE_EVENT_BYTES {
             return Err(LedgerError::ResponseTooLarge);
         }
@@ -664,7 +719,8 @@ impl WakeLedger {
         let updated = transaction.execute(
             "UPDATE wake_events
              SET state = 'terminal', claim_token = NULL, available_at = NULL,
-                 updated_at = ?5, terminal_kind = 'completed', response_event_json = ?6
+                 updated_at = ?5, terminal_kind = 'completed', response_event_json = ?6,
+                 request_method = ?7
              WHERE event_id = ?1 AND state = 'claimed' AND claim_token = ?2
                AND connection_id = ?3 AND connection_revision = ?4
                AND available_at > ?5
@@ -678,7 +734,8 @@ impl WakeLedger {
                 connection_id.as_str(),
                 revision,
                 now,
-                response_event_json
+                response_event_json,
+                request_method.map(NwcMethod::as_str),
             ],
         )?;
         if updated == 1 {
@@ -810,6 +867,10 @@ fn migrate(connection: &mut Connection) -> Result<(), LedgerError> {
         transaction.execute_batch(CREATE_APPLICATION_METADATA_SCHEMA)?;
         version = 8;
     }
+    if version == 8 {
+        transaction.execute_batch(ADD_WAKE_REQUEST_METHOD)?;
+        version = 9;
+    }
     if version != SCHEMA_VERSION {
         return Err(LedgerError::UnsupportedSchema);
     }
@@ -825,7 +886,7 @@ fn load_existing(
     connection
         .query_row(
             "SELECT connection_id, connection_revision, state, available_at,
-                    terminal_kind, response_event_json, updated_at
+                    terminal_kind, response_event_json, request_method, updated_at
              FROM wake_events WHERE event_id = ?1",
             params![event_id.as_bytes().as_slice()],
             |row| {
@@ -836,7 +897,8 @@ fn load_existing(
                     available_at: row.get(3)?,
                     terminal_kind: row.get(4)?,
                     response_event_json: row.get(5)?,
-                    updated_at: row.get(6)?,
+                    request_method: row.get(6)?,
+                    updated_at: row.get(7)?,
                 })
             },
         )
@@ -870,8 +932,25 @@ fn terminal_from_row(
         event_id: event_id.clone(),
         kind,
         response_event_json: existing.response_event_json,
+        request_method: existing
+            .request_method
+            .as_deref()
+            .map(nwc_method_from_database)
+            .transpose()?,
         completed_at,
     })
+}
+
+fn nwc_method_from_database(method: &str) -> Result<NwcMethod, LedgerError> {
+    match method {
+        "get_info" => Ok(NwcMethod::GetInfo),
+        "get_balance" => Ok(NwcMethod::GetBalance),
+        "make_invoice" => Ok(NwcMethod::MakeInvoice),
+        "pay_invoice" => Ok(NwcMethod::PayInvoice),
+        "lookup_invoice" => Ok(NwcMethod::LookupInvoice),
+        "list_transactions" => Ok(NwcMethod::ListTransactions),
+        _ => Err(LedgerError::CorruptData),
+    }
 }
 
 fn sqlite_timestamp(timestamp: UnixTimestamp) -> Result<i64, LedgerError> {
@@ -1164,6 +1243,7 @@ mod tests {
         };
         assert_eq!(terminal.kind(), TerminalKind::Completed);
         assert_eq!(terminal.response_event_json(), Some("encrypted-response"));
+        assert_eq!(terminal.request_method(), None);
         assert!(!format!("{terminal:?}").contains("encrypted-response"));
     }
 

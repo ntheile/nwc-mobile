@@ -237,6 +237,11 @@ pub enum MobileNotificationHint {
     Processing,
     /// The request completed without requiring user attention.
     Completed,
+    /// A validated NIP-47 method completed without requiring user attention.
+    Request {
+        /// The safe method category used to select static native copy.
+        method: MobileNwcMethod,
+    },
     /// The containing application should be opened to continue safely.
     OpenApplication,
 }
@@ -378,6 +383,10 @@ impl From<NotificationHint> for MobileNotificationHint {
         match hint {
             NotificationHint::Processing => Self::Processing,
             NotificationHint::Completed => Self::Completed,
+            NotificationHint::Request { method } => match MobileNwcMethod::try_from(method) {
+                Ok(method) => Self::Request { method },
+                Err(_) => Self::Completed,
+            },
             NotificationHint::OpenApplication => Self::OpenApplication,
             _ => Self::OpenApplication,
         }
@@ -522,6 +531,20 @@ mod tests {
             MobileWakeDisposition::Rejected {
                 code: MobileRejectionCode::BudgetExceeded,
                 notification: MobileNotificationHint::OpenApplication,
+            }
+        );
+
+        let request = WakeDisposition::Completed {
+            notification: NotificationHint::Request {
+                method: nwc_mobile::NwcMethod::PayInvoice,
+            },
+        };
+        assert_eq!(
+            MobileWakeDisposition::from(request),
+            MobileWakeDisposition::Completed {
+                notification: MobileNotificationHint::Request {
+                    method: MobileNwcMethod::PayInvoice,
+                },
             }
         );
     }
