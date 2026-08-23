@@ -131,7 +131,10 @@ Native entry points can parse provider JSON with `WakeEnvelope`, share an
 `AtomicCancellation`, and use `run_bounded_background_wake` so wallet setup and
 engine execution consume one monotonic OS budget. Bark hosts can call
 `execute_bark_wake` from foreground and background paths without rebuilding the
-engine wiring.
+engine wiring. Swift and Kotlin entry points that are not already running on
+Tokio can wrap that work with `run_on_native_runtime`; one process-wide runtime
+thread owns Tokio timers and I/O instead of requiring every host to construct a
+runtime.
 
 ## Host integration
 
