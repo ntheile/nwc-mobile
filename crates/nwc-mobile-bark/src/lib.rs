@@ -173,13 +173,7 @@ impl WalletBackend for BarkWalletBackend {
     ) -> HostFuture<'a, Result<WalletInfo, HostError>> {
         Box::pin(async move {
             run_with_context(context, async {
-                Ok(
-                    WalletInfo::new(Some(self.service_pubkey.clone()), supported_methods())
-                        .with_notifications([
-                            NwcNotificationType::PaymentReceived,
-                            NwcNotificationType::PaymentSent,
-                        ]),
-                )
+                Ok(wallet_info(self.service_pubkey.clone()))
             })
             .await
         })
@@ -691,6 +685,18 @@ fn supported_methods() -> [NwcMethod; 6] {
     ]
 }
 
+fn supported_notifications() -> [NwcNotificationType; 1] {
+    // Do not advertise payment_received until the mobile host has a reliable
+    // server-side wake source. NWC clients such as Alby Go then poll
+    // lookup_invoice, which wakes the app and refreshes Bark's mailbox.
+    [NwcNotificationType::PaymentSent]
+}
+
+fn wallet_info(service_pubkey: PublicKey) -> WalletInfo {
+    WalletInfo::new(Some(service_pubkey), supported_methods())
+        .with_notifications(supported_notifications())
+}
+
 fn payment_preflight_failure(
     fee: &FeeEstimate,
     spendable: Option<Amount>,
@@ -754,6 +760,19 @@ mod tests {
                 NwcMethod::LookupInvoice,
                 NwcMethod::ListTransactions,
             ]
+        );
+    }
+
+    #[test]
+    fn wallet_info_requires_lookup_polling_for_receive_settlement() {
+        let service_pubkey =
+            PublicKey::from_hex("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+                .expect("service public key");
+        assert_eq!(
+            wallet_info(service_pubkey)
+                .notifications()
+                .collect::<Vec<_>>(),
+            vec![NwcNotificationType::PaymentSent]
         );
     }
 
