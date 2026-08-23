@@ -175,10 +175,7 @@ impl WalletBackend for BarkWalletBackend {
             run_with_context(context, async {
                 Ok(
                     WalletInfo::new(Some(self.service_pubkey.clone()), supported_methods())
-                        .with_notifications([
-                            NwcNotificationType::PaymentReceived,
-                            NwcNotificationType::PaymentSent,
-                        ]),
+                        .with_notifications(supported_notifications()),
                 )
             })
             .await
@@ -691,6 +688,13 @@ fn supported_methods() -> [NwcMethod; 6] {
     ]
 }
 
+fn supported_notifications() -> [NwcNotificationType; 1] {
+    // Do not advertise payment_received until the mobile host has a reliable
+    // server-side wake source. NWC clients such as Alby Go then poll
+    // lookup_invoice, which wakes the app and refreshes Bark's mailbox.
+    [NwcNotificationType::PaymentSent]
+}
+
 fn payment_preflight_failure(
     fee: &FeeEstimate,
     spendable: Option<Amount>,
@@ -754,6 +758,14 @@ mod tests {
                 NwcMethod::LookupInvoice,
                 NwcMethod::ListTransactions,
             ]
+        );
+    }
+
+    #[test]
+    fn receive_settlement_relies_on_lookup_polling() {
+        assert_eq!(
+            supported_notifications(),
+            [NwcNotificationType::PaymentSent]
         );
     }
 
