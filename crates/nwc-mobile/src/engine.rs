@@ -167,7 +167,11 @@ impl<'a> WakeEngine<'a> {
                         &connection,
                         &relay,
                         terminal.response_event_json(),
-                        NotificationHint::Completed,
+                        terminal
+                            .request_method()
+                            .map_or(NotificationHint::Completed, |method| {
+                                NotificationHint::Request { method }
+                            }),
                         &deadline,
                         cancellation,
                     )
@@ -819,7 +823,10 @@ impl<'a> WakeEngine<'a> {
         deadline: &OperationDeadline,
         cancellation: &dyn CancellationSignal,
     ) -> WakeDisposition {
-        let notification = notification_for_method(response.result_type);
+        let request_method = domain_method(response.result_type);
+        let notification = request_method.map_or(NotificationHint::Completed, |method| {
+            NotificationHint::Request { method }
+        });
         let response_json = response.as_json();
         let secret = match self.secrets.load_nwc_secret(connection.id()) {
             Ok(secret) => secret,
@@ -833,13 +840,24 @@ impl<'a> WakeEngine<'a> {
                 Err(_) => return self.reject_claim(lease, RejectionCode::InvalidRequest),
             };
         drop(secret);
-        match self.ledger.complete_event_for_active_connection(
-            lease,
-            connection.id(),
-            connection.revision(),
-            &event_json,
-            self.clock.now(),
-        ) {
+        let completion = match request_method {
+            Some(method) => self.ledger.complete_nwc_event_for_active_connection(
+                lease,
+                connection.id(),
+                connection.revision(),
+                &event_json,
+                method,
+                self.clock.now(),
+            ),
+            None => self.ledger.complete_event_for_active_connection(
+                lease,
+                connection.id(),
+                connection.revision(),
+                &event_json,
+                self.clock.now(),
+            ),
+        };
+        match completion {
             Ok(()) => {}
             Err(error) => return self.completion_failed(lease, error),
         }
@@ -1223,13 +1241,6 @@ const fn protocol_error_message(code: ErrorCode) -> &'static str {
 
 const fn completed(notification: NotificationHint) -> WakeDisposition {
     WakeDisposition::Completed { notification }
-}
-
-fn notification_for_method(method: Method) -> NotificationHint {
-    match domain_method(method) {
-        Some(method) => NotificationHint::Request { method },
-        None => NotificationHint::Completed,
-    }
 }
 
 const fn already_processed() -> WakeDisposition {
@@ -1695,10 +1706,14 @@ mod tests {
         );
         drop(published);
 
-        assert!(matches!(
+        assert_eq!(
             execute(&engine, wake(&event, RELAY, true)),
-            WakeDisposition::Completed { .. }
-        ));
+            WakeDisposition::Completed {
+                notification: NotificationHint::Request {
+                    method: NwcMethod::GetBalance,
+                },
+            }
+        );
         assert_eq!(wallet.balance_calls.load(Ordering::SeqCst), 1);
         assert_eq!(relay.published.lock().expect("published lock").len(), 2);
     }
@@ -1849,10 +1864,14 @@ mod tests {
             .contains(&WakeDiagnosticCode::ResponsePublishFailed));
         assert_eq!(wallet.balance_calls.load(Ordering::SeqCst), 1);
         clock.set(1_000);
-        assert!(matches!(
+        assert_eq!(
             execute(&engine, wake(&event, RELAY, true)),
-            WakeDisposition::Completed { .. }
-        ));
+            WakeDisposition::Completed {
+                notification: NotificationHint::Request {
+                    method: NwcMethod::GetBalance,
+                },
+            }
+        );
         assert_eq!(wallet.balance_calls.load(Ordering::SeqCst), 1);
         assert_eq!(relay.published.lock().expect("published lock").len(), 1);
     }
