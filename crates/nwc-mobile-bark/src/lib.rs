@@ -3,10 +3,9 @@
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeSet;
-use std::future::{poll_fn, Future};
+use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use bark::actions::lightning::pay::{LightningSend, LightningSendState};
@@ -28,7 +27,7 @@ use nwc_mobile_bolt11::{
     created_invoice, exact_sats, parse_invoice, payment_amount_sats, quote_invoice_sats,
     sats_to_msats,
 };
-use nwc_mobile_tokio::{run_with_context, sleep};
+use nwc_mobile_tokio::{run_with_context, sleep, spawn_abort_on_drop};
 use serde_json::Value;
 
 const PAYMENT_SETTLE_TIMEOUT: Duration = Duration::from_secs(22);
@@ -423,24 +422,17 @@ async fn wait_for_payment_terminal(
 /// The full wallet app normally owns this stream. Short-lived native workers such as
 /// an iOS notification service extension must run it explicitly so the server's
 /// payment-finished message can settle the checkpoint and persist the preimage.
-async fn run_with_bark_mailbox<T>(wallet: Wallet, operation: impl Future<Output = T>) -> T {
-    let mut operation = Box::pin(operation);
-    let mut mailbox = Box::pin(async move {
+async fn run_with_bark_mailbox<T>(
+    wallet: Wallet,
+    operation: impl Future<Output = Result<T, HostError>>,
+) -> Result<T, HostError> {
+    let _mailbox = spawn_abort_on_drop(async move {
         let _ = wallet
             .subscribe_process_mailbox_messages(None, Default::default())
             .await;
-    });
-    let mut mailbox_active = true;
-    poll_fn(move |context| {
-        if let Poll::Ready(result) = operation.as_mut().poll(context) {
-            return Poll::Ready(result);
-        }
-        if mailbox_active && mailbox.as_mut().poll(context).is_ready() {
-            mailbox_active = false;
-        }
-        Poll::Pending
     })
-    .await
+    .map_err(|_| host_error(HostErrorKind::Internal))?;
+    operation.await
 }
 
 fn payment_status_from_movement(movement: &Movement) -> Result<PaymentStatus, HostError> {

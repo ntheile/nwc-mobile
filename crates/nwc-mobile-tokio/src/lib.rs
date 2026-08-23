@@ -22,7 +22,8 @@ const NATIVE_RUNTIME_THREAD_NAME: &str = "nwc-mobile-native";
 
 static NATIVE_RUNTIME_HANDLE: OnceLock<Option<tokio::runtime::Handle>> = OnceLock::new();
 
-struct AbortTaskOnDrop<T> {
+/// Tokio task handle that aborts the task when its owner is dropped.
+pub struct AbortTaskOnDrop<T> {
     handle: Option<tokio::task::JoinHandle<T>>,
 }
 
@@ -32,6 +33,22 @@ impl<T> Drop for AbortTaskOnDrop<T> {
             handle.abort();
         }
     }
+}
+
+/// Spawns an independently scheduled Tokio task with scoped abort-on-drop ownership.
+///
+/// Returns an internal host error when called outside a Tokio runtime instead
+/// of allowing `tokio::spawn` to panic.
+pub fn spawn_abort_on_drop<F, T>(operation: F) -> Result<AbortTaskOnDrop<T>, HostError>
+where
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let runtime =
+        tokio::runtime::Handle::try_current().map_err(|_| host_error(HostErrorKind::Internal))?;
+    Ok(AbortTaskOnDrop {
+        handle: Some(runtime.spawn(operation)),
+    })
 }
 
 /// Executes a Tokio-backed future for a native host that has no Tokio runtime.
@@ -291,6 +308,14 @@ mod tests {
         }
     }
 
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
     #[test]
     fn dropping_native_runtime_future_aborts_spawned_operation() {
         let (started_sender, started_receiver) = mpsc::sync_channel(1);
@@ -311,6 +336,22 @@ mod tests {
         dropped_receiver
             .recv_timeout(Duration::from_secs(1))
             .expect("spawned operation aborted");
+    }
+
+    #[tokio::test]
+    async fn dropping_scoped_task_aborts_operation() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task_dropped = dropped.clone();
+        let task = spawn_abort_on_drop(async move {
+            let _drop_flag = DropFlag(task_dropped);
+            std::future::pending::<()>().await;
+        })
+        .expect("runtime task");
+        tokio::task::yield_now().await;
+
+        drop(task);
+        tokio::task::yield_now().await;
+        assert!(dropped.load(Ordering::Acquire));
     }
 
     #[tokio::test]
