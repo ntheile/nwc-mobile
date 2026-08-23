@@ -1932,6 +1932,46 @@ mod tests {
     }
 
     #[test]
+    fn targeted_invoice_worker_reconciles_the_requested_invoice() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        insert_connection(&ledger);
+        let wallet = TestWallet::default();
+        let relay = TestRelay::default();
+        let secrets = TestSecrets::wallet();
+        let clock = FixedClock::new(100);
+        let engine = engine(&ledger, &wallet, &relay, &secrets, &clock);
+        let event = request_event(
+            Request::make_invoice(nip47::MakeInvoiceRequest {
+                amount: 42_000,
+                description: None,
+                description_hash: None,
+                expiry: Some(600),
+            }),
+            100,
+        );
+        assert!(matches!(
+            execute(&engine, wake(&event, RELAY, true)),
+            WakeDisposition::Completed { .. }
+        ));
+
+        let event_id = crate::EventId::from_bytes(*event.id.as_bytes());
+        let report = block_on(
+            crate::InvoiceNotificationWorker::new(&ledger, &wallet, &relay, &secrets, &clock)
+                .run_invoice(
+                    &event_id,
+                    OperationBudget::new(Duration::from_secs(10)).expect("budget"),
+                    &crate::NeverCancelled,
+                ),
+        )
+        .expect("targeted invoice pass");
+
+        assert_eq!(report.inspected, 1);
+        assert_eq!(report.pending, 1);
+        assert_eq!(wallet.lookup_requests.lock().expect("lookup lock").len(), 1);
+    }
+
+    #[test]
     fn lookup_invoice_accepts_alby_dual_selector_request() {
         let database = TestDatabase::new();
         let ledger = WakeLedger::open(&database.path).expect("ledger");

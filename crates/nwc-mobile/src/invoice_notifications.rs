@@ -525,125 +525,159 @@ impl<'a> InvoiceNotificationWorker<'a> {
             if cancellation.is_cancelled() {
                 break;
             }
-            report.inspected += 1;
-            self.ledger
-                .touch_nwc_invoice(invoice.request_event_id(), self.clock.now())
-                .map_err(|_| InvoiceNotificationError::Ledger)?;
-            let event_json = match invoice.notification_event_json() {
-                Some(event) => event.to_owned(),
-                None => {
-                    let Some(context) = deadline.context(cancellation) else {
-                        report.retryable += 1;
-                        break;
-                    };
-                    let transaction = match self
-                        .wallet
-                        .lookup_invoice(
-                            InvoiceLookup::PaymentHash(invoice.payment_hash().clone()),
-                            context,
-                        )
-                        .await
-                    {
-                        Ok(transaction) => transaction,
-                        Err(_) => {
-                            report.retryable += 1;
-                            continue;
-                        }
-                    };
-                    let Some(transaction) = transaction else {
-                        self.defer_or_expire_invoice(&invoice, &mut report)?;
-                        continue;
-                    };
-                    if !matches!(transaction.status, PaymentStatus::Succeeded { .. }) {
-                        self.defer_or_expire_invoice(&invoice, &mut report)?;
-                        continue;
-                    }
-                    let connection = self
-                        .ledger
-                        .load_active_connection(invoice.connection_id())
-                        .map_err(|_| InvoiceNotificationError::Ledger)?
-                        .filter(|connection| {
-                            connection.revision() == invoice.connection_revision()
-                        });
-                    let Some(connection) = connection else {
-                        self.ledger
-                            .expire_nwc_invoice(invoice.request_event_id(), self.clock.now())
-                            .map_err(|_| InvoiceNotificationError::Ledger)?;
-                        report.expired += 1;
-                        continue;
-                    };
-                    let secret = self
-                        .secrets
-                        .load_nwc_secret(connection.id())
-                        .map_err(|_| InvoiceNotificationError::Secret)?;
-                    let proposed = build_payment_received_notification_event(
-                        &connection,
-                        &secret,
-                        &invoice,
-                        &transaction,
-                    )?;
-                    self.ledger
-                        .store_nwc_invoice_notification_event(
-                            invoice.request_event_id(),
-                            &proposed,
-                            transaction.settled_at.unwrap_or_else(|| self.clock.now()),
-                        )
-                        .map_err(|_| InvoiceNotificationError::Ledger)?
-                }
-            };
-            let relays = self
-                .ledger
-                .undelivered_nwc_invoice_relays(invoice.request_event_id())
-                .map_err(|_| InvoiceNotificationError::Ledger)?;
-            if relays.is_empty() {
-                self.ledger
-                    .complete_nwc_invoice_notification(invoice.request_event_id(), self.clock.now())
-                    .map_err(|_| InvoiceNotificationError::Ledger)?;
-                report.delivered += 1;
-                continue;
-            }
-            let mut failed = false;
-            for relay in relays {
-                if cancellation.is_cancelled() {
-                    failed = true;
-                    break;
-                }
-                match self
-                    .relays
-                    .publish_event(
-                        &relay,
-                        &event_json,
-                        match deadline.context(cancellation) {
-                            Some(context) => context,
-                            None => {
-                                failed = true;
-                                break;
-                            }
-                        },
+            self.process_invoice(&invoice, &deadline, cancellation, &mut report)
+                .await?;
+        }
+        Ok(report)
+    }
+
+    /// Reconciles and publishes one exact NWC-created invoice.
+    ///
+    /// Server-scheduled mobile wakes use this path so an older pending invoice
+    /// cannot consume the platform background window ahead of the invoice that
+    /// caused the wake.
+    pub async fn run_invoice(
+        &self,
+        request_event_id: &EventId,
+        budget: OperationBudget,
+        cancellation: &dyn CancellationSignal,
+    ) -> Result<InvoiceNotificationWorkerReport, InvoiceNotificationError> {
+        let deadline = crate::time::OperationDeadline::new(budget);
+        let mut report = InvoiceNotificationWorkerReport::default();
+        let invoice = self
+            .ledger
+            .pending_nwc_invoice(request_event_id)
+            .map_err(|_| InvoiceNotificationError::Ledger)?;
+        if let Some(invoice) = invoice {
+            self.process_invoice(&invoice, &deadline, cancellation, &mut report)
+                .await?;
+        }
+        Ok(report)
+    }
+
+    async fn process_invoice(
+        &self,
+        invoice: &TrackedNwcInvoice,
+        deadline: &crate::time::OperationDeadline,
+        cancellation: &dyn CancellationSignal,
+        report: &mut InvoiceNotificationWorkerReport,
+    ) -> Result<(), InvoiceNotificationError> {
+        report.inspected += 1;
+        self.ledger
+            .touch_nwc_invoice(invoice.request_event_id(), self.clock.now())
+            .map_err(|_| InvoiceNotificationError::Ledger)?;
+        let event_json = match invoice.notification_event_json() {
+            Some(event) => event.to_owned(),
+            None => {
+                let Some(context) = deadline.context(cancellation) else {
+                    report.retryable += 1;
+                    return Ok(());
+                };
+                let transaction = match self
+                    .wallet
+                    .lookup_invoice(
+                        InvoiceLookup::PaymentHash(invoice.payment_hash().clone()),
+                        context,
                     )
                     .await
                 {
-                    Ok(()) => self
-                        .ledger
-                        .acknowledge_nwc_invoice_relay(
-                            invoice.request_event_id(),
-                            &relay,
-                            self.clock.now(),
-                        )
-                        .map_err(|_| InvoiceNotificationError::Ledger)?,
-                    Err(_) => failed = true,
+                    Ok(transaction) => transaction,
+                    Err(_) => {
+                        report.retryable += 1;
+                        return Ok(());
+                    }
+                };
+                let Some(transaction) = transaction else {
+                    self.defer_or_expire_invoice(invoice, report)?;
+                    return Ok(());
+                };
+                if !matches!(transaction.status, PaymentStatus::Succeeded { .. }) {
+                    self.defer_or_expire_invoice(invoice, report)?;
+                    return Ok(());
                 }
-            }
-            if failed {
-                report.retryable += 1;
-            } else {
+                let connection = self
+                    .ledger
+                    .load_active_connection(invoice.connection_id())
+                    .map_err(|_| InvoiceNotificationError::Ledger)?
+                    .filter(|connection| connection.revision() == invoice.connection_revision());
+                let Some(connection) = connection else {
+                    self.ledger
+                        .expire_nwc_invoice(invoice.request_event_id(), self.clock.now())
+                        .map_err(|_| InvoiceNotificationError::Ledger)?;
+                    report.expired += 1;
+                    return Ok(());
+                };
+                let secret = self
+                    .secrets
+                    .load_nwc_secret(connection.id())
+                    .map_err(|_| InvoiceNotificationError::Secret)?;
+                let proposed = build_payment_received_notification_event(
+                    &connection,
+                    &secret,
+                    invoice,
+                    &transaction,
+                )?;
                 self.ledger
-                    .complete_nwc_invoice_notification(invoice.request_event_id(), self.clock.now())
-                    .map_err(|_| InvoiceNotificationError::Ledger)?;
-                report.delivered += 1;
+                    .store_nwc_invoice_notification_event(
+                        invoice.request_event_id(),
+                        &proposed,
+                        transaction.settled_at.unwrap_or_else(|| self.clock.now()),
+                    )
+                    .map_err(|_| InvoiceNotificationError::Ledger)?
+            }
+        };
+        let relays = self
+            .ledger
+            .undelivered_nwc_invoice_relays(invoice.request_event_id())
+            .map_err(|_| InvoiceNotificationError::Ledger)?;
+        if relays.is_empty() {
+            self.ledger
+                .complete_nwc_invoice_notification(invoice.request_event_id(), self.clock.now())
+                .map_err(|_| InvoiceNotificationError::Ledger)?;
+            report.delivered += 1;
+            return Ok(());
+        }
+        let mut failed = false;
+        for relay in relays {
+            if cancellation.is_cancelled() {
+                failed = true;
+                break;
+            }
+            match self
+                .relays
+                .publish_event(
+                    &relay,
+                    &event_json,
+                    match deadline.context(cancellation) {
+                        Some(context) => context,
+                        None => {
+                            failed = true;
+                            break;
+                        }
+                    },
+                )
+                .await
+            {
+                Ok(()) => self
+                    .ledger
+                    .acknowledge_nwc_invoice_relay(
+                        invoice.request_event_id(),
+                        &relay,
+                        self.clock.now(),
+                    )
+                    .map_err(|_| InvoiceNotificationError::Ledger)?,
+                Err(_) => failed = true,
             }
         }
-        Ok(report)
+        if failed {
+            report.retryable += 1;
+        } else {
+            self.ledger
+                .complete_nwc_invoice_notification(invoice.request_event_id(), self.clock.now())
+                .map_err(|_| InvoiceNotificationError::Ledger)?;
+            report.delivered += 1;
+        }
+        Ok(())
     }
 
     fn defer_or_expire_invoice(
@@ -1209,6 +1243,26 @@ impl WakeLedger {
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into);
         invoices
+    }
+
+    pub(crate) fn pending_nwc_invoice(
+        &self,
+        event_id: &EventId,
+    ) -> Result<Option<TrackedNwcInvoice>, LedgerError> {
+        let connection = self.lock_connection()?;
+        connection
+            .query_row(
+                "SELECT request_event_id, payment_hash, connection_id, connection_revision,
+                        invoice, description, amount_msat, created_at, expires_at,
+                        notification_event_json
+                 FROM nwc_created_invoices
+                 WHERE request_event_id = ?1 AND completed_at IS NULL
+                 LIMIT 1",
+                params![event_id.as_bytes().as_slice()],
+                decode_invoice,
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub(crate) fn touch_nwc_invoice(

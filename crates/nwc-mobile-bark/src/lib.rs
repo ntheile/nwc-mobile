@@ -230,6 +230,28 @@ pub async fn run_bark_notification_worker(
         .await
 }
 
+/// Reconciles one exact Bark invoice and publishes its NIP-47 notification.
+///
+/// This is the preferred entry point for a server-scheduled mobile settlement
+/// wake because it does not replay the original NIP-47 request and it cannot be
+/// delayed behind unrelated pending invoices.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_bark_invoice_notification_worker(
+    ledger: &WakeLedger,
+    wallet: Wallet,
+    wallet_service_pubkey: PublicKey,
+    request_event_id: &EventId,
+    relays: &dyn RelayTransport,
+    secrets: &dyn SecretProvider,
+    budget: OperationBudget,
+    cancellation: &dyn CancellationSignal,
+) -> Result<InvoiceNotificationWorkerReport, InvoiceNotificationError> {
+    let wallet = BarkWalletBackend::new(wallet, wallet_service_pubkey);
+    InvoiceNotificationWorker::new(ledger, &wallet, relays, secrets, &SystemClock)
+        .run_invoice(request_event_id, budget, cancellation)
+        .await
+}
+
 impl WalletBackend for BarkWalletBackend {
     fn get_info<'a>(
         &'a self,
