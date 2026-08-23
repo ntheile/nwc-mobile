@@ -4,21 +4,22 @@
 
 use std::collections::BTreeSet;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use bark::actions::lightning::pay::{LightningSend, LightningSendState};
 use bark::actions::lightning::receive::{LightningReceive, LightningReceiveState};
 use bark::ark::lightning::PaymentHash as BarkPaymentHash;
 use bark::movement::{Movement, MovementStatus};
 use bark::persist::models::SettledLightningReceive;
-use bark::Wallet;
+use bark::{FeeEstimate, Wallet};
 use bitcoin::Amount;
 use nwc_mobile::{
     AmountMsat, CancellationSignal, CreatedInvoice, HostError, HostErrorKind, HostFuture,
     InvoiceLookup, ListTransactionsRequest, MakeInvoiceRequest, NwcMethod, OperationBudget,
     OperationContext, PayInvoiceRequest, PaymentFailure, PaymentHash, PaymentPreimage,
     PaymentQuote, PaymentStatus, PublicKey, RelayTransport, SecretProvider, SystemClock,
-    TransactionDirection, UnixTimestamp, WakeDisposition, WakeEngine, WakeInput, WakeLedger,
-    WakePolicy, WalletBackend, WalletInfo, WalletTransaction,
+    TransactionDirection, UnixTimestamp, WakeDiagnosticCode, WakeDiagnosticSink, WakeDisposition,
+    WakeEngine, WakeInput, WakeLedger, WakePolicy, WalletBackend, WalletInfo, WalletTransaction,
 };
 use nwc_mobile_bolt11::{
     created_invoice, exact_sats, parse_invoice, payment_amount_sats, quote_invoice_sats,
@@ -32,6 +33,7 @@ use serde_json::Value;
 pub struct BarkWalletBackend {
     wallet: Wallet,
     service_pubkey: PublicKey,
+    diagnostics: Option<Arc<dyn WakeDiagnosticSink>>,
 }
 
 impl BarkWalletBackend {
@@ -41,6 +43,26 @@ impl BarkWalletBackend {
         Self {
             wallet,
             service_pubkey,
+            diagnostics: None,
+        }
+    }
+    /// Creates an adapter that emits bounded, non-secret execution codes.
+    #[must_use]
+    pub fn with_diagnostics(
+        wallet: Wallet,
+        service_pubkey: PublicKey,
+        diagnostics: Arc<dyn WakeDiagnosticSink>,
+    ) -> Self {
+        Self {
+            wallet,
+            service_pubkey,
+            diagnostics: Some(diagnostics),
+        }
+    }
+
+    fn record_diagnostic(&self, code: WakeDiagnosticCode) {
+        if let Some(diagnostics) = self.diagnostics.as_deref() {
+            diagnostics.record(code);
         }
     }
 }
@@ -69,6 +91,36 @@ pub async fn execute_bark_wake(
         &SystemClock,
         WakePolicy::default(),
     )
+    .execute(input, budget, cancellation)
+    .await
+}
+
+/// Executes one wake while reporting bounded, non-secret diagnostic codes.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_bark_wake_with_diagnostics(
+    ledger: &WakeLedger,
+    wallet: Wallet,
+    relays: &dyn RelayTransport,
+    secrets: &dyn SecretProvider,
+    input: WakeInput,
+    budget: OperationBudget,
+    cancellation: &dyn CancellationSignal,
+    diagnostics: Arc<dyn WakeDiagnosticSink>,
+) -> WakeDisposition {
+    let wallet = BarkWalletBackend::with_diagnostics(
+        wallet,
+        input.wallet_service_pubkey().clone(),
+        Arc::clone(&diagnostics),
+    );
+    WakeEngine::new(
+        ledger,
+        &wallet,
+        relays,
+        secrets,
+        &SystemClock,
+        WakePolicy::default(),
+    )
+    .with_diagnostics(diagnostics.as_ref())
     .execute(input, budget, cancellation)
     .await
 }
@@ -174,11 +226,31 @@ impl WalletBackend for BarkWalletBackend {
                     .wallet
                     .estimate_lightning_send_fee(Amount::from_sat(amount_sat))
                     .await
-                    .map_err(|_| host_error(HostErrorKind::Internal))?;
-                if fee.fee.to_sat() > request.maximum_fee().as_sat() {
-                    return Ok(PaymentStatus::Failed {
-                        reason: PaymentFailure::Other,
-                    });
+                    .map_err(|_| {
+                        self.record_diagnostic(WakeDiagnosticCode::PaymentBackendFailed);
+                        host_error(HostErrorKind::Internal)
+                    })?;
+                let spendable = if fee.vtxos_spent.is_empty() {
+                    Some(
+                        self.wallet
+                            .balance()
+                            .await
+                            .map_err(|_| {
+                                self.record_diagnostic(WakeDiagnosticCode::PaymentBackendFailed);
+                                host_error(HostErrorKind::Internal)
+                            })?
+                            .spendable,
+                    )
+                } else {
+                    None
+                };
+                if let Some((reason, diagnostic)) = payment_preflight_failure(
+                    &fee,
+                    spendable,
+                    Amount::from_sat(request.maximum_fee().as_sat()),
+                ) {
+                    self.record_diagnostic(diagnostic);
+                    return Ok(PaymentStatus::Failed { reason });
                 }
 
                 // Bark persists sends by payment hash before network execution, so
@@ -192,7 +264,10 @@ impl WalletBackend for BarkWalletBackend {
                 self.wallet
                     .pay_lightning_invoice(invoice, user_amount, false)
                     .await
-                    .map_err(|_| host_error(HostErrorKind::Internal))?;
+                    .map_err(|_| {
+                        self.record_diagnostic(WakeDiagnosticCode::PaymentBackendFailed);
+                        host_error(HostErrorKind::Internal)
+                    })?;
                 payment_status(&self.wallet, payment_hash).await
             })
             .await
@@ -511,6 +586,26 @@ fn supported_methods() -> [NwcMethod; 6] {
     ]
 }
 
+fn payment_preflight_failure(
+    fee: &FeeEstimate,
+    spendable: Option<Amount>,
+    maximum_fee: Amount,
+) -> Option<(PaymentFailure, WakeDiagnosticCode)> {
+    if spendable.is_some_and(|balance| balance < fee.gross_amount) {
+        return Some((
+            PaymentFailure::InsufficientFunds,
+            WakeDiagnosticCode::PaymentInsufficientFunds,
+        ));
+    }
+    if fee.fee > maximum_fee {
+        return Some((
+            PaymentFailure::Other,
+            WakeDiagnosticCode::PaymentFeeLimitExceeded,
+        ));
+    }
+    None
+}
+
 const fn host_error(kind: HostErrorKind) -> HostError {
     HostError::new(kind)
 }
@@ -554,6 +649,47 @@ mod tests {
                 NwcMethod::LookupInvoice,
                 NwcMethod::ListTransactions,
             ]
+        );
+    }
+
+    #[test]
+    fn payment_preflight_distinguishes_balance_and_fee_failures() {
+        let fee = FeeEstimate::new(
+            Amount::from_sat(610),
+            Amount::from_sat(600),
+            Amount::from_sat(10),
+            Vec::new(),
+        );
+
+        assert_eq!(
+            payment_preflight_failure(
+                &fee,
+                Some(Amount::from_sat(500)),
+                Amount::from_sat(500),
+            ),
+            Some((
+                PaymentFailure::InsufficientFunds,
+                WakeDiagnosticCode::PaymentInsufficientFunds,
+            ))
+        );
+        assert_eq!(
+            payment_preflight_failure(
+                &fee,
+                Some(Amount::from_sat(1_000)),
+                Amount::from_sat(500),
+            ),
+            Some((
+                PaymentFailure::Other,
+                WakeDiagnosticCode::PaymentFeeLimitExceeded,
+            ))
+        );
+        assert_eq!(
+            payment_preflight_failure(
+                &fee,
+                Some(Amount::from_sat(1_000)),
+                Amount::from_sat(600),
+            ),
+            None
         );
     }
 
