@@ -63,7 +63,7 @@ final class NwcNotificationServiceAdapterTests: XCTestCase {
     XCTAssertEqual(content.threadIdentifier, "nwc")
     XCTAssertNil(content.badge)
     XCTAssertNil(content.sound)
-    XCTAssertEqual(content.interruptionLevel, .active)
+    XCTAssertEqual(content.interruptionLevel, .passive)
     XCTAssertEqual(content.relevanceScore, 0)
     XCTAssertNil(content.targetContentIdentifier)
     XCTAssertEqual(content.summaryArgument, "")
@@ -102,6 +102,7 @@ final class NwcNotificationServiceAdapterTests: XCTestCase {
 
     XCTAssertEqual(result.value?.title, "Open wallet")
     XCTAssertEqual(result.value?.body, "Open the wallet to continue safely.")
+    XCTAssertEqual(result.value?.interruptionLevel, .active)
     XCTAssertTrue(result.value?.userInfo.isEmpty == true)
   }
 
@@ -150,6 +151,7 @@ final class NwcNotificationServiceAdapterTests: XCTestCase {
     XCTAssertEqual(content.title, "Open wallet")
     XCTAssertEqual(content.body, "Open the wallet to continue safely.")
     XCTAssertEqual(content.categoryIdentifier, "")
+    XCTAssertEqual(content.interruptionLevel, .active)
     XCTAssertEqual(content.userInfo[NwcWakePayloadKey.eventID] as? String, "event-id")
   }
 
