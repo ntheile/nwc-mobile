@@ -1869,6 +1869,45 @@ mod tests {
     }
 
     #[test]
+    fn pending_invoice_batch_rotates_after_each_check() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        let connection = insert_connection(&ledger);
+        let relay = SecureRelayUrl::parse(RELAY).expect("relay");
+
+        for byte in 1_u8..=21 {
+            let invoice = crate::TrackedNwcInvoice::new(
+                crate::EventId::from_bytes([byte; 32]),
+                PaymentHash::from_bytes([byte; 32]),
+                connection.id().clone(),
+                connection.revision(),
+                format!("lnbc-{byte}"),
+                None,
+                AmountMsat::from_msat(1_000),
+                UnixTimestamp::from_secs(100),
+                UnixTimestamp::from_secs(700),
+            );
+            ledger
+                .record_nwc_invoice(&invoice, std::slice::from_ref(&relay))
+                .expect("record invoice");
+        }
+
+        let first_batch = ledger.pending_nwc_invoices(20).expect("first batch");
+        assert_eq!(first_batch.len(), 20);
+        for invoice in &first_batch {
+            ledger
+                .touch_nwc_invoice(invoice.request_event_id(), UnixTimestamp::from_secs(100))
+                .expect("touch invoice");
+        }
+
+        let next_batch = ledger.pending_nwc_invoices(20).expect("next batch");
+        assert_eq!(
+            next_batch[0].request_event_id(),
+            &crate::EventId::from_bytes([21_u8; 32])
+        );
+    }
+
+    #[test]
     fn make_invoice_request_bounds_fail_closed() {
         assert!(parse_make_invoice_request(nip47::MakeInvoiceRequest {
             amount: 0,

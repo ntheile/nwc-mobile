@@ -4,15 +4,16 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Component, Path};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nwc_mobile::{
     ActiveConnection, ApprovedApplicationConnection, BudgetInterval, ConnectionDraft,
     ConnectionRevision, CreatedWalletConnection, FeePolicy, HostConnectionAuthorization,
-    LedgerError, LegacyHostConnection, MobileServiceError, NwaApprovalError, NwcEncryption,
-    NwcMethod, NwcMobileService, OperationBudget, PaymentAccountingError, PaymentReconciler,
-    PaymentReconciliationError, RegistryError, SecureWakeServerUrl, StoredConnection, SystemClock,
-    WakeEngine, WakeRegistrationError, WakeRegistrationWorker, WakeRegistrationWorkerError,
+    InvoiceNotificationWorker, LedgerError, LegacyHostConnection, MobileServiceError,
+    NwaApprovalError, NwcEncryption, NwcMethod, NwcMobileService, OperationBudget,
+    PaymentAccountingError, PaymentReconciler, PaymentReconciliationError, RegistryError,
+    SecureWakeServerUrl, StoredConnection, SystemClock, WakeEngine, WakeRegistrationError,
+    WakeRegistrationWorker, WakeRegistrationWorkerError,
 };
 
 use crate::host_bridge::{MobileHostBridge, MobileWakeRegistrationBridge};
@@ -805,6 +806,7 @@ impl MobileNwcEngine {
     ) -> Result<MobileWakeDisposition, MobileEngineError> {
         let budget = OperationBudget::new(Duration::from_millis(execution_milliseconds))
             .map_err(|_| MobileEngineError::InvalidArgument)?;
+        let started = Instant::now();
         let host = MobileHostBridge::new(
             self.wallet.clone(),
             self.relays.clone(),
@@ -820,10 +822,17 @@ impl MobileNwcEngine {
             &clock,
             Default::default(),
         );
-        Ok(engine
+        let disposition = engine
             .execute(wake.core_input(), budget, cancellation.as_ref())
-            .await
-            .into())
+            .await;
+        let remaining = budget.timeout().saturating_sub(started.elapsed());
+        if let Ok(notification_budget) = OperationBudget::new(remaining) {
+            let _ =
+                InvoiceNotificationWorker::new(self.service.ledger(), &host, &host, &host, &clock)
+                    .run(notification_budget, cancellation.as_ref())
+                    .await;
+        }
+        Ok(disposition.into())
     }
 
     /// Reconciles already-reserved payments without initiating new payments.

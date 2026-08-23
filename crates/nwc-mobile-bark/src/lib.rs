@@ -89,6 +89,7 @@ pub async fn execute_bark_wake(
     budget: OperationBudget,
     cancellation: &dyn CancellationSignal,
 ) -> WakeDisposition {
+    let started = Instant::now();
     let wallet = BarkWalletBackend::new(wallet, input.wallet_service_pubkey().clone());
     let disposition = WakeEngine::new(
         ledger,
@@ -100,9 +101,13 @@ pub async fn execute_bark_wake(
     )
     .execute(input, budget, cancellation)
     .await;
-    let _ = InvoiceNotificationWorker::new(ledger, &wallet, relays, secrets, &SystemClock)
-        .run(budget, cancellation)
-        .await;
+    if let Ok(notification_budget) =
+        OperationBudget::new(budget.timeout().saturating_sub(started.elapsed()))
+    {
+        let _ = InvoiceNotificationWorker::new(ledger, &wallet, relays, secrets, &SystemClock)
+            .run(notification_budget, cancellation)
+            .await;
+    }
     disposition
 }
 
@@ -118,6 +123,7 @@ pub async fn execute_bark_wake_with_diagnostics(
     cancellation: &dyn CancellationSignal,
     diagnostics: Arc<dyn WakeDiagnosticSink>,
 ) -> WakeDisposition {
+    let started = Instant::now();
     let wallet = BarkWalletBackend::with_diagnostics(
         wallet,
         input.wallet_service_pubkey().clone(),
@@ -134,9 +140,13 @@ pub async fn execute_bark_wake_with_diagnostics(
     .with_diagnostics(diagnostics.as_ref())
     .execute(input, budget, cancellation)
     .await;
-    let _ = InvoiceNotificationWorker::new(ledger, &wallet, relays, secrets, &SystemClock)
-        .run(budget, cancellation)
-        .await;
+    if let Ok(notification_budget) =
+        OperationBudget::new(budget.timeout().saturating_sub(started.elapsed()))
+    {
+        let _ = InvoiceNotificationWorker::new(ledger, &wallet, relays, secrets, &SystemClock)
+            .run(notification_budget, cancellation)
+            .await;
+    }
     disposition
 }
 
