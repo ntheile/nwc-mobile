@@ -133,6 +133,14 @@ where
     unreachable!("at least one retry attempt is always executed")
 }
 
+/// Suspends the current Tokio task for a monotonic duration.
+///
+/// Runtime-backed adapters use this instead of depending on Tokio directly for
+/// bounded polling intervals.
+pub async fn sleep(duration: Duration) {
+    tokio::time::sleep(duration).await;
+}
+
 /// Monotonic execution window shared by wallet preparation and the wake engine.
 #[derive(Clone, Copy, Debug)]
 pub struct BackgroundWakeWindow {
