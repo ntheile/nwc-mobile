@@ -328,7 +328,7 @@ impl WalletBackend for BarkWalletBackend {
             let payment_hash = lookup_payment_hash(&request)?;
             run_with_context(
                 context,
-                sync_then_lookup_transaction(&self.wallet, payment_hash),
+                reconcile_then_lookup_transaction(&self.wallet, payment_hash),
             )
             .await
         })
@@ -523,15 +523,36 @@ async fn lookup_transaction(
     }
 }
 
-async fn sync_then_lookup_transaction(
+async fn reconcile_then_lookup_transaction(
     wallet: &Wallet,
     payment_hash: BarkPaymentHash,
 ) -> Result<Option<WalletTransaction>, HostError> {
-    // `lightning_receive_state` only reads Bark's local database. A killed or
-    // suspended mobile host must first drain the durable Ark mailbox so an
-    // accepted Lightning receive is claimed and persisted before we report its
-    // NIP-47 state. The caller's OperationContext bounds the entire refresh.
-    wallet.sync().await;
+    // A settled receive is already durable and needs no network refresh. This
+    // fast path also lets the notification worker publish payment_received in
+    // the same NSE wake without repeating the mailbox round trip.
+    if let Ok(receive @ LightningReceiveState::Settled(_)) =
+        wallet.lightning_receive_state(payment_hash).await
+    {
+        return Ok(transaction_from_receive_state(&receive));
+    }
+
+    // Bark's broad `sync()` drives mailbox ingestion and pending receives
+    // concurrently. For a newly paid invoice, the receive pass can therefore
+    // inspect AwaitingPayment before the mailbox pass records the incoming
+    // HTLC, leaving lookup_invoice pending until some later wallet lifecycle
+    // work happens. A killed or suspended mobile host has no such lifecycle.
+    // Drain the mailbox first, then explicitly drive this exact invoice. The
+    // caller's OperationContext bounds both operations to the native wake.
+    let _ = wallet.sync_mailbox().await;
+    if let Ok(receive) = wallet
+        .try_claim_lightning_receive(payment_hash, false)
+        .await
+    {
+        return Ok(transaction_from_receive_state(&receive));
+    }
+
+    // Preserve outgoing and history-only lookup behavior, and return the last
+    // durable incoming state when a transient claim attempt could not advance.
     lookup_transaction(wallet, payment_hash).await
 }
 
