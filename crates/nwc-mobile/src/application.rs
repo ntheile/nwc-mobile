@@ -475,6 +475,7 @@ impl NwcMobileService {
         request: WalletConnectionRequest,
         secrets: &dyn ClientSecretStore,
     ) -> Result<CreatedWalletConnection, ApplicationWorkflowError> {
+        diagnostic_methods("connection_input", request.methods.iter().copied());
         let client_keys = Keys::generate();
         let client_pubkey_hex = client_keys.public_key().to_hex();
         let client_secret = Zeroizing::new(client_keys.secret_key().to_secret_hex());
@@ -493,6 +494,7 @@ impl NwcMobileService {
             request.encryption,
             request.expires_at,
         )?;
+        diagnostic_methods("connection_normalized", draft.methods().iter().copied());
         let uri = build_connection_uri(
             draft.wallet_service_pubkey_hex(),
             draft.authorization.relay_urls(),
@@ -510,6 +512,7 @@ impl NwcMobileService {
                 return Err(error.into());
             }
         };
+        diagnostic_methods("connection_persisted", connection.policy().methods());
         Ok(CreatedWalletConnection {
             draft,
             connection,
@@ -863,6 +866,19 @@ fn normalize_methods(methods: impl IntoIterator<Item = NwcMethod>) -> Vec<NwcMet
     .filter(|method| requested.contains(method))
     .collect()
 }
+
+#[cfg(feature = "diagnostics")]
+fn diagnostic_methods(stage: &str, methods: impl IntoIterator<Item = NwcMethod>) {
+    let methods = methods
+        .into_iter()
+        .map(NwcMethod::as_str)
+        .collect::<Vec<_>>()
+        .join(",");
+    eprintln!("nwc-mobile diagnostic stage={stage} methods=[{methods}]");
+}
+
+#[cfg(not(feature = "diagnostics"))]
+fn diagnostic_methods(_stage: &str, _methods: impl IntoIterator<Item = NwcMethod>) {}
 
 impl From<RegistryError> for ApplicationError {
     fn from(_: RegistryError) -> Self {

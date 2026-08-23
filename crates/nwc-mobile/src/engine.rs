@@ -151,6 +151,7 @@ impl<'a> WakeEngine<'a> {
             Ok(ClaimOutcome::Acquired(lease)) => lease,
             Ok(ClaimOutcome::InProgress { .. }) => return already_processed(),
             Ok(ClaimOutcome::Terminal(terminal)) => {
+                diagnostic_stage("terminal_response_replayed");
                 return self
                     .republish_terminal(
                         &connection,
@@ -189,7 +190,18 @@ impl<'a> WakeEngine<'a> {
             }
         };
 
+        diagnostic_request(
+            "request_parsed",
+            request.method,
+            connection.policy().methods(),
+        );
+
         let Some(method) = domain_method(request.method) else {
+            diagnostic_request(
+                "request_not_implemented",
+                request.method,
+                connection.policy().methods(),
+            );
             return self
                 .respond_with_error(
                     &lease,
@@ -205,6 +217,11 @@ impl<'a> WakeEngine<'a> {
                 .await;
         };
         if !connection.policy().allows(method) {
+            diagnostic_request(
+                "request_not_authorized",
+                request.method,
+                connection.policy().methods(),
+            );
             return self
                 .respond_with_error(
                     &lease,
@@ -236,6 +253,11 @@ impl<'a> WakeEngine<'a> {
                 .await;
         }
         if !is_direct_request(method) {
+            diagnostic_request(
+                "request_not_directly_supported",
+                request.method,
+                connection.policy().methods(),
+            );
             return self
                 .respond_with_error(
                     &lease,
@@ -627,13 +649,20 @@ impl<'a> WakeEngine<'a> {
         match request.params {
             RequestParams::GetInfo => {
                 let info = self.wallet.get_info(context).await?;
-                let methods = info
-                    .methods()
+                let backend_methods = info.methods().collect::<Vec<_>>();
+                let methods = backend_methods
+                    .iter()
+                    .copied()
                     .filter(|method| {
                         connection.policy().allows(*method) && is_engine_supported(*method)
                     })
                     .map(protocol_method)
-                    .collect();
+                    .collect::<Vec<_>>();
+                diagnostic_get_info(
+                    connection.policy().methods(),
+                    backend_methods.iter().copied(),
+                    methods.iter().copied(),
+                );
                 Ok(DirectRequestResult {
                     method: Method::GetInfo,
                     result: ResponseResult::GetInfo(GetInfoResponse {
@@ -658,9 +687,11 @@ impl<'a> WakeEngine<'a> {
                 })
             }
             RequestParams::MakeInvoice(request) => {
+                diagnostic_stage("make_invoice_dispatch_started");
                 let (request, description) =
                     parse_make_invoice_request(request).map_err(HostError::new)?;
                 let created = self.wallet.make_invoice(request, context).await?;
+                diagnostic_stage("make_invoice_dispatch_completed");
                 Ok(DirectRequestResult {
                     method: Method::MakeInvoice,
                     result: ResponseResult::MakeInvoice(MakeInvoiceResponse {
@@ -1022,6 +1053,69 @@ fn is_direct_request(method: NwcMethod) -> bool {
 
 fn is_engine_supported(method: NwcMethod) -> bool {
     method == NwcMethod::PayInvoice || is_direct_request(method)
+}
+
+#[cfg(feature = "diagnostics")]
+fn diagnostic_stage(stage: &str) {
+    eprintln!("nwc-mobile diagnostic stage={stage}");
+}
+
+#[cfg(not(feature = "diagnostics"))]
+fn diagnostic_stage(_stage: &str) {}
+
+#[cfg(feature = "diagnostics")]
+fn diagnostic_request(
+    stage: &str,
+    method: Method,
+    policy_methods: impl IntoIterator<Item = NwcMethod>,
+) {
+    let policy_methods = diagnostic_method_names(policy_methods);
+    eprintln!(
+        "nwc-mobile diagnostic stage={stage} method={method} policy_methods=[{policy_methods}]"
+    );
+}
+
+#[cfg(not(feature = "diagnostics"))]
+fn diagnostic_request(
+    _stage: &str,
+    _method: Method,
+    _policy_methods: impl IntoIterator<Item = NwcMethod>,
+) {
+}
+
+#[cfg(feature = "diagnostics")]
+fn diagnostic_get_info(
+    policy_methods: impl IntoIterator<Item = NwcMethod>,
+    backend_methods: impl IntoIterator<Item = NwcMethod>,
+    advertised_methods: impl IntoIterator<Item = Method>,
+) {
+    let policy_methods = diagnostic_method_names(policy_methods);
+    let backend_methods = diagnostic_method_names(backend_methods);
+    let advertised_methods = advertised_methods
+        .into_iter()
+        .map(|method| method.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    eprintln!(
+        "nwc-mobile diagnostic stage=get_info_response policy_methods=[{policy_methods}] backend_methods=[{backend_methods}] advertised_methods=[{advertised_methods}]"
+    );
+}
+
+#[cfg(not(feature = "diagnostics"))]
+fn diagnostic_get_info(
+    _policy_methods: impl IntoIterator<Item = NwcMethod>,
+    _backend_methods: impl IntoIterator<Item = NwcMethod>,
+    _advertised_methods: impl IntoIterator<Item = Method>,
+) {
+}
+
+#[cfg(feature = "diagnostics")]
+fn diagnostic_method_names(methods: impl IntoIterator<Item = NwcMethod>) -> String {
+    methods
+        .into_iter()
+        .map(NwcMethod::as_str)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn event_rejection(error: crate::NostrEventError) -> RejectionCode {

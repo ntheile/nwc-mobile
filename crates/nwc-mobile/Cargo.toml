@@ -11,6 +11,11 @@ keywords = ["bitcoin", "lightning", "nostr", "nwc", "mobile"]
 categories = ["cryptography::cryptocurrencies"]
 publish = false
 
+[features]
+default = []
+# Emits bounded, non-secret method and dispatch diagnostics for host applications.
+diagnostics = []
+
 [dependencies]
 # Pin optional transitive packages whose latest manifests exceed the workspace
 # MSRV; Cargo includes them when resolving the complete feature graph.
