@@ -349,8 +349,14 @@ async fn payment_status(
     wallet: &Wallet,
     payment_hash: BarkPaymentHash,
 ) -> Result<PaymentStatus, HostError> {
+    // A Bark lightning send is a durable state machine. Merely reading its
+    // checkpoint leaves `PaymentInitiated` parked forever when the host has no
+    // long-lived wallet sync loop, as is the case inside an iOS notification
+    // service extension. Drive it until a terminal result; the surrounding
+    // `OperationContext` cancels this future at the host's background deadline,
+    // while Bark persists every parked checkpoint for the next wake.
     let state = wallet
-        .lightning_send_state(payment_hash)
+        .check_lightning_payment(payment_hash, true)
         .await
         .map_err(|_| host_error(HostErrorKind::Internal))?;
     match state {
