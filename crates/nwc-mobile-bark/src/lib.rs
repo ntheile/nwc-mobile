@@ -16,14 +16,14 @@ use bark::persist::models::SettledLightningReceive;
 use bark::{FeeEstimate, Wallet};
 use bitcoin::Amount;
 use nwc_mobile::{
-    AmountMsat, CancellationSignal, CreatedInvoice, HostError, HostErrorKind, HostFuture,
+    AmountMsat, CancellationSignal, CreatedInvoice, EventId, HostError, HostErrorKind, HostFuture,
     InvoiceLookup, InvoiceNotificationError, InvoiceNotificationWorker,
-    InvoiceNotificationWorkerReport, ListTransactionsRequest, MakeInvoiceRequest, NwcMethod,
-    NwcNotificationType, OperationBudget, OperationContext, PayInvoiceRequest, PaymentFailure,
-    PaymentHash, PaymentPreimage, PaymentQuote, PaymentStatus, PublicKey, RelayTransport,
-    SecretProvider, SystemClock, TransactionDirection, UnixTimestamp, WakeDiagnosticCode,
-    WakeDiagnosticSink, WakeDisposition, WakeEngine, WakeInput, WakeLedger, WakePolicy,
-    WalletBackend, WalletInfo, WalletTransaction,
+    InvoiceNotificationWorkerReport, ListTransactionsRequest, MakeInvoiceRequest, NotificationHint,
+    NwcMethod, NwcNotificationType, OperationBudget, OperationContext, PayInvoiceRequest,
+    PaymentFailure, PaymentHash, PaymentPreimage, PaymentQuote, PaymentStatus, PublicKey,
+    RelayTransport, SecretProvider, SystemClock, TransactionDirection, UnixTimestamp,
+    WakeDiagnosticCode, WakeDiagnosticSink, WakeDisposition, WakeEngine, WakeInput, WakeLedger,
+    WakePolicy, WalletBackend, WalletInfo, WalletTransaction,
 };
 use nwc_mobile_bolt11::{
     created_invoice, exact_sats, parse_invoice, payment_amount_sats, quote_invoice_sats,
@@ -34,6 +34,7 @@ use serde_json::Value;
 
 const PAYMENT_SETTLE_TIMEOUT: Duration = Duration::from_secs(22);
 const PAYMENT_POLL_INTERVAL: Duration = Duration::from_millis(750);
+const INVOICE_SETTLEMENT_POLL_INTERVAL: Duration = Duration::from_millis(750);
 
 /// Adapts an already-open Bark wallet to the `nwc-mobile` host contract.
 #[derive(Clone)]
@@ -90,6 +91,7 @@ pub async fn execute_bark_wake(
     cancellation: &dyn CancellationSignal,
 ) -> WakeDisposition {
     let started = Instant::now();
+    let request_event_id = input.event_id().clone();
     let wallet = BarkWalletBackend::new(wallet, input.wallet_service_pubkey().clone());
     let disposition = WakeEngine::new(
         ledger,
@@ -104,9 +106,16 @@ pub async fn execute_bark_wake(
     if let Ok(notification_budget) =
         OperationBudget::new(budget.timeout().saturating_sub(started.elapsed()))
     {
-        let _ = InvoiceNotificationWorker::new(ledger, &wallet, relays, secrets, &SystemClock)
-            .run(notification_budget, cancellation)
-            .await;
+        let worker = InvoiceNotificationWorker::new(ledger, &wallet, relays, secrets, &SystemClock);
+        let _ = run_invoice_notification_worker(
+            ledger,
+            &worker,
+            &request_event_id,
+            lingers_for_invoice_settlement(disposition),
+            notification_budget,
+            cancellation,
+        )
+        .await;
     }
     disposition
 }
@@ -124,6 +133,7 @@ pub async fn execute_bark_wake_with_diagnostics(
     diagnostics: Arc<dyn WakeDiagnosticSink>,
 ) -> WakeDisposition {
     let started = Instant::now();
+    let request_event_id = input.event_id().clone();
     let wallet = BarkWalletBackend::with_diagnostics(
         wallet,
         input.wallet_service_pubkey().clone(),
@@ -143,11 +153,65 @@ pub async fn execute_bark_wake_with_diagnostics(
     if let Ok(notification_budget) =
         OperationBudget::new(budget.timeout().saturating_sub(started.elapsed()))
     {
-        let _ = InvoiceNotificationWorker::new(ledger, &wallet, relays, secrets, &SystemClock)
-            .run(notification_budget, cancellation)
-            .await;
+        let worker = InvoiceNotificationWorker::new(ledger, &wallet, relays, secrets, &SystemClock);
+        let _ = run_invoice_notification_worker(
+            ledger,
+            &worker,
+            &request_event_id,
+            lingers_for_invoice_settlement(disposition),
+            notification_budget,
+            cancellation,
+        )
+        .await;
     }
     disposition
+}
+
+const fn lingers_for_invoice_settlement(disposition: WakeDisposition) -> bool {
+    matches!(
+        disposition.notification(),
+        NotificationHint::Request {
+            method: NwcMethod::MakeInvoice
+        }
+    )
+}
+
+async fn run_invoice_notification_worker(
+    ledger: &WakeLedger,
+    worker: &InvoiceNotificationWorker<'_>,
+    request_event_id: &EventId,
+    linger: bool,
+    budget: OperationBudget,
+    cancellation: &dyn CancellationSignal,
+) -> Result<InvoiceNotificationWorkerReport, InvoiceNotificationError> {
+    let deadline = Instant::now() + budget.timeout();
+    let mut aggregate = InvoiceNotificationWorkerReport::default();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Ok(pass_budget) = OperationBudget::new(remaining) else {
+            return Ok(aggregate);
+        };
+        let report = worker.run(pass_budget, cancellation).await?;
+        aggregate.inspected = aggregate.inspected.saturating_add(report.inspected);
+        aggregate.pending = report.pending;
+        aggregate.expired = aggregate.expired.saturating_add(report.expired);
+        aggregate.delivered = aggregate.delivered.saturating_add(report.delivered);
+        aggregate.retryable = report.retryable;
+
+        let target_pending = ledger
+            .nwc_invoice_monitor(request_event_id)
+            .map_err(|_| InvoiceNotificationError::Ledger)?
+            .is_some_and(|monitor| !monitor.completed());
+        if !linger || !target_pending || cancellation.is_cancelled() {
+            return Ok(aggregate);
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining <= INVOICE_SETTLEMENT_POLL_INTERVAL {
+            return Ok(aggregate);
+        }
+        sleep(INVOICE_SETTLEMENT_POLL_INTERVAL).await;
+    }
 }
 
 /// Reconciles Bark invoices and durably publishes pending NIP-47 payment notifications.
@@ -811,6 +875,26 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![NwcNotificationType::PaymentSent]
         );
+    }
+
+    #[test]
+    fn only_successful_make_invoice_wakes_linger_for_settlement() {
+        assert!(lingers_for_invoice_settlement(WakeDisposition::Completed {
+            notification: NotificationHint::Request {
+                method: NwcMethod::MakeInvoice,
+            },
+        }));
+        assert!(!lingers_for_invoice_settlement(
+            WakeDisposition::Completed {
+                notification: NotificationHint::Request {
+                    method: NwcMethod::LookupInvoice,
+                },
+            }
+        ));
+        assert!(!lingers_for_invoice_settlement(WakeDisposition::Rejected {
+            code: nwc_mobile::RejectionCode::InvalidRequest,
+            notification: NotificationHint::OpenApplication,
+        }));
     }
 
     #[test]
