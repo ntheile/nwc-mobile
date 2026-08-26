@@ -11,11 +11,11 @@ use crate::time::OperationDeadline;
 use crate::{
     ActiveConnection, AmountMsat, AmountSat, CancellationSignal, ClaimOutcome, Clock, EventLease,
     HostError, HostErrorKind, InvoiceLookup, LedgerError, ListTransactionsRequest,
-    MakeInvoiceRequest, NotificationHint, NwcEventValidator, NwcMethod, OperationBudget,
-    OperationContext, PayInvoiceRequest, PaymentAccountingError, PaymentFailure, PaymentHash,
-    PaymentReservationOutcome, PaymentStatus, QueueReason, RejectionCode, RelayTransport,
-    RetryReason, SecretProvider, SecureRelayUrl, TerminalKind, UnixTimestamp, WakeDiagnosticCode,
-    WakeDiagnosticSink, WakeDisposition, WakeInput, WakeLedger, WakePolicy, WalletBackend,
+    MakeInvoiceRequest, NotificationHint, NwcEventValidator, NwcMethod, NwcWalletBackend,
+    OperationBudget, OperationContext, PayInvoiceRequest, PaymentAccountingError, PaymentFailure,
+    PaymentHash, PaymentReservationOutcome, PaymentStatus, QueueReason, RejectionCode,
+    RelayTransport, RetryReason, SecretProvider, SecureRelayUrl, TerminalKind, UnixTimestamp,
+    WakeDiagnosticCode, WakeDiagnosticSink, WakeDisposition, WakeInput, WakeLedger, WakePolicy,
     WalletTransaction,
 };
 
@@ -33,7 +33,7 @@ const MAX_INVOICE_DESCRIPTION_BYTES: usize = 1_024;
 /// authorization checks, response construction, and commit-before-publish.
 pub struct WakeEngine<'a> {
     ledger: &'a WakeLedger,
-    wallet: &'a dyn WalletBackend,
+    wallet: &'a dyn NwcWalletBackend,
     relays: &'a dyn RelayTransport,
     secrets: &'a dyn SecretProvider,
     clock: &'a dyn Clock,
@@ -47,7 +47,7 @@ impl<'a> WakeEngine<'a> {
     #[must_use]
     pub const fn new(
         ledger: &'a WakeLedger,
-        wallet: &'a dyn WalletBackend,
+        wallet: &'a dyn NwcWalletBackend,
         relays: &'a dyn RelayTransport,
         secrets: &'a dyn SecretProvider,
         clock: &'a dyn Clock,
@@ -1549,7 +1549,7 @@ mod tests {
         start_calls: AtomicUsize,
     }
 
-    impl WalletBackend for TestWallet<'_> {
+    impl NwcWalletBackend for TestWallet<'_> {
         fn get_info<'a>(
             &'a self,
             _context: OperationContext<'a>,

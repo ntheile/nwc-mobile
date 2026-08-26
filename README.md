@@ -36,7 +36,7 @@ sequenceDiagram
     participant N as Native Wake Adapter<br/>(iOS NSE / Android Worker)
     participant E as nwc-mobile Engine
     participant L as Shared Wake Ledger
-    participant W as WalletBackend
+    participant W as NwcWalletBackend
 
     C->>R: Publish encrypted kind 23194 request
     P->>R: Observe registered client and wallet pubkeys
@@ -93,7 +93,7 @@ budget.
 nwc-mobile/
 ├── crates/
 │   ├── nwc-mobile/             # Rust engine, protocol, ledger, and policy
-│   ├── nwc-mobile-bark/        # Optional Bark WalletBackend adapter
+│   ├── nwc-mobile-bark/        # Optional Bark NwcWalletBackend adapter
 │   ├── nwc-mobile-bolt11/      # Optional BOLT11 wallet-adapter helpers
 │   ├── nwc-mobile-http/        # HTTPS/NIP-98 wake-registration transport
 │   ├── nwc-mobile-nostr/       # Bounded WebSocket relay transport
@@ -111,7 +111,7 @@ message-size, deadline, and cancellation enforcement. Native companion packages
 stay small and optional.
 
 Bark-based wallets can opt into `nwc-mobile-bark` to reuse the complete
-`WalletBackend` implementation, including invoice creation and payment,
+`NwcWalletBackend` implementation, including invoice creation and payment,
 idempotent status lookup, transaction history conversion, fee enforcement, and
 deadline/cancellation handling.
 
@@ -184,7 +184,7 @@ pending request; cancellation uses `clearPendingNwa`.
 A wallet supplies an implementation of a narrow Rust capability interface:
 
 ```rust,ignore
-pub trait WalletBackend: Send + Sync {
+pub trait NwcWalletBackend: Send + Sync {
     async fn balance(&self) -> Result<u64, WalletError>;
     async fn make_invoice(&self, request: MakeInvoice) -> Result<Invoice, WalletError>;
     async fn payment_state(&self, hash: PaymentHash) -> Result<PaymentState, WalletError>;

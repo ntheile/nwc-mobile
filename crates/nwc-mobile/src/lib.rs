@@ -74,9 +74,9 @@ pub use foreground::{
 pub use host::{
     AmountMsat, AmountSat, AtomicCancellation, CancellationSignal, CreatedInvoice, HostError,
     HostErrorKind, HostFuture, InvoiceLookup, ListTransactionsRequest, MakeInvoiceRequest,
-    NeverCancelled, NwcNotificationType, OperationBudget, OperationContext, PayInvoiceRequest,
-    PaymentFailure, PaymentQuote, PaymentStatus, RelayTransport, SecretProvider, SecureRelayUrl,
-    SecureWakeServerUrl, TransactionDirection, WalletBackend, WalletInfo, WalletTransaction,
+    NeverCancelled, NwcNotificationType, NwcWalletBackend, OperationBudget, OperationContext,
+    PayInvoiceRequest, PaymentFailure, PaymentQuote, PaymentStatus, RelayTransport, SecretProvider,
+    SecureRelayUrl, SecureWakeServerUrl, TransactionDirection, WalletInfo, WalletTransaction,
 };
 pub use invoice_notifications::{
     build_payment_received_notification_event, build_payment_sent_notification_event,
@@ -123,3 +123,6 @@ pub use wake_registration_worker::{
     WakeRegistrationTransport, WakeRegistrationWorker, WakeRegistrationWorkerError,
     WakeRegistrationWorkerReport,
 };
+/// Compatibility name for [`NwcWalletBackend`].
+#[deprecated(since = "0.1.0", note = "use NwcWalletBackend")]
+pub use NwcWalletBackend as WalletBackend;

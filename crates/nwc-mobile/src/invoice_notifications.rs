@@ -10,9 +10,9 @@ use rusqlite::{params, OptionalExtension, TransactionBehavior};
 
 use crate::{
     ActiveConnection, AmountMsat, CancellationSignal, Clock, ConnectionId, ConnectionRevision,
-    EventId, HostError, InvoiceLookup, LedgerError, NwcEncryption, NwcSecretKey, OperationBudget,
-    PaymentHash, PaymentStatus, RelayTransport, SecretProvider, UnixTimestamp, WakeLedger,
-    WalletBackend, WalletTransaction,
+    EventId, HostError, InvoiceLookup, LedgerError, NwcEncryption, NwcSecretKey, NwcWalletBackend,
+    OperationBudget, PaymentHash, PaymentStatus, RelayTransport, SecretProvider, UnixTimestamp,
+    WakeLedger, WalletTransaction,
 };
 
 const MAX_INVOICE_BYTES: usize = 16_384;
@@ -414,7 +414,7 @@ impl InvoiceNotificationWorkerReport {
 /// Bounded, retry-safe worker for NIP-47 `payment_received` notifications.
 pub struct InvoiceNotificationWorker<'a> {
     ledger: &'a WakeLedger,
-    wallet: &'a dyn WalletBackend,
+    wallet: &'a dyn NwcWalletBackend,
     relays: &'a dyn RelayTransport,
     secrets: &'a dyn SecretProvider,
     clock: &'a dyn Clock,
@@ -425,7 +425,7 @@ impl<'a> InvoiceNotificationWorker<'a> {
     #[must_use]
     pub const fn new(
         ledger: &'a WakeLedger,
-        wallet: &'a dyn WalletBackend,
+        wallet: &'a dyn NwcWalletBackend,
         relays: &'a dyn RelayTransport,
         secrets: &'a dyn SecretProvider,
         clock: &'a dyn Clock,
