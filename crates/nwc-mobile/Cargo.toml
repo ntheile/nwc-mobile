@@ -25,8 +25,8 @@ getrandom = "0.3.4"
 # Keep the reviewed URL parsing graph pinned across wallet integrations.
 idna_adapter = "=1.1.0"
 nostr = { version = "=0.44.7", features = ["nip04", "nip44", "nip47", "nip98"] }
-# Keep SQLite aligned with Rebel Wallet/Bark so this crate can be linked into
-# the wallet's existing Cargo graph without two crates claiming `links = sqlite3`.
+# Keep one reviewed SQLite version so host applications can link their own
+# persistence graph without two crates claiming `links = sqlite3`.
 rusqlite = { version = "=0.31.0", default-features = false, features = ["bundled"] }
 url = "2.5.8"
 zeroize = "=1.8.2"

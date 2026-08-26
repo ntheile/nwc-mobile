@@ -93,7 +93,6 @@ budget.
 nwc-mobile/
 ├── crates/
 │   ├── nwc-mobile/             # Rust engine, protocol, ledger, and policy
-│   ├── nwc-mobile-bark/        # Optional Bark NwcWalletBackend adapter
 │   ├── nwc-mobile-bolt11/      # Optional BOLT11 wallet-adapter helpers
 │   ├── nwc-mobile-http/        # HTTPS/NIP-98 wake-registration transport
 │   ├── nwc-mobile-nostr/       # Bounded WebSocket relay transport
@@ -110,10 +109,9 @@ Tokio can opt into `nwc-mobile-nostr` for a bounded WSS transport with redirect,
 message-size, deadline, and cancellation enforcement. Native companion packages
 stay small and optional.
 
-Bark-based wallets can opt into `nwc-mobile-bark` to reuse the complete
-`BarkWalletBackend` implementation, including invoice creation and payment,
-idempotent status lookup, transaction history conversion, fee enforcement, and
-deadline/cancellation handling.
+Wallets implement the `NwcWalletBackend` host contract directly. Wallet-specific
+SDKs, synchronization, payment recovery, and transaction conversion remain in
+the containing wallet rather than introducing provider dependencies here.
 
 Foreground application loops can use `ForegroundWakeCoordinator` to suppress
 duplicate tasks, retain retry attempts across delayed work, apply bounded
@@ -129,12 +127,11 @@ host remains free to normalize supported image formats before storing them.
 
 Native entry points can parse provider JSON with `WakeEnvelope`, share an
 `AtomicCancellation`, and use `run_bounded_background_wake` so wallet setup and
-engine execution consume one monotonic OS budget. Bark hosts can call
-`execute_bark_wake` from foreground and background paths without rebuilding the
-engine wiring. Rust host adapters invoked by Swift or Kotlin entry points can
-wrap that work with `run_on_native_runtime`; one process-wide runtime thread
-owns Tokio timers and I/O instead of requiring every host to construct a
-runtime. Dropping the host future aborts its spawned operation.
+engine execution consume one monotonic OS budget. Rust host adapters invoked by
+Swift or Kotlin entry points can wrap that work with `run_on_native_runtime`;
+one process-wide runtime thread owns Tokio timers and I/O instead of requiring
+every host to construct a runtime. Dropping the host future aborts its spawned
+operation.
 
 ## Host integration
 

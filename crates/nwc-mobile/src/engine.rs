@@ -791,8 +791,8 @@ impl<'a> WakeEngine<'a> {
                 })
             }
             RequestParams::LookupInvoice(request) => {
-                // A freshly created Bark invoice can be durably visible in the
-                // nwc-mobile ledger before another short-lived native process
+                // A freshly created invoice can be durably visible in the
+                // nwc-mobile ledger before another short-lived host process
                 // observes its wallet checkpoint. Resolve exact wallet-created
                 // selectors through the ledger first so this transient view
                 // cannot turn the client's first lookup into a terminal

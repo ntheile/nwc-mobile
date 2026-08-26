@@ -35,6 +35,8 @@ public API stabilizes.
 - Added an idempotent, revision-bound host connection revocation API.
 - Added a bounded Nostr info-event publisher so host wallets no longer need to
   coordinate relay validation, signing, budgeting, and transport themselves.
+- Renamed the wallet host contract to `NwcWalletBackend` and moved
+  wallet-specific backend implementations into their containing applications.
 
 ### Added
 
@@ -42,12 +44,10 @@ public API stabilizes.
   reconciliation.
 - Nostr Wallet Auth parsing and revision-bound connection lifecycle.
 - UniFFI contracts with Swift NSE, Android WorkManager, and maintenance helpers.
-- An optional Bark wallet adapter implementing the complete `WalletBackend`
-  contract.
 - A foreground wake coordinator for process-local ownership, bounded retries,
   and consistent engine-disposition handling.
 - Shared native wake-envelope parsing, cancellation, bounded background
-  execution, and Bark engine assembly helpers.
+  execution, and host-engine assembly helpers.
 - Apple payload normalization and generic notification presentation helpers for
   Rust-validated NSE wake requests and fail-closed fallback content.
 - Bounded Apple App Group wake diagnostics with fail-closed corrupt-log handling.
@@ -57,5 +57,4 @@ public API stabilizes.
 
 ### Changed
 
-- The minimum supported Rust version is now 1.90, matching the pinned Bark
-  wallet revision used by the optional adapter.
+- The minimum supported Rust version is now 1.90.
