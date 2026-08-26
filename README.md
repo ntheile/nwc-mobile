@@ -111,7 +111,7 @@ message-size, deadline, and cancellation enforcement. Native companion packages
 stay small and optional.
 
 Bark-based wallets can opt into `nwc-mobile-bark` to reuse the complete
-`NwcWalletBackend` implementation, including invoice creation and payment,
+`BarkWalletBackend` implementation, including invoice creation and payment,
 idempotent status lookup, transaction history conversion, fee enforcement, and
 deadline/cancellation handling.
 
