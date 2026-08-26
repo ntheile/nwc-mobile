@@ -19,11 +19,11 @@ use nwc_mobile::{
     AmountMsat, CancellationSignal, CreatedInvoice, EventId, HostError, HostErrorKind, HostFuture,
     InvoiceLookup, InvoiceNotificationError, InvoiceNotificationWorker,
     InvoiceNotificationWorkerReport, ListTransactionsRequest, MakeInvoiceRequest, NotificationHint,
-    NwcMethod, NwcNotificationType, OperationBudget, OperationContext, PayInvoiceRequest,
-    PaymentFailure, PaymentHash, PaymentPreimage, PaymentQuote, PaymentStatus, PublicKey,
-    RelayTransport, SecretProvider, SystemClock, TransactionDirection, UnixTimestamp,
+    NwcMethod, NwcNotificationType, NwcWalletBackend, OperationBudget, OperationContext,
+    PayInvoiceRequest, PaymentFailure, PaymentHash, PaymentPreimage, PaymentQuote, PaymentStatus,
+    PublicKey, RelayTransport, SecretProvider, SystemClock, TransactionDirection, UnixTimestamp,
     WakeDiagnosticCode, WakeDiagnosticSink, WakeDisposition, WakeEngine, WakeInput, WakeLedger,
-    WakePolicy, WalletBackend, WalletInfo, WalletTransaction,
+    WakePolicy, WalletInfo, WalletTransaction,
 };
 use nwc_mobile_bolt11::{
     created_invoice, exact_sats, parse_invoice, payment_amount_sats, quote_invoice_sats,
@@ -263,7 +263,7 @@ pub async fn run_bark_invoice_notification_worker(
         .await
 }
 
-impl WalletBackend for BarkWalletBackend {
+impl NwcWalletBackend for BarkWalletBackend {
     fn get_info<'a>(
         &'a self,
         context: OperationContext<'a>,

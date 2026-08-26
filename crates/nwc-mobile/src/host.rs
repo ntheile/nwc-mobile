@@ -694,12 +694,12 @@ pub struct ListTransactionsRequest {
     pub include_unpaid: bool,
 }
 
-/// Wallet operations supplied by the containing application.
+/// NWC wallet operations supplied by the containing application.
 ///
 /// The engine calls these methods only after event authentication, connection
 /// authorization, and method-policy checks. `start_payment` is called only
 /// after a durable budget reservation is committed.
-pub trait WalletBackend: Send + Sync {
+pub trait NwcWalletBackend: Send + Sync {
     /// Returns wallet identity and supported methods.
     fn get_info<'a>(
         &'a self,
@@ -897,7 +897,7 @@ mod tests {
     fn capability_traits_are_object_safe() {
         fn accepts_capability<T: ?Sized>() {}
 
-        accepts_capability::<dyn WalletBackend>();
+        accepts_capability::<dyn NwcWalletBackend>();
         accepts_capability::<dyn RelayTransport>();
         accepts_capability::<dyn SecretProvider>();
     }

@@ -1,7 +1,7 @@
 use crate::time::OperationDeadline;
 use crate::{
-    CancellationSignal, Clock, DurablePaymentState, OperationBudget, PaymentAccountingError,
-    PaymentStatus, WakeLedger, WalletBackend,
+    CancellationSignal, Clock, DurablePaymentState, NwcWalletBackend, OperationBudget,
+    PaymentAccountingError, PaymentStatus, WakeLedger,
 };
 use std::fmt;
 
@@ -107,7 +107,7 @@ impl PaymentReconciliationReport {
 /// accounting for payments that may already have left the wallet.
 pub struct PaymentReconciler<'a> {
     ledger: &'a WakeLedger,
-    wallet: &'a dyn WalletBackend,
+    wallet: &'a dyn NwcWalletBackend,
     clock: &'a dyn Clock,
 }
 
@@ -116,7 +116,7 @@ impl<'a> PaymentReconciler<'a> {
     #[must_use]
     pub const fn new(
         ledger: &'a WakeLedger,
-        wallet: &'a dyn WalletBackend,
+        wallet: &'a dyn NwcWalletBackend,
         clock: &'a dyn Clock,
     ) -> Self {
         Self {
@@ -276,7 +276,7 @@ mod tests {
         start_calls: AtomicUsize,
     }
 
-    impl WalletBackend for TestWallet {
+    impl NwcWalletBackend for TestWallet {
         fn get_info<'a>(
             &'a self,
             _context: OperationContext<'a>,

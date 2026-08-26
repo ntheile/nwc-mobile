@@ -7,10 +7,10 @@ use std::sync::Arc;
 use nwc_mobile::{
     AmountMsat, CancellationSignal, CreatedInvoice, EventId, HostError, HostErrorKind, HostFuture,
     InvoiceLookup, ListTransactionsRequest, MakeInvoiceRequest, NwcMethod, NwcSecretKey,
-    OperationContext, PayInvoiceRequest, PaymentFailure, PaymentHash, PaymentPreimage,
-    PaymentQuote, PaymentStatus, PublicKey, RelayTransport, SecretProvider, SecureRelayUrl,
-    SecureWakeServerUrl, TransactionDirection, UnixTimestamp, WakeRegistrationChange,
-    WakeRegistrationTransport, WalletBackend, WalletInfo, WalletTransaction,
+    NwcWalletBackend, OperationContext, PayInvoiceRequest, PaymentFailure, PaymentHash,
+    PaymentPreimage, PaymentQuote, PaymentStatus, PublicKey, RelayTransport, SecretProvider,
+    SecureRelayUrl, SecureWakeServerUrl, TransactionDirection, UnixTimestamp,
+    WakeRegistrationChange, WakeRegistrationTransport, WalletInfo, WalletTransaction,
 };
 use zeroize::Zeroize;
 
@@ -652,7 +652,7 @@ impl MobileHostBridge {
     }
 }
 
-impl WalletBackend for MobileHostBridge {
+impl NwcWalletBackend for MobileHostBridge {
     fn get_info<'a>(
         &'a self,
         context: OperationContext<'a>,
