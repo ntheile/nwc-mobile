@@ -344,21 +344,20 @@ impl NwcMobile {
         }
         let operation = async move {
             let started_at = Instant::now();
-            let open_result = tokio::time::timeout(
-                execution_time,
-                tokio::task::spawn_blocking(move || Self::open(config)),
-            )
-            .await;
-            let mobile = match open_result {
-                Ok(Ok(Ok(mobile))) => mobile,
-                Ok(Ok(Err(_))) => return queued_result(QueueReason::LedgerBusy, None),
-                Ok(Err(_)) => return queued_result(QueueReason::WalletUnavailable, None),
-                Err(_) => return queued_result(QueueReason::Deadline, None),
+            let wake = async move {
+                let mobile = match tokio::task::spawn_blocking(move || Self::open(config)).await {
+                    Ok(Ok(mobile)) => mobile,
+                    Ok(Err(_)) => return queued_result(QueueReason::LedgerBusy, None),
+                    Err(_) => return queued_result(QueueReason::WalletUnavailable, None),
+                };
+                let remaining = execution_time.saturating_sub(started_at.elapsed());
+                mobile
+                    .execute_wake(input, kind, remaining, cancellation.as_ref())
+                    .await
             };
-            let remaining = execution_time.saturating_sub(started_at.elapsed());
-            mobile
-                .execute_wake(input, kind, remaining, cancellation.as_ref())
+            tokio::time::timeout(execution_time, wake)
                 .await
+                .unwrap_or_else(|_| queued_result(QueueReason::Deadline, None))
         };
         run_on_native_runtime(operation)
             .await
