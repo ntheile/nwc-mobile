@@ -18,6 +18,7 @@ pub struct WakeEnvelope {
     wallet_service_public_key_hex: String,
     embedded_event_json: Option<String>,
     received_at_seconds: u64,
+    settlement_check: bool,
 }
 
 impl WakeEnvelope {
@@ -36,6 +37,7 @@ impl WakeEnvelope {
             wallet_service_public_key_hex,
             embedded_event_json,
             received_at_seconds,
+            settlement_check: false,
         }
     }
 
@@ -56,13 +58,14 @@ impl WakeEnvelope {
             }
         }
 
-        let envelope = Self::new(
+        let mut envelope = Self::new(
             string_field(object, "nwc_relay", "relay")?,
             string_field(object, "nwc_event_id", "event_id")?,
             string_field(object, "nwc_wallet_service_pubkey", "wallet_service_pubkey")?,
             optional_string_field(object, "nwc_event_json", "nwc_event")?,
             received_at_seconds,
         );
+        envelope.settlement_check = optional_boolean_field(object, "settlement_check")?;
         envelope.validate()?;
         Ok(envelope)
     }
@@ -120,6 +123,12 @@ impl WakeEnvelope {
     pub const fn received_at_seconds(&self) -> u64 {
         self.received_at_seconds
     }
+
+    /// Returns whether the provider marked this as a targeted invoice-settlement check.
+    #[must_use]
+    pub const fn settlement_check(&self) -> bool {
+        self.settlement_check
+    }
 }
 
 impl fmt::Debug for WakeEnvelope {
@@ -131,6 +140,7 @@ impl fmt::Debug for WakeEnvelope {
             .field("wallet_service_public_key_hex", &"[redacted]")
             .field("has_embedded_event", &self.embedded_event_json.is_some())
             .field("received_at_seconds", &self.received_at_seconds)
+            .field("settlement_check", &self.settlement_check)
             .finish()
     }
 }
@@ -211,6 +221,16 @@ fn optional_string_field(
     }
 }
 
+fn optional_boolean_field(
+    object: &Map<String, Value>,
+    field: &str,
+) -> Result<bool, WakeEnvelopeError> {
+    match object.get(field) {
+        Some(value) => value.as_bool().ok_or(WakeEnvelopeError::InvalidField),
+        None => Ok(false),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,6 +247,14 @@ mod tests {
         assert_eq!(input.relay(), "wss://relay.example/path");
         assert_eq!(input.event_id().to_hex(), HEX);
         assert_eq!(input.received_at(), UnixTimestamp::from_secs(42));
+        assert!(!envelope.settlement_check());
+
+        let settlement = format!(
+            r#"{{"nwc_relay":"wss://relay.example/path","nwc_event_id":"{HEX}","nwc_wallet_service_pubkey":"{HEX}","settlement_check":true}}"#
+        );
+        assert!(WakeEnvelope::parse_json(&settlement, 42)
+            .expect("settlement check")
+            .settlement_check());
 
         let legacy = format!(
             r#"{{"protocol":"nwc_wake","relay":"wss://relay.example/path","event_id":"{HEX}","wallet_service_pubkey":"{HEX}"}}"#
@@ -246,6 +274,9 @@ mod tests {
             ),
             format!(
                 r#"{{"nwc_relay":"ws://relay.example","nwc_event_id":"{HEX}","nwc_wallet_service_pubkey":"{HEX}"}}"#
+            ),
+            format!(
+                r#"{{"nwc_relay":"wss://relay.example","nwc_event_id":"{HEX}","nwc_wallet_service_pubkey":"{HEX}","settlement_check":"true"}}"#
             ),
         ] {
             assert!(WakeEnvelope::parse_json(&payload, 42).is_err());
