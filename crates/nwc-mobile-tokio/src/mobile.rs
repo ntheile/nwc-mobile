@@ -5,10 +5,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nwc_mobile::{
-    CancellationSignal, EventId, HostError, HostFuture, InvoiceSettlementMonitor, LightningNode,
+    CancellationSignal, EventId, HostError, HostFuture, InvoiceNotificationError,
+    InvoiceNotificationWorkerReport, InvoiceSettlementMonitor, LedgerError, LightningNode,
     MobileServiceError, NotificationHint, NwcApplicationManager, OperationBudget, OperationContext,
-    PublicKey, QueueReason, RejectionCode, RelayTransport, SecretProvider, WakeDiagnosticSink,
-    WakeDisposition, WakeInput, WakeLedger, WakePolicy, WalletInfo,
+    PublicKey, QueueReason, RejectionCode, RelayTransport, RetryReason, SecretProvider,
+    WakeDiagnosticSink, WakeDisposition, WakeInput, WakeLedger, WakePolicy, WalletInfo,
 };
 
 use crate::{
@@ -18,6 +19,9 @@ use crate::{
 
 /// Default time retained for a post-wake completion hook.
 pub const DEFAULT_NWC_MOBILE_COMPLETION_RESERVE: Duration = Duration::from_secs(5);
+
+/// Default delay before retrying incomplete invoice-settlement work.
+pub const DEFAULT_NWC_MOBILE_SETTLEMENT_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 /// Why the native host opened `NwcMobile` for this wake.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -287,7 +291,7 @@ impl NwcMobile {
         cancellation: &dyn CancellationSignal,
     ) -> NwcMobileWakeResult {
         if execution_time.is_zero() || cancellation.is_cancelled() {
-            return queued_result();
+            return queued_result(QueueReason::Deadline, None);
         }
         let window = BackgroundWakeWindow {
             started_at: std::time::Instant::now(),
@@ -300,7 +304,7 @@ impl NwcMobile {
         .await
         {
             Ok(result) if !cancellation.is_cancelled() => result,
-            Ok(_) | Err(_) => queued_result(),
+            Ok(_) | Err(_) => queued_result(QueueReason::Deadline, None),
         }
     }
 
@@ -316,7 +320,11 @@ impl NwcMobile {
         cancellation: &dyn CancellationSignal,
     ) -> NwcMobileWakeResult {
         let event_id = input.event_id().clone();
-        let initial_monitor = self.invoice_monitor(&event_id);
+        let initial_monitor = match self.invoice_monitor(&event_id) {
+            Ok(monitor) => monitor,
+            Err(_) => return queued_result(QueueReason::LedgerBusy, None),
+        };
+        let initial_settlement_status = settlement_status(initial_monitor.as_ref());
         if kind == NwcMobileWakeKind::InvoiceSettlement
             && !settlement_wake_matches(initial_monitor.as_ref(), &input)
         {
@@ -327,7 +335,7 @@ impl NwcMobile {
         }
 
         let Some(open_budget) = self.engine_budget(window) else {
-            return queued_result();
+            return queued_result(QueueReason::Deadline, initial_monitor.as_ref());
         };
         let open_context = OperationContext::new(open_budget, cancellation);
         let request = LightningNodeRequest {
@@ -341,10 +349,15 @@ impl NwcMobile {
         .await
         {
             Ok(opened) => opened,
-            Err(_) => return queued_result(),
+            Err(_) => {
+                return result(
+                    WakeDisposition::queued(QueueReason::WalletUnavailable),
+                    initial_settlement_status,
+                )
+            }
         };
         let Some(operation_budget) = self.engine_budget(window) else {
-            return queued_result();
+            return queued_result(QueueReason::Deadline, initial_monitor.as_ref());
         };
         let (lightning_node, wallet_info) = opened.into_parts();
         let node_config = NwcNodeConfig::new(
@@ -368,26 +381,23 @@ impl NwcMobile {
                     .await
             }
             (NwcMobileWakeKind::InvoiceSettlement, _) => {
-                let _ = node
+                let report = node
                     .handle_settlement_wake(&event_id, operation_budget, cancellation)
                     .await;
-                WakeDisposition::Completed {
-                    notification: NotificationHint::Processing,
-                }
+                settlement_disposition(report)
             }
         };
 
-        let monitor = self.invoice_monitor(&event_id);
-        let settlement_status =
-            monitor
-                .as_ref()
-                .map_or(NwcMobileSettlementStatus::NotTracked, |monitor| {
-                    if monitor.completed() {
-                        NwcMobileSettlementStatus::Delivered
-                    } else {
-                        NwcMobileSettlementStatus::Pending
-                    }
-                });
+        let monitor = match self.invoice_monitor(&event_id) {
+            Ok(monitor) => monitor,
+            Err(_) => {
+                return result(
+                    WakeDisposition::queued(QueueReason::LedgerBusy),
+                    initial_settlement_status,
+                )
+            }
+        };
+        let settlement_status = settlement_status(monitor.as_ref());
         let disposition = if kind == NwcMobileWakeKind::InvoiceSettlement
             && settlement_status == NwcMobileSettlementStatus::Delivered
         {
@@ -405,13 +415,14 @@ impl NwcMobile {
         result(disposition, settlement_status)
     }
 
-    fn invoice_monitor(&self, event_id: &EventId) -> Option<InvoiceSettlementMonitor> {
+    fn invoice_monitor(
+        &self,
+        event_id: &EventId,
+    ) -> Result<Option<InvoiceSettlementMonitor>, LedgerError> {
         self.manager
             .service()
             .ledger()
             .nwc_invoice_monitor(event_id)
-            .ok()
-            .flatten()
     }
 
     fn engine_budget(&self, window: BackgroundWakeWindow) -> Option<OperationBudget> {
@@ -465,11 +476,45 @@ const fn result(
     }
 }
 
-const fn queued_result() -> NwcMobileWakeResult {
-    result(
-        WakeDisposition::queued(QueueReason::WalletUnavailable),
-        NwcMobileSettlementStatus::NotTracked,
-    )
+fn queued_result(
+    reason: QueueReason,
+    monitor: Option<&InvoiceSettlementMonitor>,
+) -> NwcMobileWakeResult {
+    result(WakeDisposition::queued(reason), settlement_status(monitor))
+}
+
+fn settlement_status(monitor: Option<&InvoiceSettlementMonitor>) -> NwcMobileSettlementStatus {
+    monitor.map_or(NwcMobileSettlementStatus::NotTracked, |monitor| {
+        if monitor.completed() {
+            NwcMobileSettlementStatus::Delivered
+        } else {
+            NwcMobileSettlementStatus::Pending
+        }
+    })
+}
+
+fn settlement_disposition(
+    report: Result<InvoiceNotificationWorkerReport, InvoiceNotificationError>,
+) -> WakeDisposition {
+    match report {
+        Ok(report) if report.has_pending_work() => WakeDisposition::RetryAfter {
+            delay: DEFAULT_NWC_MOBILE_SETTLEMENT_RETRY_DELAY,
+            reason: RetryReason::WalletUnavailable,
+            notification: NotificationHint::Processing,
+        },
+        Ok(_) => WakeDisposition::Completed {
+            notification: NotificationHint::Processing,
+        },
+        Err(InvoiceNotificationError::Ledger) => WakeDisposition::queued(QueueReason::LedgerBusy),
+        Err(InvoiceNotificationError::Secret) => {
+            WakeDisposition::queued(QueueReason::SecureStorageUnavailable)
+        }
+        Err(_) => WakeDisposition::RetryAfter {
+            delay: DEFAULT_NWC_MOBILE_SETTLEMENT_RETRY_DELAY,
+            reason: RetryReason::WalletUnavailable,
+            notification: NotificationHint::Processing,
+        },
+    }
 }
 
 fn _assert_runtime_traits() {
@@ -575,6 +620,24 @@ mod tests {
         ));
         assert_eq!(opens.load(Ordering::Acquire), 0);
         std::fs::remove_dir_all(directory).expect("remove temporary directory");
+    }
+
+    #[test]
+    fn pending_settlement_report_requests_retry() {
+        let disposition = settlement_disposition(Ok(InvoiceNotificationWorkerReport {
+            inspected: 1,
+            retryable: 1,
+            ..InvoiceNotificationWorkerReport::default()
+        }));
+
+        assert!(matches!(
+            disposition,
+            WakeDisposition::RetryAfter {
+                delay: DEFAULT_NWC_MOBILE_SETTLEMENT_RETRY_DELAY,
+                reason: RetryReason::WalletUnavailable,
+                ..
+            }
+        ));
     }
 
     fn temporary_directory(label: &str) -> PathBuf {

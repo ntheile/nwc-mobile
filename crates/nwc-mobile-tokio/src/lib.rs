@@ -13,6 +13,7 @@ pub use mobile::{
     LightningNodeProvider, LightningNodeRequest, NwcMobile, NwcMobileCompletionContext,
     NwcMobileCompletionHandler, NwcMobileConfig, NwcMobileSettlementStatus, NwcMobileWakeKind,
     NwcMobileWakeResult, OpenedLightningNode, DEFAULT_NWC_MOBILE_COMPLETION_RESERVE,
+    DEFAULT_NWC_MOBILE_SETTLEMENT_RETRY_DELAY,
 };
 pub use node::{NwcNode, NwcNodeConfig, DEFAULT_INVOICE_SETTLEMENT_POLL_INTERVAL};
 
