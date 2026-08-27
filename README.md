@@ -249,6 +249,10 @@ monitor before opening the wallet. A completion handler can use the reserved
 tail of the OS window to synchronize application-specific wake-server state.
 Ordinary NIP-47 request wakes must use `NwcMobileWakeKind::Request`; hosts should
 not infer settlement intent merely because a tracked invoice already exists.
+`MobileWakeEnvelope.settlement_check` and
+`NwcQueuedWakeRequest.settlementCheck` preserve that explicit intent when an
+NSE or background service hands unfinished work to the foreground app. Legacy
+queue entries safely default to ordinary request processing.
 
 `ReadyLightningNodeProvider` removes the provider implementation for a wallet
 that is already open. `StoredNwcSecrets` adapts one platform-protected key-value
