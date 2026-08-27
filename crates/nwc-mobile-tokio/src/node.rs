@@ -457,4 +457,24 @@ mod tests {
 
         assert!(node.awaited_settlement.load(Ordering::Acquire));
     }
+
+    #[test]
+    fn only_successful_make_invoice_wakes_linger_for_settlement() {
+        assert!(lingers_for_invoice_settlement(WakeDisposition::Completed {
+            notification: nwc_mobile::NotificationHint::Request {
+                method: nwc_mobile::NwcMethod::MakeInvoice,
+            },
+        }));
+        assert!(!lingers_for_invoice_settlement(
+            WakeDisposition::Completed {
+                notification: nwc_mobile::NotificationHint::Request {
+                    method: nwc_mobile::NwcMethod::LookupInvoice,
+                },
+            }
+        ));
+        assert!(!lingers_for_invoice_settlement(WakeDisposition::Rejected {
+            code: nwc_mobile::RejectionCode::InvalidRequest,
+            notification: nwc_mobile::NotificationHint::OpenApplication,
+        }));
+    }
 }
