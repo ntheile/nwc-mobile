@@ -8,6 +8,8 @@ public API stabilizes.
 
 ## Unreleased
 
+- Added an LNI-style `LightningNode` contract and Tokio `NwcNode` facade that
+  own engine assembly, execution bounds, and settlement-notification workers.
 - Added reusable application coordinators for NWA callback retries and
   process-local wake-registration refresh, execution, and timer decisions.
 - Fixed application revocation and Apple legacy cleanup so transient Keychain

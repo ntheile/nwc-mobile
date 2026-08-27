@@ -36,7 +36,7 @@ sequenceDiagram
     participant N as Native Wake Adapter<br/>(iOS NSE / Android Worker)
     participant E as nwc-mobile Engine
     participant L as Shared Wake Ledger
-    participant W as NwcWalletBackend
+    participant W as LightningNode
 
     C->>R: Publish encrypted kind 23194 request
     P->>R: Observe registered client and wallet pubkeys
@@ -109,9 +109,12 @@ Tokio can opt into `nwc-mobile-nostr` for a bounded WSS transport with redirect,
 message-size, deadline, and cancellation enforcement. Native companion packages
 stay small and optional.
 
-Wallets implement the `NwcWalletBackend` host contract directly. Wallet-specific
-SDKs, synchronization, payment recovery, and transaction conversion remain in
-the containing wallet rather than introducing provider dependencies here.
+Wallets implement the compact `LightningNode` contract and construct one
+`nwc_mobile_tokio::NwcNode` from `NwcNodeConfig`. The facade owns engine and
+notification-worker assembly, runtime deadlines, cancellation, and settlement
+reconciliation. Wallet-specific SDK synchronization, payment recovery, and
+transaction conversion remain in the containing wallet rather than introducing
+provider dependencies here.
 
 Foreground application loops can use `ForegroundWakeCoordinator` to suppress
 duplicate tasks, retain retry attempts across delayed work, apply bounded
@@ -178,21 +181,49 @@ use `openNwaRequest`, render only `MobileNwaRequestPresentation`, call
 verified callback if present. Successful approval atomically consumes the
 pending request; cancellation uses `clearPendingNwa`.
 
-A wallet supplies an implementation of a narrow Rust capability interface:
+A wallet supplies ordinary Lightning-node operations. Unlike the lower-level
+engine boundary, these functions do not receive NWC ledgers, relay transports,
+diagnostic sinks, clocks, operation budgets, or cancellation objects:
 
 ```rust,ignore
-pub trait NwcWalletBackend: Send + Sync {
-    async fn balance(&self) -> Result<u64, WalletError>;
-    async fn make_invoice(&self, request: MakeInvoice) -> Result<Invoice, WalletError>;
-    async fn payment_state(&self, hash: PaymentHash) -> Result<PaymentState, WalletError>;
-    async fn start_payment(&self, request: PaymentRequest) -> Result<PaymentAttempt, WalletError>;
-    async fn lookup_invoice(&self, request: LookupRequest) -> Result<Transaction, WalletError>;
-    async fn list_transactions(
-        &self,
-        request: ListTransactions,
-    ) -> Result<Vec<Transaction>, WalletError>;
+pub trait LightningNode: Send + Sync {
+    fn get_balance(&self) -> HostFuture<'_, Result<AmountMsat, HostError>>;
+    fn create_invoice(&self, request: MakeInvoiceRequest)
+        -> HostFuture<'_, Result<CreatedInvoice, HostError>>;
+    fn quote_invoice<'a>(&'a self, invoice: &'a str, amount: Option<AmountMsat>)
+        -> HostFuture<'a, Result<PaymentQuote, HostError>>;
+    fn pay_invoice(&self, request: PayInvoiceRequest)
+        -> HostFuture<'_, Result<PaymentStatus, HostError>>;
+    fn lookup_invoice(&self, request: InvoiceLookup, settlement_timeout: Option<Duration>)
+        -> HostFuture<'_, Result<Option<WalletTransaction>, HostError>>;
+    fn list_transactions(&self, request: ListTransactionsRequest)
+        -> HostFuture<'_, Result<Vec<WalletTransaction>, HostError>>;
 }
 ```
+
+The side-effect-free quote remains explicit because `nwc-mobile` must reserve
+the exact principal and maximum fee durably before calling `pay_invoice`.
+`NwcNode` derives payment reconciliation state from `lookup_invoice`, so wallet
+integrations do not implement separate payment-status and payment-start engine
+hooks.
+
+Construct the service once after opening the wallet:
+
+```rust,ignore
+let config = NwcNodeConfig::new(
+    manager.service().ledger(),
+    &NostrRelayTransport,
+    &secret_provider,
+    wallet_info,
+);
+let nwc = NwcNode::new(config, wallet_node);
+
+let disposition = nwc.handle_wake(input, budget, cancellation).await;
+```
+
+Use `run_notifications` for an ordinary maintenance pass and
+`handle_settlement_wake` when a provider wake identifies one exact created
+invoice. Both methods reuse the same configured node and durable ledger.
 
 Wallet implementations such as Bark, LDK, or a custodial API remain outside
 `nwc-mobile`. The engine does not create or delete a wallet database and does not

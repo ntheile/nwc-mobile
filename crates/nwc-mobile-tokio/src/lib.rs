@@ -6,6 +6,10 @@
 
 #![forbid(unsafe_code)]
 
+mod node;
+
+pub use node::{NwcNode, NwcNodeConfig, DEFAULT_INVOICE_SETTLEMENT_POLL_INTERVAL};
+
 use std::future::Future;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::OnceLock;
