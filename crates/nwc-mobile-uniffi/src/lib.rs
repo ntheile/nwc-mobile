@@ -190,10 +190,6 @@ impl ValidatedMobileWake {
         self.input.received_at().as_secs()
     }
 
-    /// Returns the Rust-parsed settlement-routing marker.
-    pub fn settlement_check(&self) -> bool {
-        self.settlement_check
-    }
 }
 
 impl ValidatedMobileWake {
@@ -201,6 +197,12 @@ impl ValidatedMobileWake {
     #[must_use]
     pub fn core_input(&self) -> WakeInput {
         self.input.clone()
+    }
+
+    /// Returns the Rust-parsed settlement-routing marker.
+    #[must_use]
+    pub const fn settlement_check(&self) -> bool {
+        self.settlement_check
     }
 }
 
