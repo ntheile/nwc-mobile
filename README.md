@@ -211,12 +211,13 @@ Construct the service once after opening the wallet:
 
 ```rust,ignore
 let config = NwcNodeConfig::new(
+    wallet_node,
     manager.service().ledger(),
     &NostrRelayTransport,
     &secret_provider,
     wallet_info,
 );
-let nwc = NwcNode::new(config, wallet_node);
+let nwc = NwcNode::new(config);
 
 let disposition = nwc.handle_wake(input, budget, cancellation).await;
 ```

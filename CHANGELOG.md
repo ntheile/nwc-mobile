@@ -8,6 +8,9 @@ public API stabilizes.
 
 ## Unreleased
 
+- Simplified `NwcNode` construction by making `NwcNodeConfig` own the
+  application-supplied `LightningNode`.
+
 - Added an LNI-style `LightningNode` contract and Tokio `NwcNode` facade that
   own engine assembly, execution bounds, and settlement-notification workers.
 - Added reusable application coordinators for NWA callback retries and
