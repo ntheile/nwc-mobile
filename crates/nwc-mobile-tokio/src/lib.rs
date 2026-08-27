@@ -10,10 +10,11 @@ mod mobile;
 mod node;
 
 pub use mobile::{
-    LightningNodeProvider, LightningNodeRequest, NwcMobile, NwcMobileCompletionContext,
-    NwcMobileCompletionHandler, NwcMobileConfig, NwcMobileSettlementStatus, NwcMobileWakeKind,
-    NwcMobileWakeResult, OpenedLightningNode, ReadyLightningNodeProvider,
-    DEFAULT_NWC_MOBILE_COMPLETION_RESERVE, DEFAULT_NWC_MOBILE_SETTLEMENT_RETRY_DELAY,
+    LightningNodeProvider, LightningNodeProviderFn, LightningNodeRequest, NwcMobile,
+    NwcMobileCompletionContext, NwcMobileCompletionHandler, NwcMobileConfig,
+    NwcMobileSettlementStatus, NwcMobileWakeKind, NwcMobileWakeResult, OpenedLightningNode,
+    ReadyLightningNodeProvider, DEFAULT_NWC_MOBILE_COMPLETION_RESERVE,
+    DEFAULT_NWC_MOBILE_SETTLEMENT_RETRY_DELAY,
 };
 pub use node::{NwcNode, NwcNodeConfig, DEFAULT_INVOICE_SETTLEMENT_POLL_INTERVAL};
 
@@ -167,6 +168,32 @@ where
 /// bounded polling intervals.
 pub async fn sleep(duration: Duration) {
     tokio::time::sleep(duration).await;
+}
+
+/// Polls a wallet operation until it becomes terminal or a monotonic timeout expires.
+///
+/// The operation always runs at least once and the last observed value is returned when the
+/// timeout expires. A zero interval performs no additional attempts and avoids a busy loop.
+pub async fn poll_until_terminal<T, E, Check, CheckFuture, Terminal>(
+    timeout: Duration,
+    interval: Duration,
+    mut check: Check,
+    is_terminal: Terminal,
+) -> Result<T, E>
+where
+    Check: FnMut() -> CheckFuture,
+    CheckFuture: Future<Output = Result<T, E>>,
+    Terminal: Fn(&T) -> bool,
+{
+    let deadline = Instant::now() + timeout;
+    loop {
+        let value = check().await?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if is_terminal(&value) || remaining.is_zero() || interval.is_zero() {
+            return Ok(value);
+        }
+        tokio::time::sleep(remaining.min(interval)).await;
+    }
 }
 
 /// Monotonic execution window shared by wallet preparation and the wake engine.
@@ -377,6 +404,22 @@ mod tests {
         })
         .await;
         assert_eq!(result, Ok(42));
+    }
+
+    #[tokio::test]
+    async fn terminal_polling_returns_the_first_terminal_value() {
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let value = poll_until_terminal(
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+            || async { Ok::<_, ()>(attempts.fetch_add(1, Ordering::AcqRel) + 1) },
+            |value| *value == 3,
+        )
+        .await
+        .expect("polling succeeds");
+
+        assert_eq!(value, 3);
+        assert_eq!(attempts.load(Ordering::Acquire), 3);
     }
 
     struct Cancellation(AtomicBool);

@@ -5,10 +5,10 @@ use std::time::{Duration, Instant};
 use nwc_mobile::{
     AmountMsat, CancellationSignal, CreatedInvoice, EventId, HostError, HostFuture, InvoiceLookup,
     InvoiceNotificationError, InvoiceNotificationWorker, InvoiceNotificationWorkerReport,
-    LightningNode, ListTransactionsRequest, MakeInvoiceRequest, NwcWalletBackend, OperationBudget,
-    OperationContext, PayInvoiceRequest, PaymentHash, PaymentQuote, PaymentStatus, RelayTransport,
-    SecretProvider, SystemClock, WakeDiagnosticSink, WakeDisposition, WakeEngine, WakeInput,
-    WakeLedger, WakePolicy, WalletInfo, WalletTransaction,
+    ListTransactionsRequest, MakeInvoiceRequest, NwcLightningNode, NwcWalletBackend,
+    OperationBudget, OperationContext, PayInvoiceRequest, PaymentHash, PaymentQuote, PaymentStatus,
+    RelayTransport, SecretProvider, SystemClock, WakeDiagnosticSink, WakeDisposition, WakeEngine,
+    WakeInput, WakeLedger, WakePolicy, WalletInfo, WalletTransaction,
 };
 
 use crate::{run_with_context, sleep};
@@ -77,7 +77,7 @@ pub struct NwcNode<'a, N> {
 
 impl<'a, N> NwcNode<'a, N>
 where
-    N: LightningNode,
+    N: NwcLightningNode,
 {
     /// Creates an NWC node from a complete configuration.
     #[must_use]
@@ -254,7 +254,7 @@ impl<'a, N> RuntimeWallet<'a, N> {
 
 impl<N> NwcWalletBackend for RuntimeWallet<'_, N>
 where
-    N: LightningNode,
+    N: NwcLightningNode,
 {
     fn get_info<'a>(
         &'a self,
@@ -360,7 +360,7 @@ mod tests {
         transaction: WalletTransaction,
     }
 
-    impl LightningNode for TestNode {
+    impl NwcLightningNode for TestNode {
         fn get_balance(&self) -> HostFuture<'_, Result<AmountMsat, HostError>> {
             Box::pin(async { Ok(AmountMsat::from_msat(42_000)) })
         }

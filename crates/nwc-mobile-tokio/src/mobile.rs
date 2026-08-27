@@ -5,9 +5,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nwc_mobile::{
-    CancellationSignal, EventId, HostError, HostFuture, InvoiceNotificationError,
-    InvoiceNotificationWorkerReport, InvoiceSettlementMonitor, LedgerError, LightningNode,
-    MobileServiceError, NotificationHint, NwcApplicationManager, OperationBudget, OperationContext,
+    CancellationSignal, EventId, HostError, HostErrorKind, HostFuture, InvoiceNotificationError,
+    InvoiceNotificationWorkerReport, InvoiceSettlementMonitor, LedgerError, MobileServiceError,
+    NotificationHint, NwcApplicationManager, NwcLightningNode, OperationBudget, OperationContext,
     PublicKey, QueueReason, RejectionCode, RelayTransport, RetryReason, SecretProvider,
     WakeDiagnosticSink, WakeDisposition, WakeInput, WakeLedger, WakePolicy, WalletInfo,
 };
@@ -102,7 +102,7 @@ impl LightningNodeRequest {
 
 /// One opened Lightning node and its advertised NIP-47 capabilities.
 pub struct OpenedLightningNode {
-    node: Arc<dyn LightningNode>,
+    node: Arc<dyn NwcLightningNode>,
     wallet_info: WalletInfo,
 }
 
@@ -111,7 +111,7 @@ impl OpenedLightningNode {
     #[must_use]
     pub fn new<N>(node: N, wallet_info: WalletInfo) -> Self
     where
-        N: LightningNode + 'static,
+        N: NwcLightningNode + 'static,
     {
         Self {
             node: Arc::new(node),
@@ -119,7 +119,7 @@ impl OpenedLightningNode {
         }
     }
 
-    fn into_parts(self) -> (Arc<dyn LightningNode>, WalletInfo) {
+    fn into_parts(self) -> (Arc<dyn NwcLightningNode>, WalletInfo) {
         (self.node, self.wallet_info)
     }
 }
@@ -135,6 +135,47 @@ pub trait LightningNodeProvider: Send + Sync {
         request: LightningNodeRequest,
         context: OperationContext<'a>,
     ) -> HostFuture<'a, Result<OpenedLightningNode, HostError>>;
+}
+
+type OpenLightningNodeFn = dyn for<'a> Fn(
+        LightningNodeRequest,
+        OperationContext<'a>,
+    ) -> HostFuture<'a, Result<OpenedLightningNode, HostError>>
+    + Send
+    + Sync;
+
+/// Adapts an asynchronous closure to the cold-start node-provider contract.
+pub struct LightningNodeProviderFn {
+    open: Arc<OpenLightningNodeFn>,
+}
+
+impl LightningNodeProviderFn {
+    /// Creates a provider from a deadline-aware asynchronous node factory.
+    #[must_use]
+    pub fn new<F>(open: F) -> Self
+    where
+        F: for<'a> Fn(
+                LightningNodeRequest,
+                OperationContext<'a>,
+            ) -> HostFuture<'a, Result<OpenedLightningNode, HostError>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Self {
+            open: Arc::new(open),
+        }
+    }
+}
+
+impl LightningNodeProvider for LightningNodeProviderFn {
+    fn open_node<'a>(
+        &'a self,
+        request: LightningNodeRequest,
+        context: OperationContext<'a>,
+    ) -> HostFuture<'a, Result<OpenedLightningNode, HostError>> {
+        (self.open)(request, context)
+    }
 }
 
 /// Adapts an already-open wallet to the provider contract without host boilerplate.
@@ -332,6 +373,45 @@ impl NwcMobile {
     #[must_use]
     pub const fn application_manager_mut(&mut self) -> &mut NwcApplicationManager {
         &mut self.manager
+    }
+
+    /// Opens the configured Lightning node and reconciles pending NWC notifications once.
+    pub async fn reconcile_notifications(
+        &self,
+        wallet_service_pubkey: PublicKey,
+        execution_time: Duration,
+        cancellation: &dyn CancellationSignal,
+    ) -> Result<InvoiceNotificationWorkerReport, HostError> {
+        let started_at = Instant::now();
+        let open_budget = OperationBudget::new(execution_time)
+            .map_err(|_| HostError::new(HostErrorKind::TimedOut))?;
+        let open_context = OperationContext::new(open_budget, cancellation);
+        let request = LightningNodeRequest {
+            wallet_service_pubkey,
+            diagnostics: self.diagnostics.clone(),
+        };
+        let opened = run_with_context(
+            open_context,
+            self.node_provider.open_node(request, open_context),
+        )
+        .await?;
+        let remaining = execution_time.saturating_sub(started_at.elapsed());
+        let budget =
+            OperationBudget::new(remaining).map_err(|_| HostError::new(HostErrorKind::TimedOut))?;
+        let (lightning_node, wallet_info) = opened.into_parts();
+        let config = NwcNodeConfig::new(
+            lightning_node,
+            self.manager.service().ledger(),
+            self.relays.as_ref(),
+            self.secrets.as_ref(),
+            wallet_info,
+        )
+        .with_wake_policy(self.wake_policy)
+        .with_invoice_settlement_poll_interval(self.invoice_settlement_poll_interval);
+        NwcNode::new(config)
+            .run_notifications(budget, cancellation)
+            .await
+            .map_err(notification_host_error)
     }
 
     /// Opens and executes one wake on the shared native Tokio runtime.
@@ -553,6 +633,19 @@ impl NwcMobile {
     }
 }
 
+const fn notification_host_error(error: InvoiceNotificationError) -> HostError {
+    let kind = match error {
+        InvoiceNotificationError::Wallet | InvoiceNotificationError::Secret => {
+            HostErrorKind::Unavailable
+        }
+        InvoiceNotificationError::Ledger | InvoiceNotificationError::Build => {
+            HostErrorKind::Internal
+        }
+        _ => HostErrorKind::Internal,
+    };
+    HostError::new(kind)
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ResolvedWakeKind {
     Request,
@@ -747,6 +840,30 @@ mod tests {
         };
         assert_eq!(error.kind(), HostErrorKind::TimedOut);
         assert!(started_at.elapsed() < Duration::from_millis(150));
+    }
+
+    #[tokio::test]
+    async fn asynchronous_provider_closure_implements_the_provider_contract() {
+        let opens = Arc::new(AtomicUsize::new(0));
+        let counted_opens = Arc::clone(&opens);
+        let provider = LightningNodeProviderFn::new(move |_request, _context| {
+            counted_opens.fetch_add(1, Ordering::AcqRel);
+            Box::pin(async { Err(HostError::new(HostErrorKind::Unavailable)) })
+        });
+        let request = LightningNodeRequest {
+            wallet_service_pubkey: PublicKey::from_bytes([2; 32]),
+            diagnostics: None,
+        };
+        let budget = OperationBudget::new(Duration::from_secs(1)).expect("operation budget");
+        let context = OperationContext::new(budget, &NeverCancelled);
+
+        let result = provider.open_node(request, context).await;
+
+        let Err(error) = result else {
+            panic!("provider must be unavailable");
+        };
+        assert_eq!(error.kind(), HostErrorKind::Unavailable);
+        assert_eq!(opens.load(Ordering::Acquire), 1);
     }
 
     #[tokio::test]

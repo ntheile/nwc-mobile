@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nwc_mobile::{
-    BackgroundBudget, NotificationHint, QueueReason, RejectionCode, RetryReason, WakeDisposition,
-    WakeEnvelope, WakeEnvelopeError, WakeInput,
+    BackgroundBudget, NotificationHint, QueueReason, RejectionCode, RetryReason,
+    WakeDiagnosticCollector, WakeDisposition, WakeEnvelope, WakeEnvelopeError, WakeInput,
 };
 
 mod host_bridge;
@@ -170,6 +170,7 @@ impl std::error::Error for MobileWakeContractError {}
 #[derive(Debug, uniffi::Object)]
 pub struct ValidatedMobileWake {
     input: WakeInput,
+    settlement_check: bool,
 }
 
 #[uniffi::export]
@@ -188,6 +189,11 @@ impl ValidatedMobileWake {
     pub fn received_at_seconds(&self) -> u64 {
         self.input.received_at().as_secs()
     }
+
+    /// Returns the Rust-parsed settlement-routing marker.
+    pub fn settlement_check(&self) -> bool {
+        self.settlement_check
+    }
 }
 
 impl ValidatedMobileWake {
@@ -203,6 +209,7 @@ impl ValidatedMobileWake {
 pub fn validate_wake_envelope(
     envelope: MobileWakeEnvelope,
 ) -> Result<Arc<ValidatedMobileWake>, MobileWakeContractError> {
+    let settlement_check = envelope.settlement_check;
     Ok(Arc::new(ValidatedMobileWake {
         input: WakeEnvelope::new(
             envelope.relay_url,
@@ -213,7 +220,36 @@ pub fn validate_wake_envelope(
         )
         .validate()
         .map_err(MobileWakeContractError::from)?,
+        settlement_check,
     }))
+}
+
+/// Converts one shared wake result into the stable native-extension contract.
+#[must_use]
+pub fn extension_wake_execution(
+    disposition: WakeDisposition,
+    diagnostics: &WakeDiagnosticCollector,
+    settlement_notification_status: NwcSettlementNotificationStatus,
+) -> NwcExtensionWakeExecution {
+    NwcExtensionWakeExecution {
+        disposition: disposition.into(),
+        diagnostic_codes: diagnostics
+            .codes()
+            .into_iter()
+            .map(|code| code.as_str().to_owned())
+            .collect(),
+        settlement_notification_status,
+    }
+}
+
+/// Returns the fail-closed extension result for an invalid native wake request.
+#[must_use]
+pub fn rejected_extension_wake_execution() -> NwcExtensionWakeExecution {
+    extension_wake_execution(
+        WakeDisposition::rejected(RejectionCode::InvalidWakePayload),
+        &WakeDiagnosticCollector::default(),
+        NwcSettlementNotificationStatus::NotTracked,
+    )
 }
 
 impl From<WakeEnvelopeError> for MobileWakeContractError {
@@ -482,11 +518,14 @@ mod tests {
 
     #[test]
     fn validates_and_seals_native_wake_input() {
-        let wake = validate_wake_envelope(envelope()).expect("valid wake");
+        let mut envelope = envelope();
+        envelope.settlement_check = true;
+        let wake = validate_wake_envelope(envelope).expect("valid wake");
 
         assert_eq!(wake.event_id_hex(), HEX);
         assert!(wake.has_embedded_event());
         assert_eq!(wake.received_at_seconds(), 1_750_000_000);
+        assert!(wake.settlement_check());
         assert_eq!(wake.core_input().relay(), "wss://relay.example/path");
     }
 
