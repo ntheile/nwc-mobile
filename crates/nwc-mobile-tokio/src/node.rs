@@ -165,6 +165,26 @@ where
         .await
     }
 
+    /// Reconciles pending notifications owned by one exact wallet-service identity.
+    pub async fn run_notifications_for_wallet(
+        &self,
+        wallet_service_pubkey: &nwc_mobile::PublicKey,
+        budget: OperationBudget,
+        cancellation: &dyn CancellationSignal,
+    ) -> Result<InvoiceNotificationWorkerReport, InvoiceNotificationError> {
+        let wallet =
+            RuntimeWallet::new(&self.config.lightning_node, &self.config.wallet_info, false);
+        InvoiceNotificationWorker::new(
+            self.config.ledger,
+            &wallet,
+            self.config.relays,
+            self.config.secrets,
+            &SystemClock,
+        )
+        .run_for_wallet(wallet_service_pubkey, budget, cancellation)
+        .await
+    }
+
     /// Reconciles one exact created invoice and publishes its settlement notification.
     pub async fn handle_settlement_wake(
         &self,

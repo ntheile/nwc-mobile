@@ -172,25 +172,38 @@ pub async fn sleep(duration: Duration) {
 
 /// Polls a wallet operation until it becomes terminal or a monotonic timeout expires.
 ///
-/// The operation always runs at least once and the last observed value is returned when the
-/// timeout expires. A zero interval performs no additional attempts and avoids a busy loop.
+/// The last observed value is returned when the timeout expires. No check is started after the
+/// deadline, each individual check is bounded by the remaining time, and a zero interval performs
+/// no additional attempts. `None` means no check completed before the timeout.
 pub async fn poll_until_terminal<T, E, Check, CheckFuture, Terminal>(
     timeout: Duration,
     interval: Duration,
     mut check: Check,
     is_terminal: Terminal,
-) -> Result<T, E>
+) -> Result<Option<T>, E>
 where
     Check: FnMut() -> CheckFuture,
     CheckFuture: Future<Output = Result<T, E>>,
     Terminal: Fn(&T) -> bool,
 {
     let deadline = Instant::now() + timeout;
+    let mut last_value = None;
     loop {
-        let value = check().await?;
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if is_terminal(&value) || remaining.is_zero() || interval.is_zero() {
-            return Ok(value);
+        if remaining.is_zero() {
+            return Ok(last_value);
+        }
+        let value = match tokio::time::timeout(remaining, check()).await {
+            Ok(result) => result?,
+            Err(_) => return Ok(last_value),
+        };
+        if is_terminal(&value) {
+            return Ok(Some(value));
+        }
+        last_value = Some(value);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || interval.is_zero() {
+            return Ok(last_value);
         }
         tokio::time::sleep(remaining.min(interval)).await;
     }
@@ -418,8 +431,24 @@ mod tests {
         .await
         .expect("polling succeeds");
 
-        assert_eq!(value, 3);
+        assert_eq!(value, Some(3));
         assert_eq!(attempts.load(Ordering::Acquire), 3);
+    }
+
+    #[tokio::test]
+    async fn terminal_polling_bounds_a_hung_check() {
+        let started_at = Instant::now();
+        let value = poll_until_terminal(
+            Duration::from_millis(10),
+            Duration::from_millis(1),
+            std::future::pending::<Result<u8, ()>>,
+            |_| false,
+        )
+        .await
+        .expect("polling timeout is not a host error");
+
+        assert_eq!(value, None);
+        assert!(started_at.elapsed() < Duration::from_secs(1));
     }
 
     struct Cancellation(AtomicBool);

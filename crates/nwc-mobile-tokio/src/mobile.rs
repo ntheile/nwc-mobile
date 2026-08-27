@@ -387,7 +387,7 @@ impl NwcMobile {
             .map_err(|_| HostError::new(HostErrorKind::TimedOut))?;
         let open_context = OperationContext::new(open_budget, cancellation);
         let request = LightningNodeRequest {
-            wallet_service_pubkey,
+            wallet_service_pubkey: wallet_service_pubkey.clone(),
             diagnostics: self.diagnostics.clone(),
         };
         let opened = run_with_context(
@@ -409,7 +409,7 @@ impl NwcMobile {
         .with_wake_policy(self.wake_policy)
         .with_invoice_settlement_poll_interval(self.invoice_settlement_poll_interval);
         NwcNode::new(config)
-            .run_notifications(budget, cancellation)
+            .run_notifications_for_wallet(&wallet_service_pubkey, budget, cancellation)
             .await
             .map_err(notification_host_error)
     }

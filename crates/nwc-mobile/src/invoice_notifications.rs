@@ -445,12 +445,35 @@ impl<'a> InvoiceNotificationWorker<'a> {
         budget: OperationBudget,
         cancellation: &dyn CancellationSignal,
     ) -> Result<InvoiceNotificationWorkerReport, InvoiceNotificationError> {
+        self.run_scoped(None, budget, cancellation).await
+    }
+
+    /// Runs one pass scoped to records owned by an exact wallet-service identity.
+    pub async fn run_for_wallet(
+        &self,
+        wallet_service_pubkey: &crate::PublicKey,
+        budget: OperationBudget,
+        cancellation: &dyn CancellationSignal,
+    ) -> Result<InvoiceNotificationWorkerReport, InvoiceNotificationError> {
+        self.run_scoped(Some(wallet_service_pubkey), budget, cancellation)
+            .await
+    }
+
+    async fn run_scoped(
+        &self,
+        wallet_service_pubkey: Option<&crate::PublicKey>,
+        budget: OperationBudget,
+        cancellation: &dyn CancellationSignal,
+    ) -> Result<InvoiceNotificationWorkerReport, InvoiceNotificationError> {
         let deadline = crate::time::OperationDeadline::new(budget);
         let mut report = InvoiceNotificationWorkerReport::default();
-        let payments = self
-            .ledger
-            .pending_nwc_sent_payments(DEFAULT_BATCH_SIZE)
-            .map_err(|_| InvoiceNotificationError::Ledger)?;
+        let payments = match wallet_service_pubkey {
+            Some(public_key) => self
+                .ledger
+                .pending_nwc_sent_payments_for_wallet(public_key, DEFAULT_BATCH_SIZE),
+            None => self.ledger.pending_nwc_sent_payments(DEFAULT_BATCH_SIZE),
+        }
+        .map_err(|_| InvoiceNotificationError::Ledger)?;
         for payment in payments {
             if cancellation.is_cancelled() {
                 break;
@@ -517,10 +540,13 @@ impl<'a> InvoiceNotificationWorker<'a> {
                 report.delivered += 1;
             }
         }
-        let invoices = self
-            .ledger
-            .pending_nwc_invoices(DEFAULT_BATCH_SIZE)
-            .map_err(|_| InvoiceNotificationError::Ledger)?;
+        let invoices = match wallet_service_pubkey {
+            Some(public_key) => self
+                .ledger
+                .pending_nwc_invoices_for_wallet(public_key, DEFAULT_BATCH_SIZE),
+            None => self.ledger.pending_nwc_invoices(DEFAULT_BATCH_SIZE),
+        }
+        .map_err(|_| InvoiceNotificationError::Ledger)?;
         for invoice in invoices {
             if cancellation.is_cancelled() {
                 break;
@@ -996,6 +1022,36 @@ impl WakeLedger {
         payments
     }
 
+    fn pending_nwc_sent_payments_for_wallet(
+        &self,
+        wallet_service_pubkey: &crate::PublicKey,
+        maximum: usize,
+    ) -> Result<Vec<TrackedNwcPayment>, LedgerError> {
+        if maximum == 0 || maximum > 100 {
+            return Err(LedgerError::InvalidPruneBatch);
+        }
+        let limit = i64::try_from(maximum).map_err(|_| LedgerError::ValueOutOfRange)?;
+        let connection = self.lock_connection()?;
+        let mut statement = connection.prepare(
+            "SELECT p.request_event_id, p.payment_hash, p.connection_id,
+                    p.connection_revision, p.invoice, p.amount_msat, p.fee_msat,
+                    p.preimage, p.created_at, p.settled_at, p.notification_event_json
+             FROM nwc_sent_payments p
+             JOIN connections c ON c.connection_id = p.connection_id
+                AND c.revision = p.connection_revision
+             WHERE p.completed_at IS NULL AND c.wallet_service_pubkey = ?1
+             ORDER BY p.created_at, p.request_event_id LIMIT ?2",
+        )?;
+        let payments = statement
+            .query_map(
+                params![wallet_service_pubkey.as_bytes().as_slice(), limit],
+                decode_sent_payment,
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into);
+        payments
+    }
+
     pub(crate) fn store_nwc_sent_notification_event(
         &self,
         event_id: &EventId,
@@ -1240,6 +1296,37 @@ impl WakeLedger {
         )?;
         let invoices = statement
             .query_map(params![limit], decode_invoice)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into);
+        invoices
+    }
+
+    fn pending_nwc_invoices_for_wallet(
+        &self,
+        wallet_service_pubkey: &crate::PublicKey,
+        maximum: usize,
+    ) -> Result<Vec<TrackedNwcInvoice>, LedgerError> {
+        if maximum == 0 || maximum > 100 {
+            return Err(LedgerError::InvalidPruneBatch);
+        }
+        let limit = i64::try_from(maximum).map_err(|_| LedgerError::ValueOutOfRange)?;
+        let connection = self.lock_connection()?;
+        let mut statement = connection.prepare(
+            "SELECT i.request_event_id, i.payment_hash, i.connection_id,
+                    i.connection_revision, i.invoice, i.description, i.amount_msat,
+                    i.created_at, i.expires_at, i.notification_event_json
+             FROM nwc_created_invoices i
+             JOIN connections c ON c.connection_id = i.connection_id
+                AND c.revision = i.connection_revision
+             WHERE i.completed_at IS NULL AND c.wallet_service_pubkey = ?1
+             ORDER BY i.last_checked_at, i.created_at, i.request_event_id
+             LIMIT ?2",
+        )?;
+        let invoices = statement
+            .query_map(
+                params![wallet_service_pubkey.as_bytes().as_slice(), limit],
+                decode_invoice,
+            )?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into);
         invoices
