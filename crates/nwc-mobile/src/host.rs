@@ -382,6 +382,28 @@ impl WalletInfo {
     }
 }
 
+/// Returns the complete NIP-47 method set implemented by the high-level mobile node contract.
+#[must_use]
+pub const fn standard_nwc_methods() -> [NwcMethod; 6] {
+    [
+        NwcMethod::GetInfo,
+        NwcMethod::GetBalance,
+        NwcMethod::MakeInvoice,
+        NwcMethod::PayInvoice,
+        NwcMethod::LookupInvoice,
+        NwcMethod::ListTransactions,
+    ]
+}
+
+/// Builds the standard wallet information advertised by a complete mobile Lightning node.
+#[must_use]
+pub fn standard_wallet_info(
+    service_pubkey: PublicKey,
+    notifications: impl IntoIterator<Item = NwcNotificationType>,
+) -> WalletInfo {
+    WalletInfo::new(Some(service_pubkey), standard_nwc_methods()).with_notifications(notifications)
+}
+
 /// A request to create a Lightning invoice.
 #[derive(Clone, Eq, PartialEq)]
 pub struct MakeInvoiceRequest {
@@ -678,6 +700,69 @@ pub struct WalletTransaction {
     pub status: PaymentStatus,
 }
 
+impl WalletTransaction {
+    /// Creates a pending incoming Lightning transaction.
+    #[must_use]
+    pub fn pending_incoming(
+        payment_hash: PaymentHash,
+        amount: AmountMsat,
+        created_at: UnixTimestamp,
+    ) -> Self {
+        Self {
+            payment_hash: Some(payment_hash),
+            direction: TransactionDirection::Incoming,
+            amount,
+            fee: AmountMsat::default(),
+            created_at,
+            settled_at: None,
+            status: PaymentStatus::Pending,
+        }
+    }
+
+    /// Creates a settled incoming Lightning transaction.
+    #[must_use]
+    pub fn settled_incoming(
+        payment_hash: PaymentHash,
+        preimage: PaymentPreimage,
+        amount: AmountMsat,
+        created_at: UnixTimestamp,
+        settled_at: UnixTimestamp,
+    ) -> Self {
+        Self {
+            payment_hash: Some(payment_hash),
+            direction: TransactionDirection::Incoming,
+            amount,
+            fee: AmountMsat::default(),
+            created_at,
+            settled_at: Some(settled_at),
+            status: PaymentStatus::Succeeded {
+                preimage,
+                amount,
+                fee: AmountMsat::default(),
+            },
+        }
+    }
+
+    /// Creates a pending outgoing Lightning transaction.
+    #[must_use]
+    pub fn pending_outgoing(
+        payment_hash: PaymentHash,
+        amount: AmountMsat,
+        fee: AmountMsat,
+        created_at: UnixTimestamp,
+    ) -> Self {
+        Self {
+            payment_hash: Some(payment_hash),
+            direction: TransactionDirection::Outgoing,
+            amount,
+            fee,
+            created_at,
+            settled_at: None,
+            status: PaymentStatus::Pending,
+        }
+    }
+}
+
 /// A bounded transaction-list query produced by the protocol parser.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ListTransactionsRequest {
@@ -695,6 +780,45 @@ pub struct ListTransactionsRequest {
     pub include_unpaid: bool,
 }
 
+/// Returns whether a normalized transaction satisfies an engine-bounded list request.
+#[must_use]
+pub fn transaction_matches(
+    transaction: &WalletTransaction,
+    request: &ListTransactionsRequest,
+) -> bool {
+    if request
+        .from
+        .is_some_and(|from| transaction.created_at < from)
+        || request
+            .until
+            .is_some_and(|until| transaction.created_at > until)
+        || request
+            .direction
+            .is_some_and(|direction| transaction.direction != direction)
+    {
+        return false;
+    }
+    request.include_unpaid || matches!(transaction.status, PaymentStatus::Succeeded { .. })
+}
+
+/// Filters, newest-first sorts, offsets, and caps normalized wallet transactions.
+#[must_use]
+pub fn prepare_transaction_page(
+    transactions: impl IntoIterator<Item = WalletTransaction>,
+    request: ListTransactionsRequest,
+) -> Vec<WalletTransaction> {
+    let mut transactions = transactions
+        .into_iter()
+        .filter(|transaction| transaction_matches(transaction, &request))
+        .collect::<Vec<_>>();
+    transactions.sort_by_key(|transaction| std::cmp::Reverse(transaction.created_at));
+    transactions
+        .into_iter()
+        .skip(request.offset as usize)
+        .take(usize::from(request.limit))
+        .collect()
+}
+
 /// A compact Lightning-node contract for high-level mobile integrations.
 ///
 /// Implementations expose ordinary wallet operations and do not need to
@@ -705,7 +829,7 @@ pub struct ListTransactionsRequest {
 /// `quote_invoice` must be side-effect free. `pay_invoice` is invoked only
 /// after the engine has durably reserved the authorized amount, and must honor
 /// the supplied fee limit and idempotency key.
-pub trait LightningNode: Send + Sync {
+pub trait NwcLightningNode: Send + Sync {
     /// Returns the spendable Lightning balance.
     fn get_balance(&self) -> HostFuture<'_, Result<AmountMsat, HostError>>;
 
@@ -747,9 +871,9 @@ pub trait LightningNode: Send + Sync {
     ) -> HostFuture<'_, Result<Vec<WalletTransaction>, HostError>>;
 }
 
-impl<T> LightningNode for Arc<T>
+impl<T> NwcLightningNode for Arc<T>
 where
-    T: LightningNode + ?Sized,
+    T: NwcLightningNode + ?Sized,
 {
     fn get_balance(&self) -> HostFuture<'_, Result<AmountMsat, HostError>> {
         self.as_ref().get_balance()
@@ -993,10 +1117,46 @@ mod tests {
     }
 
     #[test]
+    fn standard_wallet_info_and_transaction_page_are_shared() {
+        let info = standard_wallet_info(
+            PublicKey::from_bytes([1; 32]),
+            [NwcNotificationType::PaymentSent],
+        );
+        assert_eq!(info.methods().collect::<Vec<_>>(), standard_nwc_methods());
+
+        let pending = WalletTransaction::pending_incoming(
+            PaymentHash::from_bytes([2; 32]),
+            AmountMsat::from_msat(1_000),
+            UnixTimestamp::from_secs(10),
+        );
+        let settled = WalletTransaction::settled_incoming(
+            PaymentHash::from_bytes([3; 32]),
+            PaymentPreimage::from_bytes([4; 32]),
+            AmountMsat::from_msat(2_000),
+            UnixTimestamp::from_secs(20),
+            UnixTimestamp::from_secs(21),
+        );
+        let request = ListTransactionsRequest {
+            from: None,
+            until: None,
+            limit: 10,
+            offset: 0,
+            direction: Some(TransactionDirection::Incoming),
+            include_unpaid: false,
+        };
+
+        assert_eq!(
+            prepare_transaction_page([pending, settled.clone()], request),
+            vec![settled]
+        );
+    }
+
+    #[test]
     fn capability_traits_are_object_safe() {
         fn accepts_capability<T: ?Sized>() {}
 
         accepts_capability::<dyn NwcWalletBackend>();
+        accepts_capability::<dyn NwcLightningNode>();
         accepts_capability::<dyn RelayTransport>();
         accepts_capability::<dyn SecretProvider>();
     }

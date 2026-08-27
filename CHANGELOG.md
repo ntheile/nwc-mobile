@@ -8,10 +8,12 @@ public API stabilizes.
 
 ## Unreleased
 
+- Renamed the high-level wallet integration contract from `LightningNode` to
+  `NwcLightningNode` so its NWC-specific role is explicit at call sites.
 - Simplified `NwcNode` construction by making `NwcNodeConfig` own the
-  application-supplied `LightningNode`.
+  application-supplied `NwcLightningNode`.
 
-- Added an LNI-style `LightningNode` contract and Tokio `NwcNode` facade that
+- Added an LNI-style `NwcLightningNode` contract and Tokio `NwcNode` facade that
   own engine assembly, execution bounds, and settlement-notification workers.
 - Added reusable application coordinators for NWA callback retries and
   process-local wake-registration refresh, execution, and timer decisions.

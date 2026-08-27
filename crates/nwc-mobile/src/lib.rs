@@ -73,9 +73,10 @@ pub use foreground::{
     DEFAULT_FOREGROUND_WAKE_RETRY_BASE_DELAY,
 };
 pub use host::{
+    prepare_transaction_page, standard_nwc_methods, standard_wallet_info, transaction_matches,
     AmountMsat, AmountSat, AtomicCancellation, CancellationSignal, CreatedInvoice, HostError,
-    HostErrorKind, HostFuture, InvoiceLookup, LightningNode, ListTransactionsRequest,
-    MakeInvoiceRequest, NeverCancelled, NwcNotificationType, NwcWalletBackend, OperationBudget,
+    HostErrorKind, HostFuture, InvoiceLookup, ListTransactionsRequest, MakeInvoiceRequest,
+    NeverCancelled, NwcLightningNode, NwcNotificationType, NwcWalletBackend, OperationBudget,
     OperationContext, PayInvoiceRequest, PaymentFailure, PaymentQuote, PaymentStatus,
     RelayTransport, SecretProvider, SecureRelayUrl, SecureWakeServerUrl, TransactionDirection,
     WalletInfo, WalletTransaction,

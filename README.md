@@ -36,7 +36,7 @@ sequenceDiagram
     participant N as Native Wake Adapter<br/>(iOS NSE / Android Worker)
     participant E as nwc-mobile Engine
     participant L as Shared Wake Ledger
-    participant W as LightningNode
+    participant W as NwcLightningNode
 
     C->>R: Publish encrypted kind 23194 request
     P->>R: Observe registered client and wallet pubkeys
@@ -109,7 +109,7 @@ Tokio can opt into `nwc-mobile-nostr` for a bounded WSS transport with redirect,
 message-size, deadline, and cancellation enforcement. Native companion packages
 stay small and optional.
 
-Wallets implement the compact `LightningNode` contract plus a
+Wallets implement the compact `NwcLightningNode` contract plus a
 `LightningNodeProvider` that opens it after an NSE or Android worker starts
 cold. The primary `nwc_mobile_tokio::NwcMobile` interface owns the ledger,
 engine and notification-worker assembly, node opening, runtime deadlines,
@@ -189,7 +189,7 @@ engine boundary, these functions do not receive NWC ledgers, relay transports,
 diagnostic sinks, clocks, operation budgets, or cancellation objects:
 
 ```rust,ignore
-pub trait LightningNode: Send + Sync {
+pub trait NwcLightningNode: Send + Sync {
     fn get_balance(&self) -> HostFuture<'_, Result<AmountMsat, HostError>>;
     fn create_invoice(&self, request: MakeInvoiceRequest)
         -> HostFuture<'_, Result<CreatedInvoice, HostError>>;
@@ -259,7 +259,7 @@ that is already open. `StoredNwcSecrets` adapts one platform-protected key-value
 store to both wallet-service and client-secret contracts, and
 `InvoiceSettlementCompletion` from `nwc-mobile-http` owns the standard
 wake-server completion flow. Together these keep application integration code
-focused on opening its wallet and implementing `LightningNode`.
+focused on opening its wallet and implementing `NwcLightningNode`.
 
 `NwcNode` and `NwcNodeConfig` are still available for lower-level integrations
 that already own the wallet and want to invoke request or notification workers
