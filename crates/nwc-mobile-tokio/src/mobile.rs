@@ -499,11 +499,7 @@ fn settlement_disposition(
     match report {
         Ok(report) if report.has_pending_work() => WakeDisposition::RetryAfter {
             delay: DEFAULT_NWC_MOBILE_SETTLEMENT_RETRY_DELAY,
-            reason: if report.retryable > 0 {
-                RetryReason::RelayUnavailable
-            } else {
-                RetryReason::WalletUnavailable
-            },
+            reason: RetryReason::WalletUnavailable,
             notification: NotificationHint::Processing,
         },
         Ok(_) => WakeDisposition::Completed {
@@ -638,7 +634,7 @@ mod tests {
             disposition,
             WakeDisposition::RetryAfter {
                 delay: DEFAULT_NWC_MOBILE_SETTLEMENT_RETRY_DELAY,
-                reason: RetryReason::RelayUnavailable,
+                reason: RetryReason::WalletUnavailable,
                 ..
             }
         ));
