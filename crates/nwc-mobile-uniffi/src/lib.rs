@@ -78,6 +78,29 @@ pub struct MobileProcessedWakeRequest {
     pub processed_at_seconds: u64,
 }
 
+/// Safe settlement-notification state for native notification presentation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, uniffi::Enum)]
+pub enum NwcSettlementNotificationStatus {
+    /// The request did not create a tracked invoice.
+    #[default]
+    NotTracked,
+    /// The invoice remains pending or its notification has not reached every relay.
+    Pending,
+    /// The settlement notification reached every approved relay.
+    Delivered,
+}
+
+/// Safe, non-secret result metadata from one native wake execution.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct NwcExtensionWakeExecution {
+    /// Platform-neutral terminal or handoff outcome.
+    pub disposition: MobileWakeDisposition,
+    /// Stable diagnostic codes with no remote or secret-bearing text.
+    pub diagnostic_codes: Vec<String>,
+    /// Settlement state suitable for notification presentation.
+    pub settlement_notification_status: NwcSettlementNotificationStatus,
+}
+
 /// Parses canonical or compatibility push JSON into the shared native envelope.
 #[uniffi::export]
 pub fn parse_mobile_wake_payload_json(
