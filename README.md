@@ -236,7 +236,12 @@ let config = NwcMobileConfig::new(
 let nwc = NwcMobile::open(config)?;
 
 let result = nwc
-    .handle_wake(input, NwcMobileWakeKind::Request, window, cancellation)
+    .execute_wake(
+        input,
+        NwcMobileWakeKind::Request,
+        Duration::from_secs(30),
+        cancellation,
+    )
     .await;
 ```
 

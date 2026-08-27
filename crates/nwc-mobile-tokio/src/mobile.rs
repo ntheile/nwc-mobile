@@ -236,7 +236,7 @@ impl NwcMobileConfig {
 /// `NwcMobile` opens the shared ledger, cold-starts the application's Lightning node, enforces
 /// background deadlines, validates settlement wakes, executes NIP-47 requests, reconciles
 /// notifications, and runs an optional bounded completion hook. Native iOS and Android entry
-/// points only need to validate their platform envelope and call [`Self::handle_wake`].
+/// points only need to validate their platform envelope and call [`Self::execute_wake`].
 pub struct NwcMobile {
     manager: NwcApplicationManager,
     node_provider: Arc<dyn LightningNodeProvider>,
@@ -278,7 +278,36 @@ impl NwcMobile {
         &mut self.manager
     }
 
-    /// Executes one request or exact invoice-settlement wake inside the supplied OS window.
+    /// Executes one native wake inside a single hard operating-system deadline.
+    pub async fn execute_wake(
+        &self,
+        input: WakeInput,
+        kind: NwcMobileWakeKind,
+        execution_time: Duration,
+        cancellation: &dyn CancellationSignal,
+    ) -> NwcMobileWakeResult {
+        if execution_time.is_zero() || cancellation.is_cancelled() {
+            return queued_result();
+        }
+        let window = BackgroundWakeWindow {
+            started_at: std::time::Instant::now(),
+            total: execution_time,
+        };
+        match tokio::time::timeout(
+            execution_time,
+            self.handle_wake(input, kind, window, cancellation),
+        )
+        .await
+        {
+            Ok(result) if !cancellation.is_cancelled() => result,
+            Ok(_) | Err(_) => queued_result(),
+        }
+    }
+
+    /// Executes one request inside an existing shared background window.
+    ///
+    /// Most applications should call [`Self::execute_wake`]. This lower-level method is useful
+    /// when several application operations already share one externally bounded window.
     pub async fn handle_wake(
         &self,
         input: WakeInput,
