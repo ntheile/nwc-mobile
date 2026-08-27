@@ -115,7 +115,7 @@ pub fn parse_mobile_wake_payload_json(
             wallet_service_public_key_hex: envelope.wallet_service_public_key_hex().to_owned(),
             embedded_event_json: envelope.embedded_event_json().map(str::to_owned),
             received_at_seconds: envelope.received_at_seconds(),
-            settlement_check: false,
+            settlement_check: envelope.settlement_check(),
         })
 }
 
@@ -488,6 +488,17 @@ mod tests {
         assert!(wake.has_embedded_event());
         assert_eq!(wake.received_at_seconds(), 1_750_000_000);
         assert_eq!(wake.core_input().relay(), "wss://relay.example/path");
+    }
+
+    #[test]
+    fn rust_payload_parser_preserves_settlement_intent() {
+        let payload = format!(
+            r#"{{"nwc_relay":"wss://relay.example/path","nwc_event_id":"{HEX}","nwc_wallet_service_pubkey":"{HEX}","settlement_check":true}}"#
+        );
+
+        let envelope = parse_mobile_wake_payload_json(payload, 1).expect("valid wake payload");
+
+        assert!(envelope.settlement_check);
     }
 
     #[test]
