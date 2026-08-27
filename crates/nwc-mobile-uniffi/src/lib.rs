@@ -53,6 +53,8 @@ pub struct MobileWakeEnvelope {
     pub embedded_event_json: Option<String>,
     /// Whole seconds since the Unix epoch when the native adapter received it.
     pub received_at_seconds: u64,
+    /// Whether a trusted wake provider marked this as a targeted settlement check.
+    pub settlement_check: bool,
 }
 
 /// Bounded display history for a wake handled by the containing application.
@@ -90,6 +92,7 @@ pub fn parse_mobile_wake_payload_json(
             wallet_service_public_key_hex: envelope.wallet_service_public_key_hex().to_owned(),
             embedded_event_json: envelope.embedded_event_json().map(str::to_owned),
             received_at_seconds: envelope.received_at_seconds(),
+            settlement_check: false,
         })
 }
 
@@ -102,6 +105,7 @@ impl fmt::Debug for MobileWakeEnvelope {
             .field("wallet_service_public_key_hex", &"[redacted]")
             .field("has_embedded_event", &self.embedded_event_json.is_some())
             .field("received_at_seconds", &self.received_at_seconds)
+            .field("settlement_check", &self.settlement_check)
             .finish()
     }
 }
@@ -449,6 +453,7 @@ mod tests {
             wallet_service_public_key_hex: HEX.to_owned(),
             embedded_event_json: Some("{}".to_owned()),
             received_at_seconds: 1_750_000_000,
+            settlement_check: false,
         }
     }
 
