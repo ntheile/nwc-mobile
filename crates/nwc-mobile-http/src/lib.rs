@@ -15,9 +15,12 @@ use nwc_mobile::{
     NeverCancelled, Nip98Authorization, Nip98SigningKey, OperationBudget, OperationContext,
     SecureWakeServerUrl, SystemClock, WakeLedger, WakeRegistrationChange, WakeRegistrationError,
     WakeRegistrationTransport, WakeRegistrationWorker, WakeRegistrationWorkerError,
-    MAX_APPLICATION_ICON_BYTES,
+    WalletServiceSigningKeyProvider, MAX_APPLICATION_ICON_BYTES,
 };
-use nwc_mobile_tokio::{resolve_socket_addresses, run_with_context};
+use nwc_mobile_tokio::{
+    resolve_socket_addresses, run_with_context, NwcMobileCompletionContext,
+    NwcMobileCompletionHandler,
+};
 use serde::Serialize;
 
 const REGISTRATION_BATCH_SIZE: usize = 20;
@@ -271,6 +274,49 @@ impl fmt::Debug for ReadyApnsWakeRegistrationConfig {
 pub struct InvoiceSettlementMonitorConfig {
     server_url: SecureWakeServerUrl,
     install_id: String,
+}
+
+/// Shared completion hook that synchronizes one invoice monitor with a wake server.
+pub struct InvoiceSettlementCompletion<P> {
+    config: InvoiceSettlementMonitorConfig,
+    signing_keys: P,
+}
+
+impl<P> InvoiceSettlementCompletion<P> {
+    /// Creates a completion hook over validated monitor configuration and protected keys.
+    #[must_use]
+    pub const fn new(config: InvoiceSettlementMonitorConfig, signing_keys: P) -> Self {
+        Self {
+            config,
+            signing_keys,
+        }
+    }
+}
+
+impl<P> NwcMobileCompletionHandler for InvoiceSettlementCompletion<P>
+where
+    P: WalletServiceSigningKeyProvider,
+{
+    fn complete<'a>(
+        &'a self,
+        context: NwcMobileCompletionContext<'a>,
+    ) -> HostFuture<'a, Result<(), HostError>> {
+        Box::pin(async move {
+            if context.operation().cancellation().is_cancelled() {
+                return Err(HostError::new(HostErrorKind::Cancelled));
+            }
+            let signing_key = self.signing_keys.load_wallet_service_signing_key()?;
+            update_invoice_settlement_monitor(
+                context.ledger(),
+                self.config.clone(),
+                context.request_event_id(),
+                signing_key,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|_| HostError::new(HostErrorKind::Unavailable))
+        })
+    }
 }
 
 impl InvoiceSettlementMonitorConfig {

@@ -5,14 +5,33 @@ import Foundation
 public struct NwcQueuedWakeRequest: Sendable, Equatable, Codable {
   public let payload: NwcWakePayload
   public let receivedAtSeconds: UInt64
+  public let settlementCheck: Bool
 
-  public init(payload: NwcWakePayload, receivedAtSeconds: UInt64) {
+  public init(
+    payload: NwcWakePayload,
+    receivedAtSeconds: UInt64,
+    settlementCheck: Bool = false
+  ) {
     self.payload = payload
     self.receivedAtSeconds = receivedAtSeconds
+    self.settlementCheck = settlementCheck
   }
 
   public var eventIDHex: String {
     payload.eventIDHex
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case payload
+    case receivedAtSeconds
+    case settlementCheck
+  }
+
+  public init(from decoder: any Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    payload = try container.decode(NwcWakePayload.self, forKey: .payload)
+    receivedAtSeconds = try container.decode(UInt64.self, forKey: .receivedAtSeconds)
+    settlementCheck = try container.decodeIfPresent(Bool.self, forKey: .settlementCheck) ?? false
   }
 }
 

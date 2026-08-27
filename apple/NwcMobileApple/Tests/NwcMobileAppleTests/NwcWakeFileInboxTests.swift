@@ -74,6 +74,19 @@ final class NwcWakeFileInboxTests: XCTestCase {
     XCTAssertEqual(try Data(contentsOf: queueURL), Data("not-json".utf8))
   }
 
+  func testLegacyQueueDefaultsToOrdinaryRequestIntent() throws {
+    let legacy = """
+      [{"payload":{"relayURL":"wss://relay.example","eventIDHex":"event","walletServicePublicKeyHex":"wallet-key"},"receivedAtSeconds":1}]
+      """
+    let requests = try JSONDecoder().decode(
+      [NwcQueuedWakeRequest].self,
+      from: Data(legacy.utf8)
+    )
+
+    XCTAssertEqual(requests.count, 1)
+    XCTAssertFalse(requests[0].settlementCheck)
+  }
+
   private func makeInbox(maxPendingRequests: Int) -> NwcWakeFileInbox {
     NwcWakeFileInbox(
       directoryURL: makeTemporaryDirectory(),
