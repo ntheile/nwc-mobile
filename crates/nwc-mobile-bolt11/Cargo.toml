@@ -9,7 +9,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
-lightning-invoice = { version = "=0.34.0", features = ["std"] }
+lightning-invoice = { version = "=0.34.1", features = ["std"] }
 nwc-mobile = { version = "=0.1.0", path = "../nwc-mobile" }
 
 [dev-dependencies]
