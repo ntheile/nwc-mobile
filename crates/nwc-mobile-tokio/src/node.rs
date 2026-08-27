@@ -18,7 +18,8 @@ pub const DEFAULT_INVOICE_SETTLEMENT_POLL_INTERVAL: Duration = Duration::from_mi
 const INVOICE_SETTLEMENT_COMPLETION_RESERVE: Duration = Duration::from_secs(3);
 
 /// Stable engine configuration shared by foreground and background NWC nodes.
-pub struct NwcNodeConfig<'a> {
+pub struct NwcNodeConfig<'a, N> {
+    lightning_node: N,
     ledger: &'a WakeLedger,
     relays: &'a dyn RelayTransport,
     secrets: &'a dyn SecretProvider,
@@ -27,16 +28,18 @@ pub struct NwcNodeConfig<'a> {
     invoice_settlement_poll_interval: Duration,
 }
 
-impl<'a> NwcNodeConfig<'a> {
-    /// Creates a node configuration with the hardened default wake policy.
+impl<'a, N> NwcNodeConfig<'a, N> {
+    /// Creates a node configuration around one application-supplied Lightning node.
     #[must_use]
     pub fn new(
+        lightning_node: N,
         ledger: &'a WakeLedger,
         relays: &'a dyn RelayTransport,
         secrets: &'a dyn SecretProvider,
         wallet_info: WalletInfo,
     ) -> Self {
         Self {
+            lightning_node,
             ledger,
             relays,
             secrets,
@@ -68,8 +71,7 @@ impl<'a> NwcNodeConfig<'a> {
 /// applications provide only their Lightning operations plus relay and secret
 /// capabilities in [`NwcNodeConfig`].
 pub struct NwcNode<'a, N> {
-    config: NwcNodeConfig<'a>,
-    wallet: N,
+    config: NwcNodeConfig<'a, N>,
     diagnostics: Option<&'a dyn WakeDiagnosticSink>,
 }
 
@@ -77,12 +79,11 @@ impl<'a, N> NwcNode<'a, N>
 where
     N: LightningNode,
 {
-    /// Creates an NWC node around one configured Lightning node.
+    /// Creates an NWC node from a complete configuration.
     #[must_use]
-    pub const fn new(config: NwcNodeConfig<'a>, wallet: N) -> Self {
+    pub const fn new(config: NwcNodeConfig<'a, N>) -> Self {
         Self {
             config,
-            wallet,
             diagnostics: None,
         }
     }
@@ -103,7 +104,8 @@ where
     ) -> WakeDisposition {
         let started = Instant::now();
         let request_event_id = input.event_id().clone();
-        let wallet = RuntimeWallet::new(&self.wallet, &self.config.wallet_info, false);
+        let wallet =
+            RuntimeWallet::new(&self.config.lightning_node, &self.config.wallet_info, false);
         let engine = WakeEngine::new(
             self.config.ledger,
             &wallet,
@@ -150,7 +152,8 @@ where
         budget: OperationBudget,
         cancellation: &dyn CancellationSignal,
     ) -> Result<InvoiceNotificationWorkerReport, InvoiceNotificationError> {
-        let wallet = RuntimeWallet::new(&self.wallet, &self.config.wallet_info, false);
+        let wallet =
+            RuntimeWallet::new(&self.config.lightning_node, &self.config.wallet_info, false);
         InvoiceNotificationWorker::new(
             self.config.ledger,
             &wallet,
@@ -169,7 +172,8 @@ where
         budget: OperationBudget,
         cancellation: &dyn CancellationSignal,
     ) -> Result<InvoiceNotificationWorkerReport, InvoiceNotificationError> {
-        let wallet = RuntimeWallet::new(&self.wallet, &self.config.wallet_info, true);
+        let wallet =
+            RuntimeWallet::new(&self.config.lightning_node, &self.config.wallet_info, true);
         InvoiceNotificationWorker::new(
             self.config.ledger,
             &wallet,
