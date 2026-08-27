@@ -15,6 +15,7 @@ use nwc_mobile::{
     BackgroundBudget, NotificationHint, QueueReason, RejectionCode, RetryReason,
     WakeDiagnosticCollector, WakeDisposition, WakeEnvelope, WakeEnvelopeError, WakeInput,
 };
+use nwc_mobile_tokio::{NwcMobile, NwcMobileConfig, NwcMobileSettlementStatus, NwcMobileWakeKind};
 
 mod host_bridge;
 mod mobile_engine;
@@ -36,6 +37,8 @@ pub use mobile_engine::{
 };
 
 uniffi::setup_scaffolding!();
+
+const MAX_NATIVE_EXTENSION_EXECUTION_MILLISECONDS: u64 = 30_000;
 
 /// Untrusted platform fields decoded from an APNs or FCM notification.
 ///
@@ -197,12 +200,6 @@ impl ValidatedMobileWake {
     pub fn core_input(&self) -> WakeInput {
         self.input.clone()
     }
-
-    /// Returns the Rust-parsed settlement-routing marker.
-    #[must_use]
-    pub const fn settlement_check(&self) -> bool {
-        self.settlement_check
-    }
 }
 
 /// Validates and seals an untrusted native wake envelope.
@@ -225,9 +222,47 @@ pub fn validate_wake_envelope(
     }))
 }
 
-/// Converts one shared wake result into the stable native-extension contract.
-#[must_use]
-pub fn extension_wake_execution(
+/// Validates and executes one wake through the shared native runtime.
+///
+/// This Rust-only bridge owns the generic native-extension plumbing: untrusted-envelope
+/// validation, the 30-second platform bound, diagnostic collection, Tokio execution, and stable
+/// result conversion. Applications only construct their wallet-specific [`NwcMobileConfig`].
+pub async fn execute_native_extension_wake(
+    config: NwcMobileConfig,
+    envelope: MobileWakeEnvelope,
+    execution_milliseconds: u64,
+    cancellation: Arc<MobileCancellation>,
+) -> NwcExtensionWakeExecution {
+    let Some(execution_time) = native_extension_execution_duration(execution_milliseconds) else {
+        return rejected_extension_wake_execution();
+    };
+    let validated = match validate_wake_envelope(envelope) {
+        Ok(wake) => wake,
+        Err(_) => return rejected_extension_wake_execution(),
+    };
+    let diagnostics = Arc::new(WakeDiagnosticCollector::default());
+    let result = NwcMobile::execute_native_wake(
+        config.with_diagnostics(diagnostics.clone()),
+        validated.core_input(),
+        NwcMobileWakeKind::from_settlement_check(validated.settlement_check),
+        execution_time,
+        cancellation,
+    )
+    .await;
+    extension_wake_execution(
+        result.disposition(),
+        &diagnostics,
+        settlement_notification_status(result.settlement_status()),
+    )
+}
+
+fn native_extension_execution_duration(execution_milliseconds: u64) -> Option<Duration> {
+    (execution_milliseconds > 0
+        && execution_milliseconds <= MAX_NATIVE_EXTENSION_EXECUTION_MILLISECONDS)
+        .then(|| Duration::from_millis(execution_milliseconds))
+}
+
+fn extension_wake_execution(
     disposition: WakeDisposition,
     diagnostics: &WakeDiagnosticCollector,
     settlement_notification_status: NwcSettlementNotificationStatus,
@@ -243,14 +278,22 @@ pub fn extension_wake_execution(
     }
 }
 
-/// Returns the fail-closed extension result for an invalid native wake request.
-#[must_use]
-pub fn rejected_extension_wake_execution() -> NwcExtensionWakeExecution {
+fn rejected_extension_wake_execution() -> NwcExtensionWakeExecution {
     extension_wake_execution(
         WakeDisposition::rejected(RejectionCode::InvalidWakePayload),
         &WakeDiagnosticCollector::default(),
         NwcSettlementNotificationStatus::NotTracked,
     )
+}
+
+const fn settlement_notification_status(
+    value: NwcMobileSettlementStatus,
+) -> NwcSettlementNotificationStatus {
+    match value {
+        NwcMobileSettlementStatus::Pending => NwcSettlementNotificationStatus::Pending,
+        NwcMobileSettlementStatus::Delivered => NwcSettlementNotificationStatus::Delivered,
+        _ => NwcSettlementNotificationStatus::NotTracked,
+    }
 }
 
 impl From<WakeEnvelopeError> for MobileWakeContractError {
@@ -526,7 +569,7 @@ mod tests {
         assert_eq!(wake.event_id_hex(), HEX);
         assert!(wake.has_embedded_event());
         assert_eq!(wake.received_at_seconds(), 1_750_000_000);
-        assert!(wake.settlement_check());
+        assert!(wake.settlement_check);
         assert_eq!(wake.core_input().relay(), "wss://relay.example/path");
     }
 
@@ -582,6 +625,23 @@ mod tests {
         assert_eq!(
             mobile_execution_window(30_000, 30_000),
             Err(MobileWakeContractError::InvalidBackgroundWindow)
+        );
+    }
+
+    #[test]
+    fn native_extension_execution_enforces_the_platform_window() {
+        assert_eq!(native_extension_execution_duration(0), None);
+        assert_eq!(
+            native_extension_execution_duration(MAX_NATIVE_EXTENSION_EXECUTION_MILLISECONDS),
+            Some(Duration::from_millis(
+                MAX_NATIVE_EXTENSION_EXECUTION_MILLISECONDS
+            ))
+        );
+        assert_eq!(
+            native_extension_execution_duration(
+                MAX_NATIVE_EXTENSION_EXECUTION_MILLISECONDS.saturating_add(1)
+            ),
+            None
         );
     }
 

@@ -233,15 +233,20 @@ let config = NwcMobileConfig::new(
     NostrRelayTransport,
     secret_provider,
 );
-let result = NwcMobile::execute_native_wake(
+let result = execute_native_extension_wake(
     config,
-    input,
-    NwcMobileWakeKind::from_settlement_check(settlement_check),
-    Duration::from_secs(30),
+    mobile_wake_envelope,
+    execution_milliseconds,
     cancellation,
 )
 .await;
 ```
+
+`execute_native_extension_wake` validates the untrusted envelope and platform
+window, collects bounded diagnostics, selects ordinary versus settlement work,
+runs `NwcMobile` on the shared Tokio runtime, and returns the stable native
+extension result. Rust hosts that already own validated `WakeInput` values can
+still call `NwcMobile::execute_native_wake` directly.
 
 Use `NwcMobileWakeKind::InvoiceSettlement` when a provider wake identifies one
 exact created invoice. `NwcMobile` validates that wake against its durable

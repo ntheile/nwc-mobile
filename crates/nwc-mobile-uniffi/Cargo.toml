@@ -13,5 +13,6 @@ crate-type = ["lib", "cdylib", "staticlib"]
 [dependencies]
 async-trait = "=0.1.92"
 nwc-mobile = { version = "=0.1.0", path = "../nwc-mobile" }
+nwc-mobile-tokio = { version = "=0.1.0", path = "../nwc-mobile-tokio" }
 uniffi = { version = "=0.31.1", default-features = false }
 zeroize = "=1.8.2"
