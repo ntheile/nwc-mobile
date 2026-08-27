@@ -190,8 +190,8 @@ pub trait LightningNode: Send + Sync {
     fn get_balance(&self) -> HostFuture<'_, Result<AmountMsat, HostError>>;
     fn create_invoice(&self, request: MakeInvoiceRequest)
         -> HostFuture<'_, Result<CreatedInvoice, HostError>>;
-    fn quote_invoice(&self, invoice: &str, amount: Option<AmountMsat>)
-        -> HostFuture<'_, Result<PaymentQuote, HostError>>;
+    fn quote_invoice<'a>(&'a self, invoice: &'a str, amount: Option<AmountMsat>)
+        -> HostFuture<'a, Result<PaymentQuote, HostError>>;
     fn pay_invoice(&self, request: PayInvoiceRequest)
         -> HostFuture<'_, Result<PaymentStatus, HostError>>;
     fn lookup_invoice(&self, request: InvoiceLookup, settlement_timeout: Option<Duration>)
