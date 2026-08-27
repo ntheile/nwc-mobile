@@ -13,7 +13,7 @@ use nwc_mobile::{
 };
 
 use crate::{
-    run_with_context, BackgroundWakeWindow, NwcNode, NwcNodeConfig,
+    run_on_native_runtime, run_with_context, BackgroundWakeWindow, NwcNode, NwcNodeConfig,
     DEFAULT_INVOICE_SETTLEMENT_POLL_INTERVAL,
 };
 
@@ -27,10 +27,24 @@ pub const DEFAULT_NWC_MOBILE_SETTLEMENT_RETRY_DELAY: Duration = Duration::from_s
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum NwcMobileWakeKind {
+    /// Select settlement processing only when the exact wake matches a tracked invoice.
+    Automatic,
     /// Execute an ordinary NIP-47 request.
     Request,
     /// Reconcile the exact invoice created by the original request.
     InvoiceSettlement,
+}
+
+impl NwcMobileWakeKind {
+    /// Converts a trusted native settlement marker into the corresponding wake kind.
+    #[must_use]
+    pub const fn from_settlement_check(settlement_check: bool) -> Self {
+        if settlement_check {
+            Self::InvoiceSettlement
+        } else {
+            Self::Request
+        }
+    }
 }
 
 /// Safe settlement-notification state after one mobile wake.
@@ -123,6 +137,36 @@ pub trait LightningNodeProvider: Send + Sync {
         request: LightningNodeRequest,
         context: OperationContext<'a>,
     ) -> HostFuture<'a, Result<OpenedLightningNode, HostError>>;
+}
+
+/// Adapts an already-open wallet to the provider contract without host boilerplate.
+pub struct ReadyLightningNodeProvider<F> {
+    open: F,
+}
+
+impl<F> ReadyLightningNodeProvider<F> {
+    /// Creates a provider from a synchronous factory over the typed wake request.
+    #[must_use]
+    pub const fn new(open: F) -> Self {
+        Self { open }
+    }
+}
+
+impl<F> LightningNodeProvider for ReadyLightningNodeProvider<F>
+where
+    F: Fn(LightningNodeRequest) -> Result<OpenedLightningNode, HostError> + Send + Sync,
+{
+    fn open_node<'a>(
+        &'a self,
+        request: LightningNodeRequest,
+        context: OperationContext<'a>,
+    ) -> HostFuture<'a, Result<OpenedLightningNode, HostError>> {
+        if context.cancellation().is_cancelled() {
+            return Box::pin(async { Err(HostError::new(nwc_mobile::HostErrorKind::Cancelled)) });
+        }
+        let opened = (self.open)(request);
+        Box::pin(async move { opened })
+    }
 }
 
 /// Context for optional application-specific work after NWC execution completes.
@@ -282,6 +326,35 @@ impl NwcMobile {
         &mut self.manager
     }
 
+    /// Opens and executes one wake on the shared native Tokio runtime.
+    ///
+    /// This is the preferred entry point for Swift, Kotlin, and other hosts whose async executor
+    /// is not Tokio. Runtime startup, ledger-open failures, and task failures are converted into
+    /// stable application handoffs.
+    pub async fn execute_native_wake<C>(
+        config: NwcMobileConfig,
+        input: WakeInput,
+        kind: NwcMobileWakeKind,
+        execution_time: Duration,
+        cancellation: Arc<C>,
+    ) -> NwcMobileWakeResult
+    where
+        C: CancellationSignal + 'static,
+    {
+        let operation = async move {
+            let mobile = match Self::open(config) {
+                Ok(mobile) => mobile,
+                Err(_) => return queued_result(QueueReason::LedgerBusy, None),
+            };
+            mobile
+                .execute_wake(input, kind, execution_time, cancellation.as_ref())
+                .await
+        };
+        run_on_native_runtime(operation)
+            .await
+            .unwrap_or_else(|_| queued_result(QueueReason::WalletUnavailable, None))
+    }
+
     /// Executes one native wake inside a single hard operating-system deadline.
     pub async fn execute_wake(
         &self,
@@ -325,14 +398,22 @@ impl NwcMobile {
             Err(_) => return queued_result(QueueReason::LedgerBusy, None),
         };
         let initial_settlement_status = settlement_status(initial_monitor.as_ref());
-        if kind == NwcMobileWakeKind::InvoiceSettlement
-            && !settlement_wake_matches(initial_monitor.as_ref(), &input)
-        {
-            return result(
-                WakeDisposition::rejected(RejectionCode::InvalidWakePayload),
-                NwcMobileSettlementStatus::NotTracked,
-            );
-        }
+        let settlement_matches = settlement_wake_matches(initial_monitor.as_ref(), &input);
+        let kind = match kind {
+            NwcMobileWakeKind::Automatic if settlement_matches => {
+                ResolvedWakeKind::InvoiceSettlement
+            }
+            NwcMobileWakeKind::Automatic | NwcMobileWakeKind::Request => ResolvedWakeKind::Request,
+            NwcMobileWakeKind::InvoiceSettlement if settlement_matches => {
+                ResolvedWakeKind::InvoiceSettlement
+            }
+            NwcMobileWakeKind::InvoiceSettlement => {
+                return result(
+                    WakeDisposition::rejected(RejectionCode::InvalidWakePayload),
+                    NwcMobileSettlementStatus::NotTracked,
+                )
+            }
+        };
 
         let Some(open_budget) = self.engine_budget(window) else {
             return queued_result(QueueReason::Deadline, initial_monitor.as_ref());
@@ -371,16 +452,16 @@ impl NwcMobile {
         .with_invoice_settlement_poll_interval(self.invoice_settlement_poll_interval);
         let node = NwcNode::new(node_config);
         let disposition = match (kind, self.diagnostics.as_deref()) {
-            (NwcMobileWakeKind::Request, Some(diagnostics)) => {
+            (ResolvedWakeKind::Request, Some(diagnostics)) => {
                 node.with_diagnostics(diagnostics)
                     .handle_wake(input, operation_budget, cancellation)
                     .await
             }
-            (NwcMobileWakeKind::Request, None) => {
+            (ResolvedWakeKind::Request, None) => {
                 node.handle_wake(input, operation_budget, cancellation)
                     .await
             }
-            (NwcMobileWakeKind::InvoiceSettlement, _) => {
+            (ResolvedWakeKind::InvoiceSettlement, _) => {
                 let report = node
                     .handle_settlement_wake(&event_id, operation_budget, cancellation)
                     .await;
@@ -398,7 +479,7 @@ impl NwcMobile {
             }
         };
         let settlement_status = settlement_status(monitor.as_ref());
-        let disposition = if kind == NwcMobileWakeKind::InvoiceSettlement
+        let disposition = if kind == ResolvedWakeKind::InvoiceSettlement
             && settlement_status == NwcMobileSettlementStatus::Delivered
         {
             WakeDisposition::Completed {
@@ -454,6 +535,12 @@ impl NwcMobile {
         };
         let _ = run_with_context(operation, handler.complete(context)).await;
     }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ResolvedWakeKind {
+    Request,
+    InvoiceSettlement,
 }
 
 fn settlement_wake_matches(monitor: Option<&InvoiceSettlementMonitor>, input: &WakeInput) -> bool {
@@ -619,6 +706,48 @@ mod tests {
             }
         ));
         assert_eq!(opens.load(Ordering::Acquire), 0);
+        std::fs::remove_dir_all(directory).expect("remove temporary directory");
+    }
+
+    #[tokio::test]
+    async fn automatic_untracked_wake_uses_request_processing() {
+        let opens = Arc::new(AtomicUsize::new(0));
+        let directory = temporary_directory("automatic-request");
+        std::fs::create_dir_all(&directory).expect("temporary directory");
+        let config = NwcMobileConfig::new(
+            &directory,
+            UnexpectedProvider(Arc::clone(&opens)),
+            UnusedRelay,
+            UnusedSecrets,
+        );
+        let mobile = NwcMobile::open(config).expect("mobile runtime");
+        let input = WakeInput::new(
+            "wss://relay.example.com".to_owned(),
+            EventId::from_bytes([3; 32]),
+            PublicKey::from_bytes([4; 32]),
+            None,
+            UnixTimestamp::from_secs(1),
+        );
+        let result = mobile
+            .handle_wake(
+                input,
+                NwcMobileWakeKind::Automatic,
+                BackgroundWakeWindow {
+                    started_at: std::time::Instant::now(),
+                    total: Duration::from_secs(1),
+                },
+                &NeverCancelled,
+            )
+            .await;
+
+        assert!(matches!(
+            result.disposition(),
+            WakeDisposition::QueuedForApplication {
+                reason: QueueReason::WalletUnavailable,
+                ..
+            }
+        ));
+        assert_eq!(opens.load(Ordering::Acquire), 1);
         std::fs::remove_dir_all(directory).expect("remove temporary directory");
     }
 

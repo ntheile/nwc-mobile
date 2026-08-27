@@ -29,6 +29,7 @@ mod outcome;
 mod payment_accounting;
 mod payment_reconciliation;
 mod policy;
+mod secret_store;
 mod time;
 mod types;
 mod wake_envelope;
@@ -109,6 +110,7 @@ pub use payment_reconciliation::{
     MAX_PAYMENT_RECONCILIATION_BATCH,
 };
 pub use policy::{BudgetInterval, BudgetPolicy, ConnectionPolicy, FeePolicy, WakePolicy};
+pub use secret_store::{ProtectedSecretStore, StoredNwcSecrets, WalletServiceSigningKeyProvider};
 pub use time::{BackgroundBudget, Clock, SystemClock, UnixTimestamp};
 pub use types::{
     ConnectionId, ConnectionRevision, EventId, NwcMethod, PaymentHash, PaymentPreimage, PublicKey,
