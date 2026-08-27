@@ -189,7 +189,6 @@ impl ValidatedMobileWake {
     pub fn received_at_seconds(&self) -> u64 {
         self.input.received_at().as_secs()
     }
-
 }
 
 impl ValidatedMobileWake {
