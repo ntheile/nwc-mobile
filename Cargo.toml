@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "crates/nwc-mobile",
-    "crates/nwc-mobile-bark",
     "crates/nwc-mobile-bolt11",
     "crates/nwc-mobile-http",
     "crates/nwc-mobile-nostr",
