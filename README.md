@@ -247,9 +247,8 @@ Use `NwcMobileWakeKind::InvoiceSettlement` when a provider wake identifies one
 exact created invoice. `NwcMobile` validates that wake against its durable
 monitor before opening the wallet. A completion handler can use the reserved
 tail of the OS window to synchronize application-specific wake-server state.
-Foreground hosts that do not receive an explicit settlement marker can use
-`NwcMobileWakeKind::Automatic`; the runtime selects settlement processing only
-when the exact wake matches an authoritative ledger monitor.
+Ordinary NIP-47 request wakes must use `NwcMobileWakeKind::Request`; hosts should
+not infer settlement intent merely because a tracked invoice already exists.
 
 `ReadyLightningNodeProvider` removes the provider implementation for a wallet
 that is already open. `StoredNwcSecrets` adapts one platform-protected key-value

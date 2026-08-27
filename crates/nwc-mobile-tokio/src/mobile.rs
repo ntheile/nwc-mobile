@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nwc_mobile::{
     CancellationSignal, EventId, HostError, HostFuture, InvoiceNotificationError,
@@ -27,8 +27,6 @@ pub const DEFAULT_NWC_MOBILE_SETTLEMENT_RETRY_DELAY: Duration = Duration::from_s
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum NwcMobileWakeKind {
-    /// Select settlement processing only when the exact wake matches a tracked invoice.
-    Automatic,
     /// Execute an ordinary NIP-47 request.
     Request,
     /// Reconcile the exact invoice created by the original request.
@@ -341,13 +339,25 @@ impl NwcMobile {
     where
         C: CancellationSignal + 'static,
     {
+        if execution_time.is_zero() || cancellation.is_cancelled() {
+            return queued_result(QueueReason::Deadline, None);
+        }
         let operation = async move {
-            let mobile = match Self::open(config) {
-                Ok(mobile) => mobile,
-                Err(_) => return queued_result(QueueReason::LedgerBusy, None),
+            let started_at = Instant::now();
+            let open_result = tokio::time::timeout(
+                execution_time,
+                tokio::task::spawn_blocking(move || Self::open(config)),
+            )
+            .await;
+            let mobile = match open_result {
+                Ok(Ok(Ok(mobile))) => mobile,
+                Ok(Ok(Err(_))) => return queued_result(QueueReason::LedgerBusy, None),
+                Ok(Err(_)) => return queued_result(QueueReason::WalletUnavailable, None),
+                Err(_) => return queued_result(QueueReason::Deadline, None),
             };
+            let remaining = execution_time.saturating_sub(started_at.elapsed());
             mobile
-                .execute_wake(input, kind, execution_time, cancellation.as_ref())
+                .execute_wake(input, kind, remaining, cancellation.as_ref())
                 .await
         };
         run_on_native_runtime(operation)
@@ -400,10 +410,7 @@ impl NwcMobile {
         let initial_settlement_status = settlement_status(initial_monitor.as_ref());
         let settlement_matches = settlement_wake_matches(initial_monitor.as_ref(), &input);
         let kind = match kind {
-            NwcMobileWakeKind::Automatic if settlement_matches => {
-                ResolvedWakeKind::InvoiceSettlement
-            }
-            NwcMobileWakeKind::Automatic | NwcMobileWakeKind::Request => ResolvedWakeKind::Request,
+            NwcMobileWakeKind::Request => ResolvedWakeKind::Request,
             NwcMobileWakeKind::InvoiceSettlement if settlement_matches => {
                 ResolvedWakeKind::InvoiceSettlement
             }
@@ -706,48 +713,6 @@ mod tests {
             }
         ));
         assert_eq!(opens.load(Ordering::Acquire), 0);
-        std::fs::remove_dir_all(directory).expect("remove temporary directory");
-    }
-
-    #[tokio::test]
-    async fn automatic_untracked_wake_uses_request_processing() {
-        let opens = Arc::new(AtomicUsize::new(0));
-        let directory = temporary_directory("automatic-request");
-        std::fs::create_dir_all(&directory).expect("temporary directory");
-        let config = NwcMobileConfig::new(
-            &directory,
-            UnexpectedProvider(Arc::clone(&opens)),
-            UnusedRelay,
-            UnusedSecrets,
-        );
-        let mobile = NwcMobile::open(config).expect("mobile runtime");
-        let input = WakeInput::new(
-            "wss://relay.example.com".to_owned(),
-            EventId::from_bytes([3; 32]),
-            PublicKey::from_bytes([4; 32]),
-            None,
-            UnixTimestamp::from_secs(1),
-        );
-        let result = mobile
-            .handle_wake(
-                input,
-                NwcMobileWakeKind::Automatic,
-                BackgroundWakeWindow {
-                    started_at: std::time::Instant::now(),
-                    total: Duration::from_secs(1),
-                },
-                &NeverCancelled,
-            )
-            .await;
-
-        assert!(matches!(
-            result.disposition(),
-            WakeDisposition::QueuedForApplication {
-                reason: QueueReason::WalletUnavailable,
-                ..
-            }
-        ));
-        assert_eq!(opens.load(Ordering::Acquire), 1);
         std::fs::remove_dir_all(directory).expect("remove temporary directory");
     }
 
