@@ -139,31 +139,41 @@ pub trait LightningNodeProvider: Send + Sync {
 
 /// Adapts an already-open wallet to the provider contract without host boilerplate.
 pub struct ReadyLightningNodeProvider<F> {
-    open: F,
+    open: Arc<F>,
 }
 
 impl<F> ReadyLightningNodeProvider<F> {
     /// Creates a provider from a synchronous factory over the typed wake request.
     #[must_use]
-    pub const fn new(open: F) -> Self {
-        Self { open }
+    pub fn new(open: F) -> Self {
+        Self {
+            open: Arc::new(open),
+        }
     }
 }
 
 impl<F> LightningNodeProvider for ReadyLightningNodeProvider<F>
 where
-    F: Fn(LightningNodeRequest) -> Result<OpenedLightningNode, HostError> + Send + Sync,
+    F: Fn(LightningNodeRequest) -> Result<OpenedLightningNode, HostError> + Send + Sync + 'static,
 {
     fn open_node<'a>(
         &'a self,
         request: LightningNodeRequest,
         context: OperationContext<'a>,
     ) -> HostFuture<'a, Result<OpenedLightningNode, HostError>> {
-        if context.cancellation().is_cancelled() {
-            return Box::pin(async { Err(HostError::new(nwc_mobile::HostErrorKind::Cancelled)) });
-        }
-        let opened = (self.open)(request);
-        Box::pin(async move { opened })
+        let open = Arc::clone(&self.open);
+        Box::pin(async move {
+            if context.cancellation().is_cancelled() {
+                return Err(HostError::new(nwc_mobile::HostErrorKind::Cancelled));
+            }
+            let opened = tokio::task::spawn_blocking(move || open(request))
+                .await
+                .map_err(|_| HostError::new(nwc_mobile::HostErrorKind::Internal))?;
+            if context.cancellation().is_cancelled() {
+                return Err(HostError::new(nwc_mobile::HostErrorKind::Cancelled));
+            }
+            opened
+        })
     }
 }
 
@@ -621,7 +631,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use nwc_mobile::{
-        ConnectionId, HostErrorKind, NeverCancelled, NwcSecretKey, SecureRelayUrl, UnixTimestamp,
+        AtomicCancellation, ConnectionId, HostErrorKind, NeverCancelled, NwcSecretKey,
+        SecureRelayUrl, UnixTimestamp,
     };
 
     use super::*;
@@ -713,6 +724,55 @@ mod tests {
         ));
         assert_eq!(opens.load(Ordering::Acquire), 0);
         std::fs::remove_dir_all(directory).expect("remove temporary directory");
+    }
+
+    #[tokio::test]
+    async fn ready_provider_factory_cannot_block_its_deadline() {
+        let provider = ReadyLightningNodeProvider::new(|_request| {
+            std::thread::sleep(Duration::from_millis(200));
+            Err(HostError::new(HostErrorKind::Internal))
+        });
+        let request = LightningNodeRequest {
+            wallet_service_pubkey: PublicKey::from_bytes([2; 32]),
+            diagnostics: None,
+        };
+        let budget = OperationBudget::new(Duration::from_millis(20)).expect("operation budget");
+        let context = OperationContext::new(budget, &NeverCancelled);
+        let started_at = Instant::now();
+
+        let result = run_with_context(context, provider.open_node(request, context)).await;
+
+        let Err(error) = result else {
+            panic!("factory must time out");
+        };
+        assert_eq!(error.kind(), HostErrorKind::TimedOut);
+        assert!(started_at.elapsed() < Duration::from_millis(150));
+    }
+
+    #[tokio::test]
+    async fn ready_provider_does_not_open_after_cancellation() {
+        let opens = Arc::new(AtomicUsize::new(0));
+        let counted_opens = Arc::clone(&opens);
+        let provider = ReadyLightningNodeProvider::new(move |_request| {
+            counted_opens.fetch_add(1, Ordering::AcqRel);
+            Err(HostError::new(HostErrorKind::Internal))
+        });
+        let request = LightningNodeRequest {
+            wallet_service_pubkey: PublicKey::from_bytes([2; 32]),
+            diagnostics: None,
+        };
+        let cancellation = AtomicCancellation::new();
+        cancellation.cancel();
+        let budget = OperationBudget::new(Duration::from_secs(1)).expect("operation budget");
+        let context = OperationContext::new(budget, &cancellation);
+
+        let result = run_with_context(context, provider.open_node(request, context)).await;
+
+        let Err(error) = result else {
+            panic!("cancelled provider must fail");
+        };
+        assert_eq!(error.kind(), HostErrorKind::Cancelled);
+        assert_eq!(opens.load(Ordering::Acquire), 0);
     }
 
     #[test]
