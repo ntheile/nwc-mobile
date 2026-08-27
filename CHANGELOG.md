@@ -8,6 +8,8 @@ public API stabilizes.
 
 ## Unreleased
 
+- Added a native-extension wake executor that owns envelope validation, the platform deadline,
+  diagnostic collection, Tokio execution, and stable result conversion for Rust-backed wallets.
 - Renamed the high-level wallet integration contract from `LightningNode` to
   `NwcLightningNode` so its NWC-specific role is explicit at call sites.
 - Simplified `NwcNode` construction by making `NwcNodeConfig` own the
