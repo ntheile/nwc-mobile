@@ -194,7 +194,7 @@ pub trait LightningNode: Send + Sync {
         -> HostFuture<'_, Result<PaymentQuote, HostError>>;
     fn pay_invoice(&self, request: PayInvoiceRequest)
         -> HostFuture<'_, Result<PaymentStatus, HostError>>;
-    fn lookup_invoice(&self, request: InvoiceLookup, await_settlement: bool)
+    fn lookup_invoice(&self, request: InvoiceLookup, settlement_timeout: Option<Duration>)
         -> HostFuture<'_, Result<Option<WalletTransaction>, HostError>>;
     fn list_transactions(&self, request: ListTransactionsRequest)
         -> HostFuture<'_, Result<Vec<WalletTransaction>, HostError>>;

@@ -15,6 +15,7 @@ use crate::{run_with_context, sleep};
 
 /// Default interval between settlement checks while a `make_invoice` wake remains active.
 pub const DEFAULT_INVOICE_SETTLEMENT_POLL_INTERVAL: Duration = Duration::from_millis(750);
+const INVOICE_SETTLEMENT_COMPLETION_RESERVE: Duration = Duration::from_secs(3);
 
 /// Stable engine configuration shared by foreground and background NWC nodes.
 pub struct NwcNodeConfig<'a> {
@@ -297,7 +298,7 @@ where
         Box::pin(run_with_context(context, async move {
             Ok(self
                 .wallet
-                .lookup_invoice(InvoiceLookup::PaymentHash(payment_hash.clone()), false)
+                .lookup_invoice(InvoiceLookup::PaymentHash(payment_hash.clone()), None)
                 .await?
                 .map_or(PaymentStatus::Unknown, |transaction| transaction.status))
         }))
@@ -316,9 +317,15 @@ where
         request: InvoiceLookup,
         context: OperationContext<'a>,
     ) -> HostFuture<'a, Result<Option<WalletTransaction>, HostError>> {
+        let settlement_timeout = self.await_settlement.then(|| {
+            context
+                .budget()
+                .timeout()
+                .saturating_sub(INVOICE_SETTLEMENT_COMPLETION_RESERVE)
+        });
         Box::pin(run_with_context(
             context,
-            self.wallet.lookup_invoice(request, self.await_settlement),
+            self.wallet.lookup_invoice(request, settlement_timeout),
         ))
     }
 
@@ -379,10 +386,10 @@ mod tests {
         fn lookup_invoice(
             &self,
             _request: InvoiceLookup,
-            await_settlement: bool,
+            settlement_timeout: Option<Duration>,
         ) -> HostFuture<'_, Result<Option<WalletTransaction>, HostError>> {
             self.awaited_settlement
-                .store(await_settlement, Ordering::Release);
+                .store(settlement_timeout.is_some(), Ordering::Release);
             let transaction = self.transaction.clone();
             Box::pin(async move { Ok(Some(transaction)) })
         }

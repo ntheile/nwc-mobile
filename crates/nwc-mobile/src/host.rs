@@ -729,12 +729,14 @@ pub trait LightningNode: Send + Sync {
 
     /// Looks up one incoming invoice or outgoing payment.
     ///
-    /// A targeted settlement worker sets `await_settlement` so a short-lived
-    /// background process may keep driving the exact invoice until it settles.
+    /// A targeted settlement worker supplies `settlement_timeout` so a
+    /// short-lived background process may keep driving the exact invoice while
+    /// preserving time for notification publication. Ordinary lookups pass
+    /// `None` and should perform only one refresh attempt.
     fn lookup_invoice(
         &self,
         request: InvoiceLookup,
-        await_settlement: bool,
+        settlement_timeout: Option<Duration>,
     ) -> HostFuture<'_, Result<Option<WalletTransaction>, HostError>>;
 
     /// Lists wallet transactions using engine-capped bounds.
