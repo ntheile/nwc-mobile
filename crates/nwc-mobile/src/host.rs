@@ -694,6 +694,56 @@ pub struct ListTransactionsRequest {
     pub include_unpaid: bool,
 }
 
+/// A compact Lightning-node contract for high-level mobile integrations.
+///
+/// Implementations expose ordinary wallet operations and do not need to
+/// assemble the NWC engine, notification workers, execution deadlines, or
+/// cancellation handling. Runtime-specific facades adapt this contract to the
+/// hardened [`NwcWalletBackend`] boundary and enforce each operation context.
+///
+/// `quote_invoice` must be side-effect free. `pay_invoice` is invoked only
+/// after the engine has durably reserved the authorized amount, and must honor
+/// the supplied fee limit and idempotency key.
+pub trait LightningNode: Send + Sync {
+    /// Returns the spendable Lightning balance.
+    fn get_balance(&self) -> HostFuture<'_, Result<AmountMsat, HostError>>;
+
+    /// Creates a Lightning invoice.
+    fn create_invoice(
+        &self,
+        request: MakeInvoiceRequest,
+    ) -> HostFuture<'_, Result<CreatedInvoice, HostError>>;
+
+    /// Parses and validates an invoice without initiating a payment.
+    fn quote_invoice<'a>(
+        &'a self,
+        invoice: &'a str,
+        amount: Option<AmountMsat>,
+    ) -> HostFuture<'a, Result<PaymentQuote, HostError>>;
+
+    /// Starts or resumes one idempotent Lightning payment.
+    fn pay_invoice(
+        &self,
+        request: PayInvoiceRequest,
+    ) -> HostFuture<'_, Result<PaymentStatus, HostError>>;
+
+    /// Looks up one incoming invoice or outgoing payment.
+    ///
+    /// A targeted settlement worker sets `await_settlement` so a short-lived
+    /// background process may keep driving the exact invoice until it settles.
+    fn lookup_invoice(
+        &self,
+        request: InvoiceLookup,
+        await_settlement: bool,
+    ) -> HostFuture<'_, Result<Option<WalletTransaction>, HostError>>;
+
+    /// Lists wallet transactions using engine-capped bounds.
+    fn list_transactions(
+        &self,
+        request: ListTransactionsRequest,
+    ) -> HostFuture<'_, Result<Vec<WalletTransaction>, HostError>>;
+}
+
 /// NWC wallet operations supplied by the containing application.
 ///
 /// The engine calls these methods only after event authentication, connection
