@@ -6,8 +6,14 @@
 
 #![forbid(unsafe_code)]
 
+mod mobile;
 mod node;
 
+pub use mobile::{
+    LightningNodeProvider, LightningNodeRequest, NwcMobile, NwcMobileCompletionContext,
+    NwcMobileCompletionHandler, NwcMobileConfig, NwcMobileSettlementStatus, NwcMobileWakeKind,
+    NwcMobileWakeResult, OpenedLightningNode, DEFAULT_NWC_MOBILE_COMPLETION_RESERVE,
+};
 pub use node::{NwcNode, NwcNodeConfig, DEFAULT_INVOICE_SETTLEMENT_POLL_INTERVAL};
 
 use std::future::Future;
