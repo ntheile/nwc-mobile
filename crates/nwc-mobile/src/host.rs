@@ -3,6 +3,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use url::Url;
@@ -744,6 +745,52 @@ pub trait LightningNode: Send + Sync {
         &self,
         request: ListTransactionsRequest,
     ) -> HostFuture<'_, Result<Vec<WalletTransaction>, HostError>>;
+}
+
+impl<T> LightningNode for Arc<T>
+where
+    T: LightningNode + ?Sized,
+{
+    fn get_balance(&self) -> HostFuture<'_, Result<AmountMsat, HostError>> {
+        self.as_ref().get_balance()
+    }
+
+    fn create_invoice(
+        &self,
+        request: MakeInvoiceRequest,
+    ) -> HostFuture<'_, Result<CreatedInvoice, HostError>> {
+        self.as_ref().create_invoice(request)
+    }
+
+    fn quote_invoice<'a>(
+        &'a self,
+        invoice: &'a str,
+        amount: Option<AmountMsat>,
+    ) -> HostFuture<'a, Result<PaymentQuote, HostError>> {
+        self.as_ref().quote_invoice(invoice, amount)
+    }
+
+    fn pay_invoice(
+        &self,
+        request: PayInvoiceRequest,
+    ) -> HostFuture<'_, Result<PaymentStatus, HostError>> {
+        self.as_ref().pay_invoice(request)
+    }
+
+    fn lookup_invoice(
+        &self,
+        request: InvoiceLookup,
+        settlement_timeout: Option<Duration>,
+    ) -> HostFuture<'_, Result<Option<WalletTransaction>, HostError>> {
+        self.as_ref().lookup_invoice(request, settlement_timeout)
+    }
+
+    fn list_transactions(
+        &self,
+        request: ListTransactionsRequest,
+    ) -> HostFuture<'_, Result<Vec<WalletTransaction>, HostError>> {
+        self.as_ref().list_transactions(request)
+    }
 }
 
 /// NWC wallet operations supplied by the containing application.
