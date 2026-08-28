@@ -28,6 +28,16 @@ work to wake them.
 [NWC Client App] <------ (NWC response) ------- [Nostr Relay]
 ```
 
+## Dependency requirement
+
+> **Required for background wake:** Deploy a compatible instance of
+> [Mutiny Wallet's notification server](https://github.com/mutinyWallet/notification-server/)
+> to observe Nostr requests and deliver Apple APNs or Android FCM pushes. The
+> mobile-specific registration and settlement endpoints currently live on the
+> [`nwc-wake` branch of the notification-server fork](https://github.com/ntheile/notification-server/tree/nwc-wake);
+> upstream `master` alone does not provide the complete `nwc-mobile` wake
+> protocol.
+
 ## What the library owns
 
 `nwc-mobile` keeps security-sensitive, platform-independent behavior in Rust:
