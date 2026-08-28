@@ -10,6 +10,24 @@ work to wake them.
 > native bindings are not yet stable. Pin production integrations to a reviewed
 > commit rather than a moving branch.
 
+## At a glance
+
+```text
+[NWC Client App]
+    |
+    | (NWC request)
+    v
+[Nostr Relay] ---> [Notification Server] ---> (Apple/Android push)
+                                                  |
+                                                  v
+                                             [Mobile Wallet]
+                                                  |
+                              (NSE wake → nwc-mobile → Lightning Node)
+                                                  |
+                                                  v
+[NWC Client App] <------ (NWC response) ------- [Nostr Relay]
+```
+
 ## What the library owns
 
 `nwc-mobile` keeps security-sensitive, platform-independent behavior in Rust:
