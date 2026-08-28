@@ -589,6 +589,9 @@ impl<'a> WakeEngine<'a> {
             AmountSat::from_sat(attempt.fee_reserve_sat()),
             validated.id().clone(),
         );
+        if deadline.context(cancellation).is_none() {
+            return self.retry_claim(lease, RetryReason::WalletUnavailable);
+        }
         if self
             .ledger
             .mark_payment_initiated(attempt.payment_hash(), self.clock.now())
