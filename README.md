@@ -44,7 +44,7 @@ Swift and Kotlin remain thin operating-system adapters. They receive pushes,
 provide secure storage and wallet capabilities, schedule background work, open
 verified links, and render Rust-provided presentation state.
 
-## What an integrating wallet supplies
+## What an integrating wallet has to implement
 
 An application adopting `nwc-mobile` supplies six pieces:
 
