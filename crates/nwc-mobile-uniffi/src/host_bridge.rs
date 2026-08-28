@@ -517,7 +517,9 @@ pub trait MobileSecretProvider: Send + Sync {
     /// Returns exactly 32 secret bytes for one connection.
     ///
     /// Native code must create a fresh buffer for this call and must not log or
-    /// cache it. Rust zeroizes its received copy immediately after validation.
+    /// cache it. The implementation must be safe to call on a background worker
+    /// thread. Rust bounds the blocking call and zeroizes its received copy
+    /// immediately after validation.
     fn load_nwc_secret(&self, connection_id: String) -> Result<Vec<u8>, MobileHostError>;
 }
 
@@ -596,24 +598,30 @@ impl WakeRegistrationTransport for MobileWakeRegistrationBridge {
         change: &'a WakeRegistrationChange,
         context: OperationContext<'a>,
     ) -> HostFuture<'a, Result<(), HostError>> {
-        Box::pin(async move {
-            self.transport
+        let transport = Arc::clone(&self.transport);
+        let cancellation = Arc::clone(&self.cancellation);
+        let foreign_cancellation = Arc::clone(&cancellation);
+        let timeout_milliseconds = timeout_milliseconds(context);
+        let server_url = server_url.as_str().to_owned();
+        let change = MobileWakeRegistrationChange {
+            connection_id: change.connection_id().as_str().to_owned(),
+            connection_revision: change.connection_revision().value(),
+            enabled: change.enabled(),
+            client_public_key_hex: change.client_pubkey().to_hex(),
+            wallet_service_public_key_hex: change.wallet_service_pubkey().to_hex(),
+            relay_urls: change
+                .relays()
+                .iter()
+                .map(|relay| relay.as_str().to_owned())
+                .collect(),
+        };
+        foreign_call(context, cancellation, async move {
+            transport
                 .apply_wake_registration(
-                    server_url.as_str().to_owned(),
-                    MobileWakeRegistrationChange {
-                        connection_id: change.connection_id().as_str().to_owned(),
-                        connection_revision: change.connection_revision().value(),
-                        enabled: change.enabled(),
-                        client_public_key_hex: change.client_pubkey().to_hex(),
-                        wallet_service_public_key_hex: change.wallet_service_pubkey().to_hex(),
-                        relay_urls: change
-                            .relays()
-                            .iter()
-                            .map(|relay| relay.as_str().to_owned())
-                            .collect(),
-                    },
-                    timeout_milliseconds(context),
-                    self.cancellation.clone(),
+                    server_url,
+                    change,
+                    timeout_milliseconds,
+                    foreign_cancellation,
                 )
                 .await
                 .map_err(HostError::from)
@@ -657,10 +665,13 @@ impl NwcWalletBackend for MobileHostBridge {
         &'a self,
         context: OperationContext<'a>,
     ) -> HostFuture<'a, Result<WalletInfo, HostError>> {
-        Box::pin(async move {
-            let info = self
-                .wallet
-                .get_info(timeout_milliseconds(context), self.cancellation.clone())
+        let wallet = Arc::clone(&self.wallet);
+        let cancellation = Arc::clone(&self.cancellation);
+        let foreign_cancellation = Arc::clone(&cancellation);
+        let timeout_milliseconds = timeout_milliseconds(context);
+        foreign_call(context, cancellation, async move {
+            let info = wallet
+                .get_info(timeout_milliseconds, foreign_cancellation)
                 .await
                 .map_err(HostError::from)?;
             let public_key = info
@@ -679,9 +690,13 @@ impl NwcWalletBackend for MobileHostBridge {
         &'a self,
         context: OperationContext<'a>,
     ) -> HostFuture<'a, Result<AmountMsat, HostError>> {
-        Box::pin(async move {
-            self.wallet
-                .get_balance(timeout_milliseconds(context), self.cancellation.clone())
+        let wallet = Arc::clone(&self.wallet);
+        let cancellation = Arc::clone(&self.cancellation);
+        let foreign_cancellation = Arc::clone(&cancellation);
+        let timeout_milliseconds = timeout_milliseconds(context);
+        foreign_call(context, cancellation, async move {
+            wallet
+                .get_balance(timeout_milliseconds, foreign_cancellation)
                 .await
                 .map(AmountMsat::from_msat)
                 .map_err(HostError::from)
@@ -693,17 +708,20 @@ impl NwcWalletBackend for MobileHostBridge {
         request: MakeInvoiceRequest,
         context: OperationContext<'a>,
     ) -> HostFuture<'a, Result<CreatedInvoice, HostError>> {
-        Box::pin(async move {
-            let created = self
-                .wallet
+        let wallet = Arc::clone(&self.wallet);
+        let cancellation = Arc::clone(&self.cancellation);
+        let foreign_cancellation = Arc::clone(&cancellation);
+        let timeout_milliseconds = timeout_milliseconds(context);
+        foreign_call(context, cancellation, async move {
+            let created = wallet
                 .make_invoice(
                     MobileMakeInvoiceRequest {
                         amount_msat: request.amount().as_msat(),
                         description: request.description().map(str::to_owned),
                         expiry_seconds: request.expiry().as_secs(),
                     },
-                    timeout_milliseconds(context),
-                    self.cancellation.clone(),
+                    timeout_milliseconds,
+                    foreign_cancellation,
                 )
                 .await
                 .map_err(HostError::from)?;
@@ -727,17 +745,21 @@ impl NwcWalletBackend for MobileHostBridge {
         amount: Option<AmountMsat>,
         context: OperationContext<'a>,
     ) -> HostFuture<'a, Result<PaymentQuote, HostError>> {
-        Box::pin(async move {
+        let wallet = Arc::clone(&self.wallet);
+        let cancellation = Arc::clone(&self.cancellation);
+        let foreign_cancellation = Arc::clone(&cancellation);
+        let timeout_milliseconds = timeout_milliseconds(context);
+        let invoice = invoice.to_owned();
+        foreign_call(context, cancellation, async move {
             if invoice.is_empty() || invoice.len() > MAX_INVOICE_BYTES {
                 return Err(rejected());
             }
-            let quote = self
-                .wallet
+            let quote = wallet
                 .quote_payment(
-                    invoice.to_owned(),
+                    invoice,
                     amount.map(AmountMsat::as_msat),
-                    timeout_milliseconds(context),
-                    self.cancellation.clone(),
+                    timeout_milliseconds,
+                    foreign_cancellation,
                 )
                 .await
                 .map_err(HostError::from)?;
@@ -755,14 +777,14 @@ impl NwcWalletBackend for MobileHostBridge {
         payment_hash: &'a PaymentHash,
         context: OperationContext<'a>,
     ) -> HostFuture<'a, Result<PaymentStatus, HostError>> {
-        Box::pin(async move {
-            let status = self
-                .wallet
-                .payment_status(
-                    payment_hash.to_hex(),
-                    timeout_milliseconds(context),
-                    self.cancellation.clone(),
-                )
+        let wallet = Arc::clone(&self.wallet);
+        let cancellation = Arc::clone(&self.cancellation);
+        let foreign_cancellation = Arc::clone(&cancellation);
+        let timeout_milliseconds = timeout_milliseconds(context);
+        let payment_hash = payment_hash.to_hex();
+        foreign_call(context, cancellation, async move {
+            let status = wallet
+                .payment_status(payment_hash, timeout_milliseconds, foreign_cancellation)
                 .await
                 .map_err(HostError::from)?;
             core_payment_status(status)
@@ -774,9 +796,12 @@ impl NwcWalletBackend for MobileHostBridge {
         request: PayInvoiceRequest,
         context: OperationContext<'a>,
     ) -> HostFuture<'a, Result<PaymentStatus, HostError>> {
-        Box::pin(async move {
-            let status = self
-                .wallet
+        let wallet = Arc::clone(&self.wallet);
+        let cancellation = Arc::clone(&self.cancellation);
+        let foreign_cancellation = Arc::clone(&cancellation);
+        let timeout_milliseconds = timeout_milliseconds(context);
+        foreign_call(context, cancellation, async move {
+            let status = wallet
                 .start_payment(
                     MobilePayInvoiceRequest {
                         invoice: request.invoice().to_owned(),
@@ -784,8 +809,8 @@ impl NwcWalletBackend for MobileHostBridge {
                         maximum_fee_sat: request.maximum_fee().as_sat(),
                         idempotency_key_hex: request.idempotency_key().to_hex(),
                     },
-                    timeout_milliseconds(context),
-                    self.cancellation.clone(),
+                    timeout_milliseconds,
+                    foreign_cancellation,
                 )
                 .await
                 .map_err(HostError::from)?;
@@ -798,7 +823,11 @@ impl NwcWalletBackend for MobileHostBridge {
         request: InvoiceLookup,
         context: OperationContext<'a>,
     ) -> HostFuture<'a, Result<Option<WalletTransaction>, HostError>> {
-        Box::pin(async move {
+        let wallet = Arc::clone(&self.wallet);
+        let cancellation = Arc::clone(&self.cancellation);
+        let foreign_cancellation = Arc::clone(&cancellation);
+        let timeout_milliseconds = timeout_milliseconds(context);
+        foreign_call(context, cancellation, async move {
             let request = match request {
                 InvoiceLookup::PaymentHash(hash) => MobileInvoiceLookup::PaymentHash {
                     payment_hash_hex: hash.to_hex(),
@@ -811,12 +840,8 @@ impl NwcWalletBackend for MobileHostBridge {
                 }
                 _ => return Err(rejected()),
             };
-            self.wallet
-                .lookup_invoice(
-                    request,
-                    timeout_milliseconds(context),
-                    self.cancellation.clone(),
-                )
+            wallet
+                .lookup_invoice(request, timeout_milliseconds, foreign_cancellation)
                 .await
                 .map_err(HostError::from)?
                 .map(core_transaction)
@@ -829,9 +854,12 @@ impl NwcWalletBackend for MobileHostBridge {
         request: ListTransactionsRequest,
         context: OperationContext<'a>,
     ) -> HostFuture<'a, Result<Vec<WalletTransaction>, HostError>> {
-        Box::pin(async move {
-            let transactions = self
-                .wallet
+        let wallet = Arc::clone(&self.wallet);
+        let cancellation = Arc::clone(&self.cancellation);
+        let foreign_cancellation = Arc::clone(&cancellation);
+        let timeout_milliseconds = timeout_milliseconds(context);
+        foreign_call(context, cancellation, async move {
+            let transactions = wallet
                 .list_transactions(
                     MobileListTransactionsRequest {
                         from_seconds: request.from.map(UnixTimestamp::as_secs),
@@ -841,8 +869,8 @@ impl NwcWalletBackend for MobileHostBridge {
                         direction: request.direction.map(mobile_direction).transpose()?,
                         include_unpaid: request.include_unpaid,
                     },
-                    timeout_milliseconds(context),
-                    self.cancellation.clone(),
+                    timeout_milliseconds,
+                    foreign_cancellation,
                 )
                 .await
                 .map_err(HostError::from)?;
@@ -864,16 +892,21 @@ impl RelayTransport for MobileHostBridge {
         maximum_event_bytes: usize,
         context: OperationContext<'a>,
     ) -> HostFuture<'a, Result<Option<String>, HostError>> {
-        Box::pin(async move {
+        let relays = Arc::clone(&self.relays);
+        let cancellation = Arc::clone(&self.cancellation);
+        let foreign_cancellation = Arc::clone(&cancellation);
+        let timeout_milliseconds = timeout_milliseconds(context);
+        let relay = relay.as_str().to_owned();
+        let event_id = event_id.to_hex();
+        foreign_call(context, cancellation, async move {
             let maximum_event_bytes = u64::try_from(maximum_event_bytes).map_err(|_| rejected())?;
-            let event = self
-                .relays
+            let event = relays
                 .fetch_event(
-                    relay.as_str().to_owned(),
-                    event_id.to_hex(),
+                    relay,
+                    event_id,
                     maximum_event_bytes,
-                    timeout_milliseconds(context),
-                    self.cancellation.clone(),
+                    timeout_milliseconds,
+                    foreign_cancellation,
                 )
                 .await
                 .map_err(HostError::from)?;
@@ -892,13 +925,19 @@ impl RelayTransport for MobileHostBridge {
         event_json: &'a str,
         context: OperationContext<'a>,
     ) -> HostFuture<'a, Result<(), HostError>> {
-        Box::pin(async move {
-            self.relays
+        let relays = Arc::clone(&self.relays);
+        let cancellation = Arc::clone(&self.cancellation);
+        let foreign_cancellation = Arc::clone(&cancellation);
+        let timeout_milliseconds = timeout_milliseconds(context);
+        let relay = relay.as_str().to_owned();
+        let event_json = event_json.to_owned();
+        foreign_call(context, cancellation, async move {
+            relays
                 .publish_event(
-                    relay.as_str().to_owned(),
-                    event_json.to_owned(),
-                    timeout_milliseconds(context),
-                    self.cancellation.clone(),
+                    relay,
+                    event_json,
+                    timeout_milliseconds,
+                    foreign_cancellation,
                 )
                 .await
                 .map_err(HostError::from)
@@ -907,25 +946,52 @@ impl RelayTransport for MobileHostBridge {
 }
 
 impl SecretProvider for MobileHostBridge {
-    fn load_nwc_secret(
-        &self,
-        connection_id: &nwc_mobile::ConnectionId,
-    ) -> Result<NwcSecretKey, HostError> {
-        let mut bytes = self
-            .secrets
-            .load_nwc_secret(connection_id.as_str().to_owned())
-            .map_err(HostError::from)?;
-        if bytes.len() != 32 {
-            bytes.zeroize();
-            return Err(rejected());
-        }
-        let mut secret = [0_u8; 32];
-        secret.copy_from_slice(&bytes);
-        bytes.zeroize();
-        let result = NwcSecretKey::from_bytes(secret).map_err(|_| rejected());
-        secret.zeroize();
-        result
+    fn load_nwc_secret<'a>(
+        &'a self,
+        connection_id: &'a nwc_mobile::ConnectionId,
+        context: OperationContext<'a>,
+    ) -> HostFuture<'a, Result<NwcSecretKey, HostError>> {
+        let secrets = Arc::clone(&self.secrets);
+        let cancellation = Arc::clone(&self.cancellation);
+        let connection_id = connection_id.as_str().to_owned();
+        Box::pin(async move {
+            nwc_mobile_tokio::run_owned_blocking_with_context(
+                context.budget(),
+                cancellation,
+                move || {
+                    let mut bytes = secrets
+                        .load_nwc_secret(connection_id)
+                        .map_err(HostError::from)?;
+                    if bytes.len() != 32 {
+                        bytes.zeroize();
+                        return Err(rejected());
+                    }
+                    let mut secret = [0_u8; 32];
+                    secret.copy_from_slice(&bytes);
+                    bytes.zeroize();
+                    let result = NwcSecretKey::from_bytes(secret).map_err(|_| rejected());
+                    secret.zeroize();
+                    result
+                },
+            )
+            .await
+        })
     }
+}
+
+fn foreign_call<'a, T, F>(
+    context: OperationContext<'a>,
+    cancellation: Arc<MobileCancellation>,
+    operation: F,
+) -> HostFuture<'a, Result<T, HostError>>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = Result<T, HostError>> + Send + 'static,
+{
+    let budget = context.budget();
+    Box::pin(async move {
+        nwc_mobile_tokio::run_owned_with_context(budget, cancellation, operation).await
+    })
 }
 
 fn timeout_milliseconds(context: OperationContext<'_>) -> u64 {
@@ -994,7 +1060,8 @@ fn mobile_direction(
 mod tests {
     use super::*;
     use nwc_mobile::{OperationBudget, PaymentStatus};
-    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Mutex};
     use std::time::Duration;
 
     const HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -1021,6 +1088,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct TestWallet {
         last_payment: Mutex<Option<MobilePayInvoiceRequest>>,
+        block_balance: AtomicBool,
     }
 
     #[async_trait::async_trait]
@@ -1042,6 +1110,9 @@ mod tests {
             _timeout_milliseconds: u64,
             _cancellation: Arc<MobileCancellation>,
         ) -> Result<u64, MobileHostError> {
+            if self.block_balance.load(Ordering::SeqCst) {
+                return std::future::pending().await;
+            }
             Ok(42_000)
         }
 
@@ -1155,6 +1226,16 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct BlockingSecret(Mutex<mpsc::Receiver<()>>);
+
+    impl MobileSecretProvider for BlockingSecret {
+        fn load_nwc_secret(&self, _connection_id: String) -> Result<Vec<u8>, MobileHostError> {
+            self.0.lock().expect("receiver lock").recv().ok();
+            Ok(vec![1_u8; 32])
+        }
+    }
+
     fn bridge(cancellation: Arc<MobileCancellation>) -> MobileHostBridge {
         MobileHostBridge::new(
             Arc::new(TestWallet::default()),
@@ -1167,6 +1248,13 @@ mod tests {
     fn context<'a>(cancellation: &'a MobileCancellation) -> OperationContext<'a> {
         OperationContext::new(
             OperationBudget::new(Duration::from_millis(1_250)).expect("budget"),
+            cancellation,
+        )
+    }
+
+    fn short_context<'a>(cancellation: &'a MobileCancellation) -> OperationContext<'a> {
+        OperationContext::new(
+            OperationBudget::new(Duration::from_millis(25)).expect("budget"),
             cancellation,
         )
     }
@@ -1197,6 +1285,26 @@ mod tests {
     }
 
     #[test]
+    fn foreign_wallet_call_is_hard_timed_out_by_rust() {
+        let cancellation = MobileCancellation::new();
+        let wallet = Arc::new(TestWallet::default());
+        wallet.block_balance.store(true, Ordering::SeqCst);
+        let bridge = MobileHostBridge::new(
+            wallet,
+            Arc::new(TestRelay),
+            Arc::new(TestSecrets),
+            cancellation.clone(),
+        );
+
+        assert_eq!(
+            block_on(bridge.get_balance(short_context(&cancellation)))
+                .expect_err("hung native call")
+                .kind(),
+            HostErrorKind::TimedOut
+        );
+    }
+
+    #[test]
     fn malformed_native_values_fail_closed() {
         assert_eq!(
             core_payment_status(MobilePaymentStatus::Succeeded {
@@ -1212,20 +1320,50 @@ mod tests {
 
     #[test]
     fn secret_bridge_rejects_wrong_length_key_material() {
+        let cancellation = MobileCancellation::new();
         let bridge = MobileHostBridge::new(
             Arc::new(TestWallet::default()),
             Arc::new(TestRelay),
             Arc::new(ShortSecret),
-            MobileCancellation::new(),
+            cancellation.clone(),
         );
         let connection = nwc_mobile::ConnectionId::parse("connection:test").expect("connection");
 
         assert_eq!(
-            SecretProvider::load_nwc_secret(&bridge, &connection)
-                .expect_err("short secret")
-                .kind(),
+            block_on(SecretProvider::load_nwc_secret(
+                &bridge,
+                &connection,
+                context(&cancellation),
+            ))
+            .expect_err("short secret")
+            .kind(),
             HostErrorKind::Rejected
         );
+    }
+
+    #[test]
+    fn blocking_secret_load_returns_at_deadline_while_native_work_finishes() {
+        let cancellation = MobileCancellation::new();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let bridge = MobileHostBridge::new(
+            Arc::new(TestWallet::default()),
+            Arc::new(TestRelay),
+            Arc::new(BlockingSecret(Mutex::new(release_receiver))),
+            cancellation.clone(),
+        );
+        let connection = nwc_mobile::ConnectionId::parse("connection:test").expect("connection");
+
+        assert_eq!(
+            block_on(SecretProvider::load_nwc_secret(
+                &bridge,
+                &connection,
+                short_context(&cancellation),
+            ))
+            .expect_err("blocked secret load")
+            .kind(),
+            HostErrorKind::TimedOut
+        );
+        release_sender.send(()).expect("release blocking call");
     }
 
     #[test]

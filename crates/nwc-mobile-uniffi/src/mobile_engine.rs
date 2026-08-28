@@ -24,6 +24,7 @@ use crate::{
 };
 
 const MAX_DATABASE_PATH_BYTES: usize = 4_096;
+const MAX_BACKGROUND_EXECUTION_MILLISECONDS: u64 = 30_000;
 
 /// Stable native engine and connection-management failure classification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Error)]
@@ -451,9 +452,9 @@ pub struct MobileNwaRequestPresentation {
     pub display_name: String,
     /// Validated HTTPS icon URL, when supplied.
     pub icon_url: Option<String>,
-    /// Verified callback host, when supplied.
+    /// Syntactically validated but unverified callback host, when supplied.
     pub requesting_app_description: Option<String>,
-    /// Verified callback target shown to the user.
+    /// Syntactically validated but unverified callback target shown to the user.
     pub callback_target_description: String,
     /// Exact secure relay list requested by the client.
     pub relay_urls: Vec<String>,
@@ -517,7 +518,8 @@ pub struct MobileNwaSessionState {
 pub struct MobileNwaApprovalResult {
     /// Durable connection lifecycle state.
     pub connection: MobileConnectionState,
-    /// Verified public callback URL, when the request supplied one.
+    /// Validated but unverified public callback URL, when supplied.
+    /// Native hosts must verify any claimed app-link association independently.
     pub callback_url: Option<String>,
 }
 
@@ -560,6 +562,8 @@ pub struct MobilePaymentReconciliationReport {
     pub succeeded: u16,
     /// Payments observed as definitively failed and refunded.
     pub failed: u16,
+    /// External statuses discarded because this library did not initiate them.
+    pub discarded: u16,
     /// Queried payments that remain pending or ambiguous.
     pub unresolved: u16,
     /// Wallet queries deferred after a stable host failure.
@@ -804,8 +808,7 @@ impl MobileNwcEngine {
         execution_milliseconds: u64,
         cancellation: Arc<MobileCancellation>,
     ) -> Result<MobileWakeDisposition, MobileEngineError> {
-        let budget = OperationBudget::new(Duration::from_millis(execution_milliseconds))
-            .map_err(|_| MobileEngineError::InvalidArgument)?;
+        let budget = operation_budget(execution_milliseconds)?;
         let started = Instant::now();
         let host = MobileHostBridge::new(
             self.wallet.clone(),
@@ -857,6 +860,7 @@ impl MobileNwcEngine {
             examined: report.examined(),
             succeeded: report.succeeded(),
             failed: report.failed(),
+            discarded: report.discarded(),
             unresolved: report.unresolved(),
             deferred: report.deferred(),
             interrupted: report.interrupted(),
@@ -897,6 +901,9 @@ impl MobileNwcEngine {
 }
 
 fn operation_budget(execution_milliseconds: u64) -> Result<OperationBudget, MobileEngineError> {
+    if execution_milliseconds > MAX_BACKGROUND_EXECUTION_MILLISECONDS {
+        return Err(MobileEngineError::InvalidArgument);
+    }
     OperationBudget::new(Duration::from_millis(execution_milliseconds))
         .map_err(|_| MobileEngineError::InvalidArgument)
 }
@@ -1137,6 +1144,16 @@ mod tests {
             Err(MobileEngineError::InvalidArgument)
         );
         assert_eq!(validate_database_path("/tmp/ledger.sqlite"), Ok(()));
+    }
+
+    #[test]
+    fn background_operation_budget_is_nonzero_and_platform_bounded() {
+        assert_eq!(operation_budget(0), Err(MobileEngineError::InvalidArgument));
+        assert!(operation_budget(MAX_BACKGROUND_EXECUTION_MILLISECONDS).is_ok());
+        assert_eq!(
+            operation_budget(MAX_BACKGROUND_EXECUTION_MILLISECONDS + 1),
+            Err(MobileEngineError::InvalidArgument)
+        );
     }
 
     #[test]

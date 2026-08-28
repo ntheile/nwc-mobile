@@ -1016,8 +1016,14 @@ pub trait SecretProvider: Send + Sync {
     /// Loads the wallet-service secret for one active connection.
     ///
     /// The returned value is zeroized on drop and must not be cached by the
-    /// engine beyond the cryptographic operation that requested it.
-    fn load_nwc_secret(&self, connection_id: &ConnectionId) -> Result<NwcSecretKey, HostError>;
+    /// engine beyond the cryptographic operation that requested it. Native
+    /// implementations must honor the supplied context and must move blocking
+    /// key-store work off the async runtime thread.
+    fn load_nwc_secret<'a>(
+        &'a self,
+        connection_id: &'a ConnectionId,
+        context: OperationContext<'a>,
+    ) -> HostFuture<'a, Result<NwcSecretKey, HostError>>;
 }
 
 #[cfg(test)]

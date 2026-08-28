@@ -137,7 +137,8 @@ impl ApprovedNwaConnection {
         &self.connection
     }
 
-    /// Returns the verified HTTPS callback containing public approval metadata.
+    /// Returns the validated but unverified HTTPS callback with public metadata.
+    /// Native hosts must verify any claimed app-link association independently.
     #[must_use]
     pub fn callback_url(&self) -> Option<&str> {
         self.callback_url.as_deref()
@@ -379,6 +380,18 @@ fn validate_nwa_connection_subset(
     let methods_are_requested = approved_policy
         .methods()
         .all(|method| requested_policy.allows(method));
+    let requested_maximum_fee_sat = match requested_budget.fee_policy() {
+        crate::FeePolicy::CountTowardBudget { maximum_fee_sat } => maximum_fee_sat,
+        crate::FeePolicy::ExcludeForCompatibility => 0,
+    };
+    let fee_reserve_is_conservative = matches!(
+        approved_budget.fee_policy(),
+        crate::FeePolicy::CountTowardBudget { maximum_fee_sat }
+            if maximum_fee_sat == crate::maximum_mobile_fee_sat(approved_budget.limit_sat())
+                && maximum_fee_sat <= requested_maximum_fee_sat
+    );
+    let payment_budget_is_usable = !approved_policy.allows(crate::NwcMethod::PayInvoice)
+        || approved_budget.limit_sat() > crate::maximum_mobile_fee_sat(approved_budget.limit_sat());
     if connection.client_pubkey() != request.client_pubkey()
         || connection.expires_at() != request.expires_at()
         || connection.relays().is_empty()
@@ -387,10 +400,8 @@ fn validate_nwa_connection_subset(
         || !methods_are_requested
         || approved_budget.limit_sat() > requested_budget.limit_sat()
         || approved_budget.interval() != requested_budget.interval()
-        || !matches!(
-            approved_budget.fee_policy(),
-            crate::FeePolicy::CountTowardBudget { .. }
-        )
+        || !fee_reserve_is_conservative
+        || !payment_budget_is_usable
     {
         return Err(NwaApprovalError::AuthorityEscalation);
     }
@@ -656,7 +667,7 @@ mod tests {
                     500,
                     BudgetInterval::Daily,
                     FeePolicy::CountTowardBudget {
-                        maximum_fee_sat: 10,
+                        maximum_fee_sat: 25,
                     },
                 ),
             ),
@@ -703,7 +714,7 @@ mod tests {
                     500,
                     BudgetInterval::Daily,
                     FeePolicy::CountTowardBudget {
-                        maximum_fee_sat: 10,
+                        maximum_fee_sat: 25,
                     },
                 ),
             ),
@@ -733,7 +744,7 @@ mod tests {
                     500,
                     BudgetInterval::Daily,
                     FeePolicy::CountTowardBudget {
-                        maximum_fee_sat: 10,
+                        maximum_fee_sat: 25,
                     },
                 ),
             ),
@@ -813,6 +824,57 @@ mod tests {
         );
         assert_eq!(
             manager.approve_nwa(request, fee_exclusion, WakePolicy::default()),
+            Err(NwaApprovalError::AuthorityEscalation)
+        );
+
+        let request = nwa_request();
+        let mut insufficient_fee_reserve = nwa_approval(&request, [NwcMethod::GetInfo]);
+        insufficient_fee_reserve.policy = ConnectionPolicy::new(
+            [NwcMethod::GetInfo],
+            BudgetPolicy::new(
+                500,
+                BudgetInterval::Daily,
+                FeePolicy::CountTowardBudget {
+                    maximum_fee_sat: 24,
+                },
+            ),
+        );
+        assert_eq!(
+            manager.approve_nwa(request, insufficient_fee_reserve, WakePolicy::default()),
+            Err(NwaApprovalError::AuthorityEscalation)
+        );
+
+        let request = nwa_request();
+        let mut escalated_fee_reserve = nwa_approval(&request, [NwcMethod::GetInfo]);
+        escalated_fee_reserve.policy = ConnectionPolicy::new(
+            [NwcMethod::GetInfo],
+            BudgetPolicy::new(
+                500,
+                BudgetInterval::Daily,
+                FeePolicy::CountTowardBudget {
+                    maximum_fee_sat: 51,
+                },
+            ),
+        );
+        assert_eq!(
+            manager.approve_nwa(request, escalated_fee_reserve, WakePolicy::default()),
+            Err(NwaApprovalError::AuthorityEscalation)
+        );
+
+        let request = nwa_request();
+        let mut unusable_payment_budget = nwa_approval(&request, [NwcMethod::PayInvoice]);
+        unusable_payment_budget.policy = ConnectionPolicy::new(
+            [NwcMethod::PayInvoice],
+            BudgetPolicy::new(
+                10,
+                BudgetInterval::Daily,
+                FeePolicy::CountTowardBudget {
+                    maximum_fee_sat: 10,
+                },
+            ),
+        );
+        assert_eq!(
+            manager.approve_nwa(request, unusable_payment_budget, WakePolicy::default()),
             Err(NwaApprovalError::AuthorityEscalation)
         );
     }

@@ -18,7 +18,12 @@ final class NwcAppGroupWakeInboxTests: XCTestCase {
 
   func testCreatesDataDirectoryAndDelegatesQueueOperations() throws {
     let root = makeTemporaryDirectory()
-    let appInbox = NwcAppGroupWakeInbox(rootURL: root)
+    let recorder = AppGroupEvictionRecorder()
+    let appInbox = NwcAppGroupWakeInbox(
+      rootURL: root,
+      maxPendingRequests: 1,
+      onEviction: { recorder.record($0) }
+    )
     let request = queuedRequest(eventID: "event", receivedAt: 5)
 
     let dataDirectory = try appInbox.dataDirectoryURL()
@@ -27,7 +32,9 @@ final class NwcAppGroupWakeInboxTests: XCTestCase {
     XCTAssertEqual(dataDirectory, root.appendingPathComponent("RustCore/ApplicationSupport"))
     XCTAssertTrue(FileManager.default.fileExists(atPath: dataDirectory.path))
     XCTAssertEqual(try appInbox.pendingRequests(), [request])
-    XCTAssertTrue(try appInbox.remove(eventIDs: ["event"]))
+    try appInbox.enqueue(queuedRequest(eventID: "second", receivedAt: 6))
+    XCTAssertEqual(recorder.count, 1)
+    XCTAssertTrue(try appInbox.remove(eventIDs: [fixedGroupHex("second")]))
     XCTAssertTrue(try appInbox.pendingRequests().isEmpty)
   }
 
@@ -45,8 +52,8 @@ final class NwcAppGroupWakeInboxTests: XCTestCase {
       try JSONSerialization.data(withJSONObject: [
         [
           "relay": "wss://relay.example/path",
-          "eventId": "event",
-          "walletServicePubkey": "wallet",
+          "eventId": fixedGroupHex("event"),
+          "walletServicePubkey": String(repeating: "b", count: 64),
           "eventJson": "{}",
           "receivedAt": 42,
         ]
@@ -62,8 +69,8 @@ final class NwcAppGroupWakeInboxTests: XCTestCase {
         NwcQueuedWakeRequest(
           payload: NwcWakePayload(
             relayURL: "wss://relay.example/path",
-            eventIDHex: "event",
-            walletServicePublicKeyHex: "wallet",
+            eventIDHex: fixedGroupHex("event"),
+            walletServicePublicKeyHex: String(repeating: "b", count: 64),
             embeddedEventJSON: "{}"
           ),
           receivedAtSeconds: 42
@@ -71,6 +78,34 @@ final class NwcAppGroupWakeInboxTests: XCTestCase {
       ]
     )
     XCTAssertFalse(try appInbox.migrateLegacyFlatQueue(from: defaults, key: "legacy"))
+  }
+
+  func testRejectsInvalidOrOverCapacityLegacyQueueBeforeMigration() throws {
+    let defaults = makeUserDefaults()
+    let appInbox = NwcAppGroupWakeInbox(
+      rootURL: makeTemporaryDirectory(),
+      maxPendingRequests: 1
+    )
+    defaults.set(
+      try JSONSerialization.data(withJSONObject: [
+        legacyRequest(eventID: fixedGroupHex("one")),
+        legacyRequest(eventID: fixedGroupHex("two")),
+      ]),
+      forKey: "over-capacity"
+    )
+    XCTAssertThrowsError(
+      try appInbox.migrateLegacyFlatQueue(from: defaults, key: "over-capacity")
+    )
+    XCTAssertNotNil(defaults.data(forKey: "over-capacity"))
+
+    defaults.set(
+      try JSONSerialization.data(withJSONObject: [legacyRequest(eventID: "invalid")]),
+      forKey: "invalid"
+    )
+    XCTAssertThrowsError(
+      try appInbox.migrateLegacyFlatQueue(from: defaults, key: "invalid")
+    )
+    XCTAssertNotNil(defaults.data(forKey: "invalid"))
   }
 
   private func makeTemporaryDirectory() -> URL {
@@ -91,10 +126,37 @@ final class NwcAppGroupWakeInboxTests: XCTestCase {
     NwcQueuedWakeRequest(
       payload: NwcWakePayload(
         relayURL: "wss://relay.example",
-        eventIDHex: eventID,
-        walletServicePublicKeyHex: "wallet-key"
+        eventIDHex: fixedGroupHex(eventID),
+        walletServicePublicKeyHex: String(repeating: "b", count: 64)
       ),
       receivedAtSeconds: receivedAt
     )
+  }
+
+  private func legacyRequest(eventID: String) -> [String: Any] {
+    [
+      "relay": "wss://relay.example/path",
+      "eventId": eventID,
+      "walletServicePubkey": String(repeating: "b", count: 64),
+      "receivedAt": 42,
+    ]
+  }
+}
+
+private func fixedGroupHex(_ value: String) -> String {
+  let prefix = value.utf8.map { String(format: "%02x", $0) }.joined()
+  return String((prefix + String(repeating: "0", count: 64)).prefix(64))
+}
+
+private final class AppGroupEvictionRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var recordedCount = 0
+
+  var count: Int {
+    lock.withLock { recordedCount }
+  }
+
+  func record(_ count: Int) {
+    lock.withLock { recordedCount += count }
   }
 }

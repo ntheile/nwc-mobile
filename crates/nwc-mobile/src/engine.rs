@@ -179,15 +179,27 @@ impl<'a> WakeEngine<'a> {
             }
             Err(_) => return queued(QueueReason::LedgerBusy),
         };
-        if !self
-            .validator
-            .accepts_event_time(validated.created_at(), self.clock.now())
-        {
-            return self.reject_claim(&lease, RejectionCode::EventOutsideFreshnessWindow);
+        if !lease.freshness_was_accepted() {
+            if !self
+                .validator
+                .accepts_event_time(validated.created_at(), self.clock.now())
+            {
+                return self.reject_claim(&lease, RejectionCode::EventOutsideFreshnessWindow);
+            }
+            if self
+                .ledger
+                .accept_event_freshness(&lease, self.clock.now())
+                .is_err()
+            {
+                return self.release_to_application(&lease, QueueReason::LedgerBusy);
+            }
         }
 
         let request = {
-            let secret = match self.secrets.load_nwc_secret(connection.id()) {
+            let Some(context) = deadline.context(cancellation) else {
+                return self.release_to_application(&lease, QueueReason::Deadline);
+            };
+            let secret = match self.secrets.load_nwc_secret(connection.id(), context).await {
                 Ok(secret) => secret,
                 Err(_) => {
                     return self
@@ -494,6 +506,20 @@ impl<'a> WakeEngine<'a> {
                 )
                 .await;
         }
+        if attempt.has_ambiguous_legacy_initiation() {
+            return self
+                .payment_error(
+                    lease,
+                    connection,
+                    validated,
+                    relay,
+                    ErrorCode::Other,
+                    RejectionCode::InvalidRequest,
+                    deadline,
+                    cancellation,
+                )
+                .await;
+        }
         let Some(context) = deadline.context(cancellation) else {
             return self.retry_claim(lease, RetryReason::WalletUnavailable);
         };
@@ -509,6 +535,27 @@ impl<'a> WakeEngine<'a> {
             }
         };
         if !matches!(status, PaymentStatus::Unknown) {
+            if !attempt.was_initiated() {
+                if self
+                    .ledger
+                    .release_uninitiated_payment(attempt.payment_hash(), self.clock.now())
+                    .is_err()
+                {
+                    return self.release_to_application(lease, QueueReason::LedgerBusy);
+                }
+                return self
+                    .payment_error(
+                        lease,
+                        connection,
+                        validated,
+                        relay,
+                        ErrorCode::Other,
+                        RejectionCode::InvalidRequest,
+                        deadline,
+                        cancellation,
+                    )
+                    .await;
+            }
             return self
                 .finish_payment_status(
                     lease,
@@ -526,15 +573,32 @@ impl<'a> WakeEngine<'a> {
         if let Err(disposition) = self.ensure_claim_connection_active(connection, lease) {
             return disposition;
         }
-        let Some(context) = deadline.context(cancellation) else {
+        if attempt.was_initiated() {
+            if self
+                .ledger
+                .mark_payment_pending(attempt.payment_hash(), self.clock.now())
+                .is_err()
+            {
+                return self.release_to_application(lease, QueueReason::LedgerBusy);
+            }
             return self.retry_claim(lease, RetryReason::WalletUnavailable);
-        };
+        }
         let request = PayInvoiceRequest::new(
             payment.invoice.clone(),
             explicit_amount,
             AmountSat::from_sat(attempt.fee_reserve_sat()),
             validated.id().clone(),
         );
+        if self
+            .ledger
+            .mark_payment_initiated(attempt.payment_hash(), self.clock.now())
+            .is_err()
+        {
+            return self.release_to_application(lease, QueueReason::LedgerBusy);
+        }
+        let Some(context) = deadline.context(cancellation) else {
+            return self.retry_claim(lease, RetryReason::WalletUnavailable);
+        };
         match self.wallet.start_payment(request, context).await {
             Ok(status) => {
                 self.finish_payment_status(
@@ -908,7 +972,10 @@ impl<'a> WakeEngine<'a> {
             NotificationHint::Request { method }
         });
         let response_json = response.as_json();
-        let secret = match self.secrets.load_nwc_secret(connection.id()) {
+        let Some(context) = deadline.context(cancellation) else {
+            return self.release_to_application(lease, QueueReason::Deadline);
+        };
+        let secret = match self.secrets.load_nwc_secret(connection.id(), context).await {
             Ok(secret) => secret,
             Err(_) => {
                 return self.release_to_application(lease, QueueReason::SecureStorageUnavailable)
@@ -1458,13 +1525,16 @@ mod tests {
     }
 
     impl SecretProvider for TestSecrets {
-        fn load_nwc_secret(
-            &self,
-            _connection_id: &ConnectionId,
-        ) -> Result<crate::NwcSecretKey, HostError> {
-            self.loads.fetch_add(1, Ordering::SeqCst);
-            crate::NwcSecretKey::from_bytes(self.bytes)
-                .map_err(|_| HostError::new(HostErrorKind::Internal))
+        fn load_nwc_secret<'b>(
+            &'b self,
+            _connection_id: &'b ConnectionId,
+            _context: OperationContext<'b>,
+        ) -> HostFuture<'b, Result<crate::NwcSecretKey, HostError>> {
+            Box::pin(async move {
+                self.loads.fetch_add(1, Ordering::SeqCst);
+                crate::NwcSecretKey::from_bytes(self.bytes)
+                    .map_err(|_| HostError::new(HostErrorKind::Internal))
+            })
         }
     }
 
@@ -1474,15 +1544,18 @@ mod tests {
     }
 
     impl SecretProvider for ExpiringResponseSecrets<'_> {
-        fn load_nwc_secret(
-            &self,
-            _connection_id: &ConnectionId,
-        ) -> Result<crate::NwcSecretKey, HostError> {
-            if self.loads.fetch_add(1, Ordering::SeqCst) == 1 {
-                self.clock.set(1_000);
-            }
-            crate::NwcSecretKey::from_bytes(WALLET_SECRET)
-                .map_err(|_| HostError::new(HostErrorKind::Internal))
+        fn load_nwc_secret<'b>(
+            &'b self,
+            _connection_id: &'b ConnectionId,
+            _context: OperationContext<'b>,
+        ) -> HostFuture<'b, Result<crate::NwcSecretKey, HostError>> {
+            Box::pin(async move {
+                if self.loads.fetch_add(1, Ordering::SeqCst) == 1 {
+                    self.clock.set(1_000);
+                }
+                crate::NwcSecretKey::from_bytes(WALLET_SECRET)
+                    .map_err(|_| HostError::new(HostErrorKind::Internal))
+            })
         }
     }
 
@@ -2455,6 +2528,7 @@ mod tests {
         assert_eq!(wallet.status_calls.load(Ordering::SeqCst), 1);
         assert_eq!(wallet.start_calls.load(Ordering::SeqCst), 1);
 
+        clock.set(1_000);
         assert!(matches!(
             execute(&engine, wake(&event, RELAY, true)),
             WakeDisposition::Completed { .. }
@@ -2488,6 +2562,117 @@ mod tests {
             response.result,
             Some(ResponseResult::PayInvoice(result)) if result.fees_paid == Some(500)
         ));
+    }
+
+    #[test]
+    fn external_settlement_is_not_charged_or_disclosed() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        let active = insert_connection(&ledger);
+        let wallet = TestWallet::default();
+        let payment_hash = PaymentHash::from_bytes([0x31_u8; 32]);
+        *wallet.quote.lock().expect("quote lock") = Some(PaymentQuote::new(
+            payment_hash.clone(),
+            AmountMsat::from_msat(600_000),
+        ));
+        wallet
+            .payment_statuses
+            .lock()
+            .expect("status lock")
+            .push_back(Ok(PaymentStatus::Succeeded {
+                preimage: crate::PaymentPreimage::from_bytes([0x32_u8; 32]),
+                amount: AmountMsat::from_msat(600_000),
+                fee: AmountMsat::from_msat(500),
+            }));
+        let relay = TestRelay::default();
+        let secrets = TestSecrets::wallet();
+        let clock = FixedClock::new(100);
+        let engine = engine(&ledger, &wallet, &relay, &secrets, &clock);
+        let event = request_event(
+            Request::pay_invoice(nip47::PayInvoiceRequest::new("lnbc-external-settlement")),
+            100,
+        );
+
+        assert!(matches!(
+            execute(&engine, wake(&event, RELAY, true)),
+            WakeDisposition::Rejected {
+                code: RejectionCode::InvalidRequest,
+                ..
+            }
+        ));
+        assert_eq!(wallet.start_calls.load(Ordering::SeqCst), 0);
+        assert!(ledger
+            .load_payment_attempt(&payment_hash)
+            .expect("attempt lookup")
+            .is_none());
+
+        let published = relay.published.lock().expect("published lock");
+        let response_event =
+            Event::from_json(published.last().expect("error response")).expect("response event");
+        let plaintext = nostr::nips::nip44::decrypt(
+            client_keys().secret_key(),
+            &response_event.pubkey,
+            &response_event.content,
+        )
+        .expect("decrypt response");
+        let response = Response::from_json(plaintext).expect("NIP-47 response");
+        assert!(response.error.is_some());
+        assert!(response.result.is_none());
+        drop(published);
+
+        let next_event = request_event(Request::get_info(), 100);
+        assert!(matches!(
+            ledger.reserve_payment(
+                &crate::EventId::from_bytes(*next_event.id.as_bytes()),
+                &PaymentHash::from_bytes([0x33_u8; 32]),
+                &active,
+                975,
+                UnixTimestamp::from_secs(101),
+            ),
+            Ok(PaymentReservationOutcome::Reserved(_))
+        ));
+    }
+
+    #[test]
+    fn ambiguous_initiated_payment_is_never_started_twice() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        insert_connection(&ledger);
+        let wallet = TestWallet::default();
+        *wallet.quote.lock().expect("quote lock") = Some(PaymentQuote::new(
+            PaymentHash::from_bytes([0x41_u8; 32]),
+            AmountMsat::from_msat(100_000),
+        ));
+        wallet
+            .payment_statuses
+            .lock()
+            .expect("status lock")
+            .extend([Ok(PaymentStatus::Unknown), Ok(PaymentStatus::Unknown)]);
+        wallet
+            .start_results
+            .lock()
+            .expect("start lock")
+            .push_back(Err(HostError::new(HostErrorKind::TimedOut)));
+        let relay = TestRelay::default();
+        let secrets = TestSecrets::wallet();
+        let clock = FixedClock::new(100);
+        let engine = engine(&ledger, &wallet, &relay, &secrets, &clock);
+        let event = request_event(
+            Request::pay_invoice(nip47::PayInvoiceRequest::new("lnbc-ambiguous")),
+            100,
+        );
+
+        assert!(matches!(
+            execute(&engine, wake(&event, RELAY, true)),
+            WakeDisposition::RetryAfter { .. }
+        ));
+        clock.set(106);
+        assert!(matches!(
+            execute(&engine, wake(&event, RELAY, true)),
+            WakeDisposition::RetryAfter { .. }
+        ));
+        assert_eq!(wallet.status_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(wallet.start_calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

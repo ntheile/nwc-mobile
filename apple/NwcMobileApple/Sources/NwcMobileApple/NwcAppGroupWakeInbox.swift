@@ -1,5 +1,7 @@
 import Foundation
 
+private let maximumLegacyQueueBytes = 8 * 1_024 * 1_024
+
 /// App Group-backed paths and durable foreground handoff for an NWC wake.
 ///
 /// The application and its notification service extension must create this
@@ -8,20 +10,31 @@ import Foundation
 /// `NwcWakeFileInbox`.
 public struct NwcAppGroupWakeInbox: Sendable {
   private struct LegacyFlatWakeRequest: Decodable {
-    let relay: String
-    let eventId: String
-    let walletServicePubkey: String
-    let eventJson: String?
+    let payload: NwcWakePayload
     let receivedAt: UInt64
+
+    private enum CodingKeys: String, CodingKey {
+      case relay
+      case eventId
+      case walletServicePubkey
+      case eventJson
+      case receivedAt
+    }
+
+    init(from decoder: any Decoder) throws {
+      let container = try decoder.container(keyedBy: CodingKeys.self)
+      payload = try NwcWakePayload.validated(
+        relayURL: container.decode(String.self, forKey: .relay),
+        eventIDHex: container.decode(String.self, forKey: .eventId),
+        walletServicePublicKeyHex: container.decode(String.self, forKey: .walletServicePubkey),
+        embeddedEventJSON: container.decodeIfPresent(String.self, forKey: .eventJson)
+      )
+      receivedAt = try container.decode(UInt64.self, forKey: .receivedAt)
+    }
 
     var queuedRequest: NwcQueuedWakeRequest {
       NwcQueuedWakeRequest(
-        payload: NwcWakePayload(
-          relayURL: relay,
-          eventIDHex: eventId,
-          walletServicePublicKeyHex: walletServicePubkey,
-          embeddedEventJSON: eventJson
-        ),
+        payload: payload,
         receivedAtSeconds: receivedAt
       )
     }
@@ -29,12 +42,14 @@ public struct NwcAppGroupWakeInbox: Sendable {
 
   private let rootURL: URL
   private let inbox: NwcWakeFileInbox
+  private let maxPendingRequests: Int
 
   /// Resolves an App Group container and returns `nil` when it is unavailable.
   public init?(
     appGroupIdentifier: String,
     queueDirectoryName: String = "NwcWakeInbox",
-    maxPendingRequests: Int = 100
+    maxPendingRequests: Int = 100,
+    onEviction: (@Sendable (Int) -> Void)? = nil
   ) {
     guard
       !appGroupIdentifier.isEmpty,
@@ -47,7 +62,8 @@ public struct NwcAppGroupWakeInbox: Sendable {
     self.init(
       rootURL: rootURL,
       queueDirectoryName: queueDirectoryName,
-      maxPendingRequests: maxPendingRequests
+      maxPendingRequests: maxPendingRequests,
+      onEviction: onEviction
     )
   }
 
@@ -58,12 +74,15 @@ public struct NwcAppGroupWakeInbox: Sendable {
   public init(
     rootURL: URL,
     queueDirectoryName: String = "NwcWakeInbox",
-    maxPendingRequests: Int = 100
+    maxPendingRequests: Int = 100,
+    onEviction: (@Sendable (Int) -> Void)? = nil
   ) {
     self.rootURL = rootURL
+    self.maxPendingRequests = max(1, maxPendingRequests)
     inbox = NwcWakeFileInbox(
       directoryURL: rootURL.appendingPathComponent(queueDirectoryName, isDirectory: true),
-      maxPendingRequests: maxPendingRequests
+      maxPendingRequests: self.maxPendingRequests,
+      onEviction: onEviction
     )
   }
 
@@ -113,7 +132,13 @@ public struct NwcAppGroupWakeInbox: Sendable {
     key: String
   ) throws -> Bool {
     guard let data = defaults.data(forKey: key) else { return false }
+    guard data.count <= maximumLegacyQueueBytes else {
+      throw CocoaError(.fileReadTooLarge)
+    }
     let requests = try JSONDecoder().decode([LegacyFlatWakeRequest].self, from: data)
+    guard requests.count <= maxPendingRequests else {
+      throw CocoaError(.fileReadCorruptFile)
+    }
     for request in requests {
       try inbox.enqueue(request.queuedRequest)
     }

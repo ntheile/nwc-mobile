@@ -30,7 +30,6 @@ deny = [
 allow-build-scripts = [
   "ahash@0.8.12",
   "anyhow@1.0.104",
-  "bark-server-rpc@0.6.0",
   "bitcoin@0.32.102",
   "bitcoin-internals@0.6.0",
   "bitcoin-io@0.1.101",
@@ -104,4 +103,4 @@ ignore = true
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = ["https://gitlab.com/benthecarman/bark.git"]
+allow-git = []

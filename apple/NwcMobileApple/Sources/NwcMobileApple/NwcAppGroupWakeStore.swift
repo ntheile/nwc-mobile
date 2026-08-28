@@ -13,11 +13,17 @@ public struct NwcAppGroupWakeStore: @unchecked Sendable {
   public init?(
     appGroupIdentifier: String,
     debugLogKey: String = "nwcWakeDebugLog",
-    maximumDebugEntries: Int = 30
+    maximumDebugEntries: Int = 30,
+    maximumPendingRequests: Int = 100,
+    onQueueEviction: (@Sendable (Int) -> Void)? = nil
   ) {
     guard
       let defaults = UserDefaults(suiteName: appGroupIdentifier),
-      let inbox = NwcAppGroupWakeInbox(appGroupIdentifier: appGroupIdentifier)
+      let inbox = NwcAppGroupWakeInbox(
+        appGroupIdentifier: appGroupIdentifier,
+        maxPendingRequests: maximumPendingRequests,
+        onEviction: onQueueEviction
+      )
     else {
       return nil
     }

@@ -9,8 +9,8 @@ final class NwcNativeContractFixtureTests: XCTestCase {
     let decoded = try NwcWakePayload.decode(userInfo: values)
 
     XCTAssertEqual(decoded.relayURL, "wss://relay.example/nwc")
-    XCTAssertEqual(decoded.eventIDHex, String(repeating: "A", count: 64))
-    XCTAssertEqual(decoded.walletServicePublicKeyHex, String(repeating: "B", count: 64))
+    XCTAssertEqual(decoded.eventIDHex, String(repeating: "a", count: 64))
+    XCTAssertEqual(decoded.walletServicePublicKeyHex, String(repeating: "b", count: 64))
     XCTAssertEqual(decoded.embeddedEventJSON, "synthetic-encrypted-event")
   }
 

@@ -769,11 +769,12 @@ mod tests {
     struct UnusedSecrets;
 
     impl SecretProvider for UnusedSecrets {
-        fn load_nwc_secret(
-            &self,
-            _connection_id: &ConnectionId,
-        ) -> Result<NwcSecretKey, HostError> {
-            Err(HostError::new(HostErrorKind::Internal))
+        fn load_nwc_secret<'a>(
+            &'a self,
+            _connection_id: &'a ConnectionId,
+            _context: OperationContext<'a>,
+        ) -> HostFuture<'a, Result<NwcSecretKey, HostError>> {
+            Box::pin(async { Err(HostError::new(HostErrorKind::Internal)) })
         }
     }
 
