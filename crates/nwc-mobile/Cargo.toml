@@ -20,7 +20,7 @@ diagnostics = []
 # Pin optional transitive packages whose latest manifests exceed the workspace
 # MSRV; Cargo includes them when resolving the complete feature graph.
 base64ct = "=1.7.3"
-base64 = "=0.22.1"
+base64 = "=0.23.1"
 getrandom = "0.3.4"
 # Keep the reviewed URL parsing graph pinned across wallet integrations.
 idna_adapter = "=1.1.0"
