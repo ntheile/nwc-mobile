@@ -164,6 +164,10 @@ impl<'a> WakeRegistrationWorker<'a> {
                     Err(error) => return Err(error.into()),
                 },
                 Err(error) => {
+                    if error.kind() == HostErrorKind::Cancelled {
+                        report.interrupted = true;
+                        break;
+                    }
                     match self.ledger.retry_wake_registration(
                         &change,
                         self.clock.now(),
@@ -172,10 +176,6 @@ impl<'a> WakeRegistrationWorker<'a> {
                         Ok(()) => report.deferred += 1,
                         Err(WakeRegistrationError::StaleChange) => report.superseded += 1,
                         Err(error) => return Err(error.into()),
-                    }
-                    if error.kind() == HostErrorKind::Cancelled {
-                        report.interrupted = true;
-                        break;
                     }
                 }
             }
@@ -415,6 +415,39 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn provider_cancellation_does_not_consume_durable_backoff() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        insert_connection(&ledger);
+        let transport = TestTransport::default();
+        transport
+            .results
+            .lock()
+            .expect("results lock")
+            .push_back(Err(HostError::new(HostErrorKind::Cancelled)));
+        let server_url = server_url();
+        let clock = FixedClock(UnixTimestamp::from_secs(100));
+
+        let report = block_on(
+            WakeRegistrationWorker::new(&ledger, &transport, &server_url, &clock).run(
+                1,
+                operation_budget(),
+                &NeverCancelled,
+            ),
+        )
+        .expect("worker pass");
+
+        assert!(report.interrupted());
+        assert_eq!(report.deferred(), 0);
+        let due = ledger
+            .load_due_wake_registrations(UnixTimestamp::from_secs(100), 1)
+            .expect("immediately due change")
+            .pop()
+            .expect("durable change");
+        assert_eq!(due.attempt_count(), 0);
     }
 
     #[test]

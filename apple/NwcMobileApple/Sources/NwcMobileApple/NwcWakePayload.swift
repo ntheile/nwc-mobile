@@ -1,9 +1,9 @@
 import Foundation
 
-/// Untrusted NWC routing fields extracted from an APNs user-info dictionary.
+/// Bounded, transport-validated NWC routing fields extracted from APNs.
 ///
-/// The values remain unvalidated until the generated Rust API creates a
-/// `MobileWakeEnvelope`. They must never be logged by the native adapter.
+/// Rust still performs all protocol and authorization validation. These values
+/// must never be logged by the native adapter.
 public struct NwcWakePayload: Sendable, Equatable, Codable {
   public let relayURL: String
   public let eventIDHex: String
@@ -21,6 +21,26 @@ public struct NwcWakePayload: Sendable, Equatable, Codable {
     self.walletServicePublicKeyHex = walletServicePublicKeyHex
     self.embeddedEventJSON = embeddedEventJSON
   }
+
+  private enum CodingKeys: String, CodingKey {
+    case relayURL
+    case eventIDHex
+    case walletServicePublicKeyHex
+    case embeddedEventJSON
+  }
+
+  public init(from decoder: any Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self = try Self.validated(
+      relayURL: container.decode(String.self, forKey: .relayURL),
+      eventIDHex: container.decode(String.self, forKey: .eventIDHex),
+      walletServicePublicKeyHex: container.decode(
+        String.self,
+        forKey: .walletServicePublicKeyHex
+      ),
+      embeddedEventJSON: container.decodeIfPresent(String.self, forKey: .embeddedEventJSON)
+    )
+  }
 }
 
 /// Stable APNs keys understood by the NSE helper.
@@ -35,9 +55,41 @@ public enum NwcWakePayloadKey {
 public enum NwcWakePayloadError: Error, Sendable, Equatable {
   case missingRequiredField
   case invalidFieldType
+  case invalidFieldValue
 }
 
+private let maximumRelayURLBytes = 2_048
+private let maximumEmbeddedEventBytes = 64 * 1_024
+private let fixedHexLength = 64
+
 extension NwcWakePayload {
+  static func validated(
+    relayURL: String,
+    eventIDHex: String,
+    walletServicePublicKeyHex: String,
+    embeddedEventJSON: String?
+  ) throws -> NwcWakePayload {
+    guard
+      !relayURL.isEmpty,
+      relayURL.count <= maximumRelayURLBytes,
+      relayURL.utf8.count <= maximumRelayURLBytes,
+      eventIDHex.isFixedHex,
+      walletServicePublicKeyHex.isFixedHex,
+      embeddedEventJSON.map({
+        $0.count <= maximumEmbeddedEventBytes
+          && $0.utf8.count <= maximumEmbeddedEventBytes
+      }) ?? true
+    else {
+      throw NwcWakePayloadError.invalidFieldValue
+    }
+    return NwcWakePayload(
+      relayURL: relayURL,
+      eventIDHex: eventIDHex.lowercased(),
+      walletServicePublicKeyHex: walletServicePublicKeyHex.lowercased(),
+      embeddedEventJSON: embeddedEventJSON
+    )
+  }
+
   /// Encodes only the stable APNs routing keys understood by the NSE helper.
   ///
   /// This deliberately drops every unrecognized notification field so callers
@@ -54,7 +106,7 @@ extension NwcWakePayload {
     return userInfo
   }
 
-  /// Decodes only the expected APNs fields without interpreting their values.
+  /// Decodes only bounded APNs routing fields and canonicalizes fixed hex values.
   public static func decode(
     userInfo: [AnyHashable: Any]
   ) throws -> NwcWakePayload {
@@ -78,13 +130,30 @@ extension NwcWakePayload {
       embeddedEvent = nil
     }
 
-    return NwcWakePayload(
-      relayURL: try requiredString(NwcWakePayloadKey.relayURL),
-      eventIDHex: try requiredString(NwcWakePayloadKey.eventID),
-      walletServicePublicKeyHex: try requiredString(
-        NwcWakePayloadKey.walletServicePublicKey
-      ),
+    let relayURL = try requiredString(NwcWakePayloadKey.relayURL)
+    let eventID = try requiredString(NwcWakePayloadKey.eventID)
+    let walletServicePublicKey = try requiredString(
+      NwcWakePayloadKey.walletServicePublicKey
+    )
+    return try validated(
+      relayURL: relayURL,
+      eventIDHex: eventID,
+      walletServicePublicKeyHex: walletServicePublicKey,
       embeddedEventJSON: embeddedEvent
     )
+  }
+}
+
+extension String {
+  fileprivate var isFixedHex: Bool {
+    count == fixedHexLength
+      && unicodeScalars.allSatisfy {
+        switch $0.value {
+        case 48...57, 65...70, 97...102:
+          return true
+        default:
+          return false
+        }
+      }
   }
 }

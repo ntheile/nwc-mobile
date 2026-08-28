@@ -5,7 +5,8 @@ use std::time::Duration;
 use url::{form_urlencoded, Url};
 
 use crate::{
-    BudgetInterval, BudgetPolicy, ConnectionPolicy, FeePolicy, NwcMethod, PublicKey, UnixTimestamp,
+    maximum_mobile_fee_sat, BudgetInterval, BudgetPolicy, ConnectionPolicy, FeePolicy, NwcMethod,
+    PublicKey, UnixTimestamp,
 };
 
 const CLIENT_PUBLIC_KEY_HEX_LENGTH: usize = 64;
@@ -339,6 +340,9 @@ impl NwaRequest {
         if !url.username().is_empty() || url.password().is_some() {
             return Err(NwaError::SecretMaterialPresent);
         }
+        if url.fragment().is_some() {
+            return Err(NwaError::SecretMaterialPresent);
+        }
 
         let client_hex = url.host_str().ok_or(NwaError::InvalidClientPublicKey)?;
         if client_hex.len() != CLIENT_PUBLIC_KEY_HEX_LENGTH {
@@ -379,6 +383,11 @@ impl NwaRequest {
         let expires_at = parse_expiration(&query, now, policy)?;
         let budget = parse_budget(&query, policy)?;
         let methods = parse_methods(&query)?;
+        if methods.contains(&NwcMethod::PayInvoice)
+            && budget.limit_sat() <= maximum_mobile_fee_sat(budget.limit_sat())
+        {
+            return Err(NwaError::InvalidBudget);
+        }
         let requested_policy = ConnectionPolicy::new(methods, budget);
         let callback = parse_callback(&query)?;
 
@@ -448,7 +457,9 @@ impl NwaRequest {
         self.expires_at
     }
 
-    /// Returns the optional verified-link callback description.
+    /// Returns the optional validated but unverified callback description.
+    ///
+    /// Native hosts must independently verify any claimed app-link association.
     #[must_use]
     pub const fn callback(&self) -> Option<&NwaCallback> {
         self.callback.as_ref()
@@ -583,7 +594,9 @@ fn parse_budget(query: &NwaQuery, policy: &NwaParsePolicy) -> Result<BudgetPolic
     Ok(BudgetPolicy::new(
         budget_sat,
         interval,
-        FeePolicy::CountTowardBudget { maximum_fee_sat: 0 },
+        FeePolicy::CountTowardBudget {
+            maximum_fee_sat: maximum_mobile_fee_sat(budget_sat),
+        },
     ))
 }
 
@@ -779,6 +792,12 @@ mod tests {
         assert_eq!(request.relays().len(), 2);
         assert!(request.requested_policy().allows(NwcMethod::PayInvoice));
         assert_eq!(request.requested_policy().budget().limit_sat(), 500_000);
+        assert_eq!(
+            request.requested_policy().budget().fee_policy(),
+            FeePolicy::CountTowardBudget {
+                maximum_fee_sat: 1_000,
+            }
+        );
         assert_eq!(request.expires_at(), Some(UnixTimestamp::from_secs(2_000)));
     }
 
@@ -820,6 +839,12 @@ mod tests {
         assert_eq!(
             parse(&format!(
                 "nostr+walletauth://leaked-secret@{CLIENT}?relay=wss%3A%2F%2Frelay.example.com"
+            )),
+            Err(NwaError::SecretMaterialPresent)
+        );
+        assert_eq!(
+            parse(&format!(
+                "nostr+walletauth://{CLIENT}?relay=wss%3A%2F%2Frelay.example.com#secret=private"
             )),
             Err(NwaError::SecretMaterialPresent)
         );
@@ -865,6 +890,16 @@ mod tests {
             )),
             Err(NwaError::BudgetTooHigh)
         );
+        assert_eq!(
+            parse(&format!(
+                "nostr+walletauth://{CLIENT}?relay=wss%3A%2F%2Frelay.example.com&max_amount=10000&request_methods=pay_invoice"
+            )),
+            Err(NwaError::InvalidBudget)
+        );
+        assert!(parse(&format!(
+            "nostr+walletauth://{CLIENT}?relay=wss%3A%2F%2Frelay.example.com&max_amount=11000&request_methods=pay_invoice"
+        ))
+        .is_ok());
     }
 
     #[test]

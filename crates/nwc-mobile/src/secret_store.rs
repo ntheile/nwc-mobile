@@ -5,10 +5,7 @@ use std::sync::Arc;
 use nostr::SecretKey;
 use zeroize::Zeroizing;
 
-use crate::{
-    ClientSecretStore, ClientSecretStoreError, ConnectionId, HostError, HostErrorKind,
-    Nip98SigningKey, NwcSecretKey, SecretProvider,
-};
+use crate::{ClientSecretStore, ClientSecretStoreError, HostError, HostErrorKind, Nip98SigningKey};
 
 /// Minimal platform-protected key-value storage required by NWC hosts.
 ///
@@ -31,7 +28,12 @@ pub trait WalletServiceSigningKeyProvider: Send + Sync {
     fn load_wallet_service_signing_key(&self) -> Result<Nip98SigningKey, HostError>;
 }
 
-/// Adapts one protected key-value store to all shared NWC secret contracts.
+/// Adapts a synchronous protected store to foreground secret lifecycle contracts.
+///
+/// This type deliberately does not implement [`crate::SecretProvider`]: a
+/// synchronous Keychain or Keystore read cannot honor an async operation
+/// deadline. Background hosts should use the bounded native bridge or provide
+/// their own context-aware asynchronous implementation.
 pub struct StoredNwcSecrets<S: ?Sized> {
     store: Arc<S>,
     wallet_service_secret_key: String,
@@ -64,13 +66,6 @@ impl<S: ProtectedSecretStore + ?Sized> StoredNwcSecrets<S> {
             .ok_or_else(unavailable)?;
         SecretKey::parse(encoded.as_str())
             .map(|secret| secret.to_secret_bytes())
-            .map_err(|_| HostError::new(HostErrorKind::Internal))
-    }
-}
-
-impl<S: ProtectedSecretStore + ?Sized> SecretProvider for StoredNwcSecrets<S> {
-    fn load_nwc_secret(&self, _connection_id: &ConnectionId) -> Result<NwcSecretKey, HostError> {
-        NwcSecretKey::from_bytes(self.wallet_service_secret_bytes()?)
             .map_err(|_| HostError::new(HostErrorKind::Internal))
     }
 }
@@ -143,7 +138,7 @@ mod tests {
     }
 
     #[test]
-    fn one_adapter_serves_wallet_and_client_secret_contracts() {
+    fn adapter_serves_foreground_client_and_wallet_identity_contracts() {
         let store = Arc::new(MemorySecrets::default());
         store
             .store_secret(
@@ -153,9 +148,6 @@ mod tests {
             .expect("wallet key");
         let secrets = StoredNwcSecrets::new(store, "wallet-key");
 
-        assert!(secrets
-            .load_nwc_secret(&ConnectionId::parse("connection").expect("connection id"))
-            .is_ok());
         secrets
             .store_client_secret("client", "secret")
             .expect("store client secret");

@@ -185,8 +185,8 @@ final class NwcNotificationServiceAdapterTests: XCTestCase {
   private func payload() -> [AnyHashable: Any] {
     [
       NwcWakePayloadKey.relayURL: "wss://relay.example",
-      NwcWakePayloadKey.eventID: "event-id",
-      NwcWakePayloadKey.walletServicePublicKey: "wallet-key",
+      NwcWakePayloadKey.eventID: String(repeating: "a", count: 64),
+      NwcWakePayloadKey.walletServicePublicKey: String(repeating: "b", count: 64),
     ]
   }
 

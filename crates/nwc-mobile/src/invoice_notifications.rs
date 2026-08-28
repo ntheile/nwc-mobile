@@ -494,9 +494,14 @@ impl<'a> InvoiceNotificationWorker<'a> {
             let event_json = match &payment.notification_event_json {
                 Some(event) => event.clone(),
                 None => {
+                    let Some(context) = deadline.context(cancellation) else {
+                        report.retryable += 1;
+                        break;
+                    };
                     let secret = self
                         .secrets
-                        .load_nwc_secret(connection.id())
+                        .load_nwc_secret(connection.id(), context)
+                        .await
                         .map_err(|_| InvoiceNotificationError::Secret)?;
                     let proposed =
                         build_payment_sent_notification_event(&connection, &secret, &payment)?;
@@ -633,9 +638,14 @@ impl<'a> InvoiceNotificationWorker<'a> {
                     report.expired += 1;
                     return Ok(());
                 };
+                let Some(context) = deadline.context(cancellation) else {
+                    report.retryable += 1;
+                    return Ok(());
+                };
                 let secret = self
                     .secrets
-                    .load_nwc_secret(connection.id())
+                    .load_nwc_secret(connection.id(), context)
+                    .await
                     .map_err(|_| InvoiceNotificationError::Secret)?;
                 let proposed = build_payment_received_notification_event(
                     &connection,

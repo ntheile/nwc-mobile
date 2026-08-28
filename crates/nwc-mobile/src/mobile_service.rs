@@ -80,6 +80,10 @@ impl From<WakeRegistrationError> for MobileServiceError {
 }
 
 /// Non-sensitive, render-ready fields for one validated NWA request.
+///
+/// Requester names, icon URLs, and callback hosts are unverified claims. Hosts
+/// must present the client public-key fingerprint as the primary identity and
+/// must not label callback-derived values as verified application identity.
 #[derive(Clone, Eq, PartialEq)]
 pub struct NwaRequestPresentation {
     id_hex: String,
@@ -157,19 +161,25 @@ impl NwaRequestPresentation {
         &self.display_name
     }
 
-    /// Returns the validated HTTPS icon URL, when present.
+    /// Returns the syntactically validated but unverified HTTPS icon URL.
+    ///
+    /// Fetching this URL before approval can disclose wallet IP address and
+    /// timing to the requesting application.
     #[must_use]
     pub fn icon_url(&self) -> Option<&str> {
         self.icon_url.as_deref()
     }
 
-    /// Returns the verified callback host shown to the user, when present.
+    /// Returns the unverified callback host claimed by the requester.
+    ///
+    /// This value proves neither control of the domain nor the requester's
+    /// application identity. Pair it with [`Self::client_pubkey_hex`].
     #[must_use]
     pub fn requesting_app_description(&self) -> Option<&str> {
         self.requesting_app_description.as_deref()
     }
 
-    /// Returns the verified callback target description.
+    /// Returns the syntactically validated but unverified callback target.
     #[must_use]
     pub fn callback_target_description(&self) -> &str {
         &self.callback_target_description

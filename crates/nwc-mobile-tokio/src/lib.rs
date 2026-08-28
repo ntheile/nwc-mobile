@@ -20,7 +20,7 @@ pub use node::{NwcNode, NwcNodeConfig, DEFAULT_INVOICE_SETTLEMENT_POLL_INTERVAL}
 
 use std::future::Future;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use nwc_mobile::{
@@ -287,6 +287,55 @@ where
             }
         }
     }
+}
+
+/// Runs an owned host operation on the native Tokio runtime with a hard context bound.
+///
+/// UniFFI futures can be polled by a Swift or Kotlin executor with no Tokio
+/// reactor. This helper moves both the timer and the operation onto the
+/// process-wide native runtime before enforcing cancellation and timeout.
+pub async fn run_owned_with_context<T, F, C>(
+    budget: OperationBudget,
+    cancellation: Arc<C>,
+    operation: F,
+) -> Result<T, HostError>
+where
+    T: Send + 'static,
+    F: Future<Output = Result<T, HostError>> + Send + 'static,
+    C: CancellationSignal + Send + Sync + 'static,
+{
+    let started_at = Instant::now();
+    run_on_native_runtime(async move {
+        let remaining = budget.timeout().saturating_sub(started_at.elapsed());
+        let budget =
+            OperationBudget::new(remaining).map_err(|_| host_error(HostErrorKind::TimedOut))?;
+        let context = OperationContext::new(budget, cancellation.as_ref());
+        run_with_context(context, operation).await
+    })
+    .await?
+}
+
+/// Runs blocking native work off the runtime thread and bounds how long the caller waits.
+///
+/// Rust cannot forcibly stop a blocking native callback that has already started.
+/// Callers must therefore keep captured secret material zeroizing and bound their
+/// own native operation; a timeout detaches the blocking task until it returns.
+pub async fn run_owned_blocking_with_context<T, F, C>(
+    budget: OperationBudget,
+    cancellation: Arc<C>,
+    operation: F,
+) -> Result<T, HostError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, HostError> + Send + 'static,
+    C: CancellationSignal + Send + Sync + 'static,
+{
+    run_owned_with_context(budget, cancellation, async move {
+        tokio::task::spawn_blocking(operation)
+            .await
+            .map_err(|_| host_error(HostErrorKind::Internal))?
+    })
+    .await
 }
 
 async fn wait_for_cancellation(cancellation: &dyn CancellationSignal) {

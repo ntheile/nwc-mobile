@@ -1,6 +1,9 @@
 import Darwin
 import Foundation
 
+private let maximumPersistedEmbeddedEventBytes = 64 * 1_024
+private let maximumPersistedQueueBytes = 8 * 1_024 * 1_024
+
 /// A durable foreground handoff for a wake request that could not finish in an NSE.
 public struct NwcQueuedWakeRequest: Sendable, Equatable, Codable {
   public let payload: NwcWakePayload
@@ -45,26 +48,35 @@ public struct NwcWakeFileInbox: Sendable {
   private let queueURL: URL
   private let lockURL: URL
   private let maxPendingRequests: Int
+  private let onEviction: (@Sendable (Int) -> Void)?
 
   public init(
     directoryURL: URL,
     fileName: String = "pending.json",
-    maxPendingRequests: Int = 100
+    maxPendingRequests: Int = 100,
+    onEviction: (@Sendable (Int) -> Void)? = nil
   ) {
     queueURL = directoryURL.appendingPathComponent(fileName)
     lockURL = directoryURL.appendingPathComponent(".\(fileName).lock")
     self.maxPendingRequests = max(1, maxPendingRequests)
+    self.onEviction = onEviction
   }
 
   public func enqueue(_ request: NwcQueuedWakeRequest) throws {
-    try withLock {
+    let evicted = try withLock {
       var requests = try loadLocked()
+      let request = try request.persistenceSafe
       requests.removeAll { $0.eventIDHex == request.eventIDHex }
       requests.append(request)
+      let evicted = max(0, requests.count - maxPendingRequests)
       if requests.count > maxPendingRequests {
-        requests.removeFirst(requests.count - maxPendingRequests)
+        requests.removeFirst(evicted)
       }
       try saveLocked(requests)
+      return evicted
+    }
+    if evicted > 0 {
+      onEviction?(evicted)
     }
   }
 
@@ -77,10 +89,11 @@ public struct NwcWakeFileInbox: Sendable {
   @discardableResult
   public func remove(eventIDs: Set<String>) throws -> Bool {
     guard !eventIDs.isEmpty else { return false }
+    let canonicalEventIDs = Set(eventIDs.map { $0.lowercased() })
     return try withLock {
       var requests = try loadLocked()
       let previousCount = requests.count
-      requests.removeAll { eventIDs.contains($0.eventIDHex) }
+      requests.removeAll { canonicalEventIDs.contains($0.eventIDHex) }
       guard requests.count != previousCount else { return false }
       try saveLocked(requests)
       return true
@@ -108,8 +121,19 @@ public struct NwcWakeFileInbox: Sendable {
 
   private func loadLocked() throws -> [NwcQueuedWakeRequest] {
     guard FileManager.default.fileExists(atPath: queueURL.path) else { return [] }
+    let fileSize = try queueURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+    guard fileSize <= maximumPersistedQueueBytes else {
+      throw CocoaError(.fileReadTooLarge)
+    }
     let data = try Data(contentsOf: queueURL)
-    return try JSONDecoder().decode([NwcQueuedWakeRequest].self, from: data)
+    guard data.count <= maximumPersistedQueueBytes else {
+      throw CocoaError(.fileReadTooLarge)
+    }
+    let requests = try JSONDecoder().decode([NwcQueuedWakeRequest].self, from: data)
+    guard requests.count <= maxPendingRequests else {
+      throw CocoaError(.fileReadCorruptFile)
+    }
+    return try requests.map { try $0.persistenceSafe }
   }
 
   private func saveLocked(_ requests: [NwcQueuedWakeRequest]) throws {
@@ -121,6 +145,9 @@ public struct NwcWakeFileInbox: Sendable {
     }
 
     let data = try JSONEncoder().encode(requests)
+    guard data.count <= maximumPersistedQueueBytes else {
+      throw CocoaError(.fileWriteOutOfSpace)
+    }
     var options: Data.WritingOptions = [.atomic]
     #if os(iOS)
       options.insert(.completeFileProtectionUntilFirstUserAuthentication)
@@ -130,5 +157,29 @@ public struct NwcWakeFileInbox: Sendable {
 
   private func currentPOSIXError() -> POSIXError {
     POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+  }
+}
+
+extension NwcQueuedWakeRequest {
+  fileprivate var persistenceSafe: NwcQueuedWakeRequest {
+    get throws {
+      let boundedEmbeddedEvent: String? = payload.embeddedEventJSON.flatMap { event in
+        guard
+          event.count <= maximumPersistedEmbeddedEventBytes,
+          event.utf8.count <= maximumPersistedEmbeddedEventBytes
+        else { return nil }
+        return event
+      }
+      return NwcQueuedWakeRequest(
+        payload: try NwcWakePayload.validated(
+          relayURL: payload.relayURL,
+          eventIDHex: payload.eventIDHex,
+          walletServicePublicKeyHex: payload.walletServicePublicKeyHex,
+          embeddedEventJSON: boundedEmbeddedEvent
+        ),
+        receivedAtSeconds: receivedAtSeconds,
+        settlementCheck: settlementCheck
+      )
+    }
   }
 }

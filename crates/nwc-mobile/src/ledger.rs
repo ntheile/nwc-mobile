@@ -10,7 +10,7 @@ use crate::invoice_notifications::{
 };
 use crate::{ConnectionId, ConnectionRevision, EventId, NwcMethod, UnixTimestamp};
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 13;
 const CLAIM_TOKEN_BYTES: usize = 16;
 const MAX_RESPONSE_EVENT_BYTES: usize = 128 * 1024;
 const MAX_PRUNE_BATCH: usize = 1_000;
@@ -216,6 +216,36 @@ CREATE INDEX payment_attempts_reconciliation_queue
     WHERE state IN ('reserved', 'pending');
 "#;
 
+const ADD_PAYMENT_INITIATION_MARKER: &str = r#"
+ALTER TABLE payment_attempts ADD COLUMN initiated_at INTEGER
+    CHECK(initiated_at IS NULL OR initiated_at >= created_at);
+
+-- Older versions could only create a payment attempt immediately before
+-- inspecting/starting the wallet payment. Preserve their crash-recovery
+-- behavior instead of treating an upgraded in-flight attempt as external.
+UPDATE payment_attempts SET initiated_at = created_at;
+"#;
+
+const ADD_WAKE_EVENT_FRESHNESS_ACCEPTANCE: &str = r#"
+ALTER TABLE wake_events ADD COLUMN freshness_accepted INTEGER NOT NULL DEFAULT 0
+    CHECK(freshness_accepted IN (0, 1));
+
+ALTER TABLE payment_attempts ADD COLUMN legacy_initiation_ambiguous INTEGER NOT NULL DEFAULT 0
+    CHECK(legacy_initiation_ambiguous IN (0, 1));
+
+-- A durable retry or terminal state could only be reached after the engine's
+-- freshness check in earlier schema versions. An expired live claim is
+-- intentionally left unaccepted because it may have crashed before that check.
+UPDATE wake_events SET freshness_accepted = 1
+WHERE state IN ('retryable', 'terminal');
+
+-- Older ledgers cannot prove whether a crash occurred before or after the
+-- wallet invocation. Keep their unresolved debits recoverable, but mark them
+-- so the engine never starts again or discloses an observed external preimage.
+UPDATE payment_attempts SET legacy_initiation_ambiguous = 1
+WHERE state IN ('reserved', 'pending');
+"#;
+
 const ADD_CONNECTION_EXPIRATION: &str = r#"
 ALTER TABLE connections ADD COLUMN expires_at INTEGER
     CHECK(expires_at IS NULL OR expires_at > created_at);
@@ -332,6 +362,7 @@ pub struct EventLease {
     event_id: EventId,
     token: [u8; CLAIM_TOKEN_BYTES],
     resumed: bool,
+    freshness_accepted: bool,
 }
 
 impl EventLease {
@@ -346,6 +377,12 @@ impl EventLease {
     pub const fn was_resumed(&self) -> bool {
         self.resumed
     }
+
+    /// Returns whether freshness was durably accepted before this lease.
+    #[must_use]
+    pub const fn freshness_was_accepted(&self) -> bool {
+        self.freshness_accepted
+    }
 }
 
 impl fmt::Debug for EventLease {
@@ -355,6 +392,7 @@ impl fmt::Debug for EventLease {
             .field("event_id", &self.event_id)
             .field("token", &"[redacted]")
             .field("resumed", &self.resumed)
+            .field("freshness_accepted", &self.freshness_accepted)
             .finish()
     }
 }
@@ -438,6 +476,7 @@ struct ExistingEvent {
     response_event_json: Option<String>,
     request_method: Option<String>,
     updated_at: i64,
+    freshness_accepted: bool,
 }
 
 /// A cross-process SQLite ledger for event claims and terminal replay state.
@@ -515,6 +554,7 @@ impl WakeLedger {
                     event_id: event_id.clone(),
                     token,
                     resumed: false,
+                    freshness_accepted: false,
                 })
             }
             Some(existing) => {
@@ -556,6 +596,7 @@ impl WakeLedger {
                                 event_id: event_id.clone(),
                                 token,
                                 resumed: true,
+                                freshness_accepted: existing.freshness_accepted,
                             })
                         }
                     }
@@ -565,6 +606,27 @@ impl WakeLedger {
         };
         transaction.commit()?;
         Ok(outcome)
+    }
+
+    /// Durably records that the currently owned event passed freshness policy.
+    pub fn accept_event_freshness(
+        &self,
+        lease: &EventLease,
+        now: UnixTimestamp,
+    ) -> Result<(), LedgerError> {
+        let now = sqlite_timestamp(now)?;
+        let connection = self.lock_connection()?;
+        let updated = connection.execute(
+            "UPDATE wake_events SET freshness_accepted = 1, updated_at = ?3
+             WHERE event_id = ?1 AND state = 'claimed' AND claim_token = ?2
+               AND available_at > ?3",
+            params![
+                lease.event_id.as_bytes().as_slice(),
+                lease.token.as_slice(),
+                now
+            ],
+        )?;
+        require_owned_lease(updated)
     }
 
     /// Extends a live claim using the caller's current remaining lease duration.
@@ -882,6 +944,14 @@ fn migrate(connection: &mut Connection) -> Result<(), LedgerError> {
         transaction.execute_batch(ADD_INVOICE_SETTLEMENT_TRIGGER)?;
         version = 11;
     }
+    if version == 11 {
+        transaction.execute_batch(ADD_PAYMENT_INITIATION_MARKER)?;
+        version = 12;
+    }
+    if version == 12 {
+        transaction.execute_batch(ADD_WAKE_EVENT_FRESHNESS_ACCEPTANCE)?;
+        version = 13;
+    }
     if version != SCHEMA_VERSION {
         return Err(LedgerError::UnsupportedSchema);
     }
@@ -897,7 +967,8 @@ fn load_existing(
     connection
         .query_row(
             "SELECT connection_id, connection_revision, state, available_at,
-                    terminal_kind, response_event_json, request_method, updated_at
+                    terminal_kind, response_event_json, request_method, updated_at,
+                    freshness_accepted
              FROM wake_events WHERE event_id = ?1",
             params![event_id.as_bytes().as_slice()],
             |row| {
@@ -910,6 +981,7 @@ fn load_existing(
                     response_event_json: row.get(5)?,
                     request_method: row.get(6)?,
                     updated_at: row.get(7)?,
+                    freshness_accepted: row.get(8)?,
                 })
             },
         )
@@ -1188,6 +1260,86 @@ mod tests {
     }
 
     #[test]
+    fn version_eleven_migration_marks_in_flight_payment_as_ambiguous() {
+        let database = TestDatabase::new();
+        {
+            let connection = Connection::open(&database.path).expect("create v11 database");
+            for migration in [
+                CREATE_SCHEMA,
+                CREATE_CONNECTION_SCHEMA,
+                CREATE_PAYMENT_SCHEMA,
+                CREATE_WAKE_REGISTRATION_SCHEMA,
+                CREATE_PAYMENT_RECONCILIATION_ORDER,
+                ADD_CONNECTION_EXPIRATION,
+                CREATE_COMPLETED_CONNECTION_INDEX,
+                CREATE_APPLICATION_METADATA_SCHEMA,
+                ADD_WAKE_REQUEST_METHOD,
+                CREATE_INVOICE_NOTIFICATION_SCHEMA,
+                ADD_INVOICE_SETTLEMENT_TRIGGER,
+            ] {
+                connection.execute_batch(migration).expect("v11 migration");
+            }
+            connection
+                .pragma_update(None, "user_version", 11_i64)
+                .expect("v11 version");
+            let client = crate::PublicKey::from_hex(CLIENT_HEX).expect("client key");
+            let wallet = crate::PublicKey::from_hex(WALLET_HEX).expect("wallet key");
+            connection
+                .execute(
+                    "INSERT INTO connections (
+                        connection_id, revision, status, client_pubkey,
+                        wallet_service_pubkey, encryption, budget_limit_sat,
+                        budget_interval, fee_policy, maximum_fee_sat,
+                        created_at, updated_at, tombstoned_at, expires_at
+                     ) VALUES (?1, 0, 'active', ?2, ?3, 'nip44_v2', 1000,
+                               'never', 'count', 25, 100, 100, NULL, NULL)",
+                    params![
+                        connection_id().as_str(),
+                        client.as_bytes().as_slice(),
+                        wallet.as_bytes().as_slice(),
+                    ],
+                )
+                .expect("v11 connection");
+            connection
+                .execute(
+                    "INSERT INTO budget_periods (
+                        connection_id, period_started_at, limit_sat, used_sat, updated_at
+                     ) VALUES (?1, 100, 1000, 125, 100)",
+                    params![connection_id().as_str()],
+                )
+                .expect("v11 budget period");
+            connection
+                .execute(
+                    "INSERT INTO payment_attempts (
+                        event_id, payment_hash, connection_id, connection_revision,
+                        period_started_at, principal_sat, fee_reserve_sat, reserved_sat,
+                        state, created_at, updated_at, reconciliation_sequence
+                     ) VALUES (?1, ?2, ?3, 0, 100, 100, 25, 125,
+                               'pending', 100, 101, 1)",
+                    params![
+                        event_id().as_bytes().as_slice(),
+                        [0x55_u8; 32].as_slice(),
+                        connection_id().as_str(),
+                    ],
+                )
+                .expect("v11 payment attempt");
+        }
+
+        let ledger = WakeLedger::open(&database.path).expect("migrate v11 ledger");
+        let connection = ledger.lock_connection().expect("database lock");
+        let (initiated_at, legacy_ambiguous): (Option<i64>, bool) = connection
+            .query_row(
+                "SELECT initiated_at, legacy_initiation_ambiguous
+                 FROM payment_attempts WHERE event_id = ?1",
+                params![event_id().as_bytes().as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("initiation marker");
+        assert_eq!(initiated_at, Some(100));
+        assert!(legacy_ambiguous);
+    }
+
+    #[test]
     fn concurrent_connections_create_only_one_active_claim() {
         let database = TestDatabase::new();
         let first = Arc::new(WakeLedger::open(&database.path).expect("first ledger"));
@@ -1231,6 +1383,7 @@ mod tests {
         };
 
         assert!(second.was_resumed());
+        assert!(!second.freshness_was_accepted());
         assert_eq!(
             ledger.complete_event(
                 &first,
@@ -1331,23 +1484,27 @@ mod tests {
             panic!("claim not acquired");
         };
         ledger
+            .accept_event_freshness(&lease, UnixTimestamp::from_secs(101))
+            .expect("accept freshness");
+        ledger
             .retry_later(
                 &lease,
-                UnixTimestamp::from_secs(101),
+                UnixTimestamp::from_secs(102),
                 Duration::from_secs(5),
             )
             .expect("schedule retry");
 
         assert_eq!(
-            claim(&ledger, 102),
+            claim(&ledger, 103),
             ClaimOutcome::InProgress {
                 retry_after: Duration::from_secs(4)
             }
         );
-        let ClaimOutcome::Acquired(retry) = claim(&ledger, 106) else {
+        let ClaimOutcome::Acquired(retry) = claim(&ledger, 107) else {
             panic!("retry claim not acquired");
         };
         assert!(retry.was_resumed());
+        assert!(retry.freshness_was_accepted());
     }
 
     #[test]

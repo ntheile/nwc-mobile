@@ -102,6 +102,8 @@ pub struct PaymentAttempt {
     actual_fee_sat: Option<u64>,
     charged_sat: Option<u64>,
     authorization_exceeded: bool,
+    initiated_at: Option<UnixTimestamp>,
+    legacy_initiation_ambiguous: bool,
     created_at: UnixTimestamp,
     updated_at: UnixTimestamp,
 }
@@ -187,6 +189,30 @@ impl PaymentAttempt {
         self.authorization_exceeded
     }
 
+    /// Returns when this library durably committed to invoking the wallet.
+    #[must_use]
+    pub const fn initiated_at(&self) -> Option<UnixTimestamp> {
+        self.initiated_at
+    }
+
+    /// Returns whether the library has a durable initiation marker.
+    #[must_use]
+    pub const fn was_initiated(&self) -> bool {
+        self.initiated_at.is_some()
+    }
+
+    /// Returns whether an upgraded ledger cannot prove the old initiation boundary.
+    #[must_use]
+    pub const fn has_ambiguous_legacy_initiation(&self) -> bool {
+        self.legacy_initiation_ambiguous
+    }
+
+    /// Returns whether an observed settlement may be attributed and disclosed.
+    #[must_use]
+    pub const fn may_disclose_settlement(&self) -> bool {
+        self.was_initiated() && !self.legacy_initiation_ambiguous
+    }
+
     /// Returns when the reservation was first committed.
     #[must_use]
     pub const fn created_at(&self) -> UnixTimestamp {
@@ -214,6 +240,11 @@ impl fmt::Debug for PaymentAttempt {
             .field("state", &self.state)
             .field("charged_sat", &self.charged_sat)
             .field("authorization_exceeded", &self.authorization_exceeded)
+            .field("initiated_at", &self.initiated_at)
+            .field(
+                "legacy_initiation_ambiguous",
+                &self.legacy_initiation_ambiguous,
+            )
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
             .finish()
@@ -259,7 +290,7 @@ impl WakeLedger {
             .lock_connection()
             .map_err(|_| PaymentAccountingError::DatabaseUnavailable)?;
         let transaction = database.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let budget = load_connection_budget(&transaction, connection, revision_sql)?;
+        let budget = load_connection_budget(&transaction, connection, revision_sql, now_sql)?;
         let period_started_at = period_start(&budget, now.as_secs())?;
 
         if let Some(existing) = load_attempt_by_event(&transaction, event_id)? {
@@ -285,6 +316,14 @@ impl WakeLedger {
             .checked_add(budget.fee_reserve_sat)
             .ok_or(PaymentAccountingError::ValueOutOfRange)?;
         let reserved_sql = sqlite_u64(reserved_sat)?;
+        let maximum_reconciliation_sequence: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(reconciliation_sequence), 0) FROM payment_attempts",
+            [],
+            |row| row.get(0),
+        )?;
+        let next_reconciliation_sequence = maximum_reconciliation_sequence
+            .checked_add(1)
+            .ok_or(PaymentAccountingError::ValueOutOfRange)?;
 
         transaction.execute(
             "INSERT INTO budget_periods (
@@ -323,8 +362,8 @@ impl WakeLedger {
             "INSERT INTO payment_attempts (
                 event_id, payment_hash, connection_id, connection_revision,
                 period_started_at, principal_sat, fee_reserve_sat, reserved_sat,
-                state, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'reserved', ?9, ?9)",
+                state, created_at, updated_at, reconciliation_sequence
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'reserved', ?9, ?9, ?10)",
             params![
                 event_id.as_bytes().as_slice(),
                 payment_hash.as_bytes().as_slice(),
@@ -335,6 +374,7 @@ impl WakeLedger {
                 fee_reserve_sql,
                 reserved_sql,
                 now_sql,
+                next_reconciliation_sequence,
             ],
         )?;
         transaction.commit()?;
@@ -351,9 +391,73 @@ impl WakeLedger {
             actual_fee_sat: None,
             charged_sat: None,
             authorization_exceeded: false,
+            initiated_at: None,
+            legacy_initiation_ambiguous: false,
             created_at: now,
             updated_at: now,
         }))
+    }
+
+    /// Durably records that this library is about to invoke the wallet backend.
+    pub fn mark_payment_initiated(
+        &self,
+        payment_hash: &PaymentHash,
+        now: UnixTimestamp,
+    ) -> Result<PaymentAttempt, PaymentAccountingError> {
+        let now_sql = sqlite_u64(now.as_secs())?;
+        let mut database = self
+            .lock_connection()
+            .map_err(|_| PaymentAccountingError::DatabaseUnavailable)?;
+        let transaction = database.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut attempt = load_attempt_by_hash(&transaction, payment_hash)?
+            .ok_or(PaymentAccountingError::ReservationConflict)?;
+        validate_update_time(&attempt, now)?;
+        if attempt.initiated_at.is_some() {
+            transaction.commit()?;
+            return Ok(attempt);
+        }
+        if attempt.state != DurablePaymentState::Reserved {
+            return Err(PaymentAccountingError::TerminalStateConflict);
+        }
+        transaction.execute(
+            "UPDATE payment_attempts SET initiated_at = ?2, updated_at = ?2
+             WHERE payment_hash = ?1 AND state = 'reserved' AND initiated_at IS NULL",
+            params![payment_hash.as_bytes().as_slice(), now_sql],
+        )?;
+        transaction.commit()?;
+        attempt.initiated_at = Some(now);
+        attempt.updated_at = now;
+        Ok(attempt)
+    }
+
+    /// Releases a fresh reservation when the wallet reports an external payment.
+    pub fn release_uninitiated_payment(
+        &self,
+        payment_hash: &PaymentHash,
+        now: UnixTimestamp,
+    ) -> Result<(), PaymentAccountingError> {
+        let now_sql = sqlite_u64(now.as_secs())?;
+        let mut database = self
+            .lock_connection()
+            .map_err(|_| PaymentAccountingError::DatabaseUnavailable)?;
+        let transaction = database.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let attempt = load_attempt_by_hash(&transaction, payment_hash)?
+            .ok_or(PaymentAccountingError::ReservationConflict)?;
+        validate_update_time(&attempt, now)?;
+        if attempt.state != DurablePaymentState::Reserved || attempt.initiated_at.is_some() {
+            return Err(PaymentAccountingError::TerminalStateConflict);
+        }
+        adjust_period_used(&transaction, &attempt, attempt.reserved_sat(), 0, now_sql)?;
+        let deleted = transaction.execute(
+            "DELETE FROM payment_attempts
+             WHERE payment_hash = ?1 AND state = 'reserved' AND initiated_at IS NULL",
+            params![payment_hash.as_bytes().as_slice()],
+        )?;
+        if deleted != 1 {
+            return Err(PaymentAccountingError::TerminalStateConflict);
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Records that the wallet may still settle this payment.
@@ -379,6 +483,7 @@ impl WakeLedger {
         let mut attempt = load_attempt_by_hash(&transaction, payment_hash)?
             .ok_or(PaymentAccountingError::ReservationConflict)?;
         validate_update_time(&attempt, now)?;
+        ensure_attempt_initiated(&attempt)?;
         match attempt.state {
             DurablePaymentState::Succeeded => {
                 return Err(PaymentAccountingError::TerminalStateConflict)
@@ -424,6 +529,7 @@ impl WakeLedger {
         let mut attempt = load_attempt_by_hash(&transaction, payment_hash)?
             .ok_or(PaymentAccountingError::ReservationConflict)?;
         validate_update_time(&attempt, now)?;
+        ensure_attempt_initiated(&attempt)?;
         if attempt.state == DurablePaymentState::Succeeded {
             if attempt.actual_principal_sat == Some(actual_principal_sat)
                 && attempt.actual_fee_sat == Some(actual_fee_sat)
@@ -511,14 +617,16 @@ impl WakeLedger {
         let transaction = database.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut maximum_sequence: i64 = transaction.query_row(
             "SELECT COALESCE(MAX(reconciliation_sequence), 0)
-             FROM payment_attempts WHERE state IN ('reserved', 'pending')",
+             FROM payment_attempts WHERE state IN ('reserved', 'pending')
+               AND legacy_initiation_ambiguous = 0",
             [],
             |row| row.get(0),
         )?;
         if maximum_sequence > i64::MAX - limit_sql {
             transaction.execute(
                 "UPDATE payment_attempts SET reconciliation_sequence = 0
-                 WHERE state IN ('reserved', 'pending')",
+                 WHERE state IN ('reserved', 'pending')
+                   AND legacy_initiation_ambiguous = 0",
                 [],
             )?;
             maximum_sequence = 0;
@@ -528,9 +636,11 @@ impl WakeLedger {
                 "SELECT event_id, payment_hash, connection_id, connection_revision,
                         period_started_at, principal_sat, fee_reserve_sat, state,
                         actual_principal_sat, actual_fee_sat, charged_sat,
-                        authorization_exceeded, created_at, updated_at
+                        authorization_exceeded, initiated_at,
+                        legacy_initiation_ambiguous, created_at, updated_at
                  FROM payment_attempts
                  WHERE state IN ('reserved', 'pending')
+                   AND legacy_initiation_ambiguous = 0
                  ORDER BY reconciliation_sequence ASC, event_id ASC
                  LIMIT ?1",
             )?;
@@ -574,6 +684,7 @@ impl WakeLedger {
         let mut attempt = load_attempt_by_hash(&transaction, payment_hash)?
             .ok_or(PaymentAccountingError::ReservationConflict)?;
         validate_update_time(&attempt, now)?;
+        ensure_attempt_initiated(&attempt)?;
         match attempt.state {
             DurablePaymentState::Reserved => {}
             state if state == next => {
@@ -598,10 +709,19 @@ impl WakeLedger {
     }
 }
 
+fn ensure_attempt_initiated(attempt: &PaymentAttempt) -> Result<(), PaymentAccountingError> {
+    if attempt.was_initiated() {
+        Ok(())
+    } else {
+        Err(PaymentAccountingError::TerminalStateConflict)
+    }
+}
+
 fn load_connection_budget(
     transaction: &Transaction<'_>,
     connection: &ActiveConnection,
     revision_sql: i64,
+    now_sql: i64,
 ) -> Result<ConnectionBudget, PaymentAccountingError> {
     transaction
         .query_row(
@@ -609,11 +729,12 @@ fn load_connection_budget(
                     c.fee_policy, c.maximum_fee_sat
              FROM connections AS c
              WHERE c.connection_id = ?1 AND c.revision = ?2 AND c.status = 'active'
+               AND (c.expires_at IS NULL OR c.expires_at > ?3)
                AND EXISTS (
                    SELECT 1 FROM connection_methods AS m
                    WHERE m.connection_id = c.connection_id AND m.method = 'pay_invoice'
                )",
-            params![connection.id().as_str(), revision_sql],
+            params![connection.id().as_str(), revision_sql, now_sql],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -740,7 +861,8 @@ fn attempt_select(predicate: &str) -> String {
         "SELECT event_id, payment_hash, connection_id, connection_revision,
                 period_started_at, principal_sat, fee_reserve_sat, state,
                 actual_principal_sat, actual_fee_sat, charged_sat,
-                authorization_exceeded, created_at, updated_at
+                authorization_exceeded, initiated_at,
+                legacy_initiation_ambiguous, created_at, updated_at
          FROM payment_attempts WHERE {predicate}"
     )
 }
@@ -756,6 +878,8 @@ type AttemptRow = (
     String,
     Option<i64>,
     Option<i64>,
+    Option<i64>,
+    bool,
     Option<i64>,
     bool,
     i64,
@@ -778,6 +902,8 @@ fn decode_attempt_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AttemptRow> {
         row.get(11)?,
         row.get(12)?,
         row.get(13)?,
+        row.get(14)?,
+        row.get(15)?,
     ))
 }
 
@@ -794,9 +920,17 @@ fn hydrate_attempt(row: AttemptRow) -> Result<PaymentAttempt, PaymentAccountingE
     let actual_principal_sat = row.8.map(decode_u64).transpose()?;
     let actual_fee_sat = row.9.map(decode_u64).transpose()?;
     let charged_sat = row.10.map(decode_u64).transpose()?;
-    let created_at = UnixTimestamp::from_secs(decode_u64(row.12)?);
-    let updated_at = UnixTimestamp::from_secs(decode_u64(row.13)?);
+    let initiated_at = row
+        .12
+        .map(decode_u64)
+        .transpose()?
+        .map(UnixTimestamp::from_secs);
+    let created_at = UnixTimestamp::from_secs(decode_u64(row.14)?);
+    let updated_at = UnixTimestamp::from_secs(decode_u64(row.15)?);
     if updated_at < created_at || created_at < period_started_at {
+        return Err(PaymentAccountingError::CorruptData);
+    }
+    if initiated_at.is_some_and(|initiated_at| initiated_at < created_at) {
         return Err(PaymentAccountingError::CorruptData);
     }
     match state {
@@ -829,6 +963,8 @@ fn hydrate_attempt(row: AttemptRow) -> Result<PaymentAttempt, PaymentAccountingE
         actual_fee_sat,
         charged_sat,
         authorization_exceeded: row.11,
+        initiated_at,
+        legacy_initiation_ambiguous: row.13,
         created_at,
         updated_at,
     })
@@ -960,6 +1096,12 @@ mod tests {
         attempt
     }
 
+    fn initiate_payment(ledger: &WakeLedger, byte: u8, now: u64) {
+        ledger
+            .mark_payment_initiated(&hash(byte), UnixTimestamp::from_secs(now))
+            .expect("mark payment initiated");
+    }
+
     #[test]
     fn reservation_debits_principal_and_maximum_fee_immediately() {
         let database = TestDatabase::new();
@@ -1045,6 +1187,159 @@ mod tests {
     }
 
     #[test]
+    fn initiation_marker_is_durable_and_blocks_fresh_release() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        let connection = insert_connection(&ledger, BudgetInterval::Never);
+        let attempt = reserved_attempt(
+            ledger
+                .reserve_payment(
+                    &event(1),
+                    &hash(1),
+                    &connection,
+                    100,
+                    UnixTimestamp::from_secs(100),
+                )
+                .expect("reserve"),
+        );
+        assert!(!attempt.was_initiated());
+
+        let initiated = ledger
+            .mark_payment_initiated(&hash(1), UnixTimestamp::from_secs(101))
+            .expect("mark initiated");
+        assert_eq!(
+            initiated.initiated_at(),
+            Some(UnixTimestamp::from_secs(101))
+        );
+        assert_eq!(
+            ledger.release_uninitiated_payment(&hash(1), UnixTimestamp::from_secs(102)),
+            Err(PaymentAccountingError::TerminalStateConflict)
+        );
+        assert!(ledger
+            .load_payment_attempt(&hash(1))
+            .expect("attempt")
+            .is_some_and(|attempt| attempt.was_initiated()));
+    }
+
+    #[test]
+    fn uninitiated_reservation_cannot_transition_to_wallet_reported_state() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        let connection = insert_connection(&ledger, BudgetInterval::Never);
+        ledger
+            .reserve_payment(
+                &event(1),
+                &hash(1),
+                &connection,
+                100,
+                UnixTimestamp::from_secs(100),
+            )
+            .expect("reserve");
+
+        assert_eq!(
+            ledger.mark_payment_pending(&hash(1), UnixTimestamp::from_secs(101)),
+            Err(PaymentAccountingError::TerminalStateConflict)
+        );
+        assert_eq!(
+            ledger.mark_payment_succeeded(
+                &hash(1),
+                AmountMsat::from_msat(100_000),
+                AmountMsat::from_msat(1_000),
+                UnixTimestamp::from_secs(101),
+            ),
+            Err(PaymentAccountingError::TerminalStateConflict)
+        );
+        assert_eq!(
+            ledger.mark_payment_failed(&hash(1), UnixTimestamp::from_secs(101)),
+            Err(PaymentAccountingError::TerminalStateConflict)
+        );
+    }
+
+    #[test]
+    fn new_reservations_do_not_jump_a_rotated_reconciliation_queue() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        let connection = insert_connection(&ledger, BudgetInterval::Never);
+        for byte in [1_u8, 2] {
+            ledger
+                .reserve_payment(
+                    &event(byte),
+                    &hash(byte),
+                    &connection,
+                    100,
+                    UnixTimestamp::from_secs(100 + u64::from(byte)),
+                )
+                .expect("reserve queued payment");
+        }
+        let (first, _) = ledger
+            .load_unresolved_payment_attempts(1)
+            .expect("rotate first attempt");
+        assert_eq!(first[0].event_id(), &event(1));
+
+        ledger
+            .reserve_payment(
+                &event(3),
+                &hash(3),
+                &connection,
+                100,
+                UnixTimestamp::from_secs(103),
+            )
+            .expect("reserve new payment");
+        let (next, has_additional) = ledger
+            .load_unresolved_payment_attempts(2)
+            .expect("load fair queue");
+        assert_eq!(
+            next.iter()
+                .map(PaymentAttempt::event_id)
+                .collect::<Vec<_>>(),
+            [&event(2), &event(1)]
+        );
+        assert!(has_additional);
+    }
+
+    #[test]
+    fn expired_connection_cannot_create_a_new_reservation() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        let connection = ledger
+            .insert_connection(
+                NewConnection::new(
+                    connection_id(),
+                    PublicKey::from_hex(CLIENT).expect("client key"),
+                    PublicKey::from_hex(WALLET).expect("wallet key"),
+                    vec![SecureRelayUrl::parse("wss://relay.example.com").expect("relay")],
+                    ConnectionPolicy::new(
+                        [NwcMethod::PayInvoice],
+                        BudgetPolicy::new(
+                            1_000,
+                            BudgetInterval::Never,
+                            FeePolicy::CountTowardBudget {
+                                maximum_fee_sat: 25,
+                            },
+                        ),
+                    ),
+                    NwcEncryption::Nip44V2,
+                    WakePolicy::default(),
+                )
+                .expect("new connection")
+                .with_expiration(Some(UnixTimestamp::from_secs(110))),
+                UnixTimestamp::from_secs(100),
+            )
+            .expect("insert connection");
+
+        assert_eq!(
+            ledger.reserve_payment(
+                &event(1),
+                &hash(1),
+                &connection,
+                100,
+                UnixTimestamp::from_secs(110),
+            ),
+            Err(PaymentAccountingError::ConnectionUnavailable)
+        );
+    }
+
+    #[test]
     fn pending_debit_survives_reopen_and_late_settlement() {
         let database = TestDatabase::new();
         let connection;
@@ -1060,6 +1355,7 @@ mod tests {
                     UnixTimestamp::from_secs(100),
                 )
                 .expect("reserve");
+            initiate_payment(&ledger, 1, 100);
             ledger
                 .mark_payment_pending(&hash(1), UnixTimestamp::from_secs(101))
                 .expect("pending");
@@ -1123,6 +1419,7 @@ mod tests {
                 UnixTimestamp::from_secs(100),
             )
             .expect("reserve");
+        initiate_payment(&ledger, 1, 100);
         ledger
             .mark_payment_pending(&hash(1), UnixTimestamp::from_secs(101))
             .expect("pending");
@@ -1164,6 +1461,7 @@ mod tests {
                 UnixTimestamp::from_secs(100),
             )
             .expect("reserve");
+        initiate_payment(&ledger, 1, 100);
         let settled = ledger
             .mark_payment_succeeded(
                 &hash(1),
@@ -1209,6 +1507,7 @@ mod tests {
                 UnixTimestamp::from_secs(100),
             )
             .expect("reserve");
+        initiate_payment(&ledger, 1, 100);
 
         let settled = ledger
             .mark_payment_succeeded(
@@ -1241,6 +1540,7 @@ mod tests {
                 )
                 .expect("first period"),
         );
+        initiate_payment(&ledger, 1, 100);
         ledger
             .mark_payment_pending(&hash(1), UnixTimestamp::from_secs(101))
             .expect("pending");

@@ -48,6 +48,7 @@ pub struct PaymentReconciliationReport {
     examined: u16,
     succeeded: u16,
     failed: u16,
+    discarded: u16,
     unresolved: u16,
     deferred: u16,
     interrupted: bool,
@@ -71,6 +72,13 @@ impl PaymentReconciliationReport {
     #[must_use]
     pub const fn failed(self) -> u16 {
         self.failed
+    }
+
+    /// Returns the number of external statuses discarded because this library
+    /// had not yet initiated the corresponding payment.
+    #[must_use]
+    pub const fn discarded(self) -> u16 {
+        self.discarded
     }
 
     /// Returns the number of queried payments that remain ambiguous or pending.
@@ -168,6 +176,13 @@ impl<'a> PaymentReconciler<'a> {
                     continue;
                 }
             };
+
+            if !matches!(&status, PaymentStatus::Unknown) && !attempt.was_initiated() {
+                self.ledger
+                    .release_uninitiated_payment(attempt.payment_hash(), self.clock.now())?;
+                report.discarded += 1;
+                continue;
+            }
 
             match status {
                 PaymentStatus::Unknown => {
@@ -394,6 +409,29 @@ mod tests {
                 UnixTimestamp::from_secs(now),
             )
             .expect("reserve payment");
+        ledger
+            .mark_payment_initiated(
+                &PaymentHash::from_bytes([byte; 32]),
+                UnixTimestamp::from_secs(now),
+            )
+            .expect("mark payment initiated");
+    }
+
+    fn reserve_uninitiated(
+        ledger: &WakeLedger,
+        connection: &crate::ActiveConnection,
+        byte: u8,
+        now: u64,
+    ) {
+        ledger
+            .reserve_payment(
+                &EventId::from_bytes([byte; 32]),
+                &PaymentHash::from_bytes([byte; 32]),
+                connection,
+                500,
+                UnixTimestamp::from_secs(now),
+            )
+            .expect("reserve uninitiated payment");
     }
 
     fn operation_budget() -> OperationBudget {
@@ -486,6 +524,50 @@ mod tests {
             .expect("second reconciliation");
         assert_eq!(failed.failed(), 1);
         assert!(!failed.needs_retry());
+    }
+
+    #[test]
+    fn external_success_for_uninitiated_reservation_is_discarded_and_refunded() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        let connection = insert_connection(&ledger);
+        reserve_uninitiated(&ledger, &connection, 1, 100);
+        let wallet = TestWallet::default();
+        wallet
+            .statuses
+            .lock()
+            .expect("status lock")
+            .push_back(Ok(PaymentStatus::Succeeded {
+                preimage: PaymentPreimage::from_bytes([9; 32]),
+                amount: AmountMsat::from_msat(500_000),
+                fee: AmountMsat::from_msat(10_000),
+            }));
+        let clock = FixedClock(UnixTimestamp::from_secs(101));
+
+        let report = block_on(PaymentReconciler::new(&ledger, &wallet, &clock).reconcile(
+            1,
+            operation_budget(),
+            &crate::NeverCancelled,
+        ))
+        .expect("reconcile external settlement");
+
+        assert_eq!(report.examined(), 1);
+        assert_eq!(report.discarded(), 1);
+        assert_eq!(report.succeeded(), 0);
+        assert!(!report.needs_retry());
+        assert!(ledger
+            .load_payment_attempt(&PaymentHash::from_bytes([1; 32]))
+            .expect("load attempt")
+            .is_none());
+        assert!(ledger
+            .reserve_payment(
+                &EventId::from_bytes([2; 32]),
+                &PaymentHash::from_bytes([2; 32]),
+                &connection,
+                1_975,
+                UnixTimestamp::from_secs(102),
+            )
+            .is_ok());
     }
 
     #[test]
