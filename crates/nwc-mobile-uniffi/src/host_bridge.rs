@@ -461,7 +461,11 @@ pub trait MobileWalletBackend: Send + Sync {
         cancellation: Arc<MobileCancellation>,
     ) -> Result<MobilePaymentStatus, MobileHostError>;
 
-    /// Starts an idempotent payment after Rust-side reservation.
+    /// Starts or resumes an idempotent payment after Rust-side reservation.
+    /// Repeated calls carry the same `idempotency_key_hex` and must not create
+    /// a second payment. `Rejected` and `NotFound` certify that no payment was
+    /// submitted and cannot later settle. Every other error is ambiguous at
+    /// this payment boundary.
     async fn start_payment(
         &self,
         request: MobilePayInvoiceRequest,
