@@ -25,6 +25,10 @@ deny = [
   { crate = "proc-macro1", reason = "Malicious package family from the August 2026 crates.io incident" },
   { crate = "proc-macro-en", reason = "Malicious package family from the August 2026 crates.io incident" },
 ]
+skip = [
+  { crate = "getrandom@0.2.17", reason = "bitcoin, nostr, and ring still use the rand_core 0.6 generation" },
+  { crate = "getrandom@0.4.3", reason = "UniFFI build tooling uses tempfile's newer getrandom generation" },
+]
 
 [bans.build]
 allow-build-scripts = [
