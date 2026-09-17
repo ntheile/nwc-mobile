@@ -160,11 +160,21 @@ impl<'a> PaymentReconciler<'a> {
             .ledger
             .load_unresolved_payment_attempts(usize::from(max_attempts))?;
         for attempt in attempts {
+            report.examined += 1;
+            // A prepared reservation may have crashed before the wallet call.
+            // Only replay of the authenticated event has the idempotency key
+            // needed to resume it safely; a hash-only lookup could attribute
+            // an external payment to this request.
+            if attempt.has_ambiguous_legacy_initiation()
+                || (attempt.state() == DurablePaymentState::Reserved && attempt.was_initiated())
+            {
+                report.unresolved += 1;
+                continue;
+            }
             let Some(context) = deadline.context(cancellation) else {
                 report.interrupted = true;
                 break;
             };
-            report.examined += 1;
             let status = match self
                 .wallet
                 .payment_status(attempt.payment_hash(), context)
@@ -177,7 +187,7 @@ impl<'a> PaymentReconciler<'a> {
                 }
             };
 
-            if !matches!(&status, PaymentStatus::Unknown) && !attempt.was_initiated() {
+            if !matches!(&status, PaymentStatus::Unknown) && !attempt.may_disclose_settlement() {
                 self.ledger
                     .release_uninitiated_payment(attempt.payment_hash(), self.clock.now())?;
                 report.discarded += 1;
@@ -415,6 +425,12 @@ mod tests {
                 UnixTimestamp::from_secs(now),
             )
             .expect("mark payment initiated");
+        ledger
+            .mark_payment_pending(
+                &PaymentHash::from_bytes([byte; 32]),
+                UnixTimestamp::from_secs(now),
+            )
+            .expect("mark payment pending");
     }
 
     fn reserve_uninitiated(
@@ -491,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_status_remains_reserved_and_definitive_failure_refunds() {
+    fn unknown_status_remains_pending_and_definitive_failure_refunds() {
         let database = TestDatabase::new();
         let ledger = WakeLedger::open(&database.path).expect("ledger");
         let connection = insert_connection(&ledger);
@@ -517,7 +533,7 @@ mod tests {
                 .expect("load attempt")
                 .expect("attempt")
                 .state(),
-            DurablePaymentState::Reserved
+            DurablePaymentState::Pending
         );
 
         let failed = block_on(reconciler.reconcile(1, operation_budget(), &crate::NeverCancelled))
@@ -571,6 +587,50 @@ mod tests {
     }
 
     #[test]
+    fn prepared_payment_is_not_attributed_by_hash_before_wallet_submission() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        let connection = insert_connection(&ledger);
+        reserve_uninitiated(&ledger, &connection, 1, 100);
+        ledger
+            .mark_payment_initiated(
+                &PaymentHash::from_bytes([1; 32]),
+                UnixTimestamp::from_secs(101),
+            )
+            .expect("mark prepared payment");
+        let wallet = TestWallet::default();
+        wallet
+            .statuses
+            .lock()
+            .expect("status lock")
+            .push_back(Ok(PaymentStatus::Succeeded {
+                preimage: PaymentPreimage::from_bytes([9; 32]),
+                amount: AmountMsat::from_msat(500_000),
+                fee: AmountMsat::from_msat(10_000),
+            }));
+        let clock = FixedClock(UnixTimestamp::from_secs(102));
+
+        let report = block_on(PaymentReconciler::new(&ledger, &wallet, &clock).reconcile(
+            1,
+            operation_budget(),
+            &crate::NeverCancelled,
+        ))
+        .expect("reconcile prepared payment");
+
+        assert_eq!(report.examined(), 1);
+        assert_eq!(report.unresolved(), 1);
+        assert!(report.needs_retry());
+        assert_eq!(wallet.status_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(wallet.start_calls.load(Ordering::SeqCst), 0);
+        let attempt = ledger
+            .load_payment_attempt(&PaymentHash::from_bytes([1; 32]))
+            .expect("load attempt")
+            .expect("prepared attempt");
+        assert_eq!(attempt.state(), DurablePaymentState::Reserved);
+        assert!(!attempt.may_disclose_settlement());
+    }
+
+    #[test]
     fn batch_cap_reports_additional_work_without_querying_it() {
         let database = TestDatabase::new();
         let ledger = WakeLedger::open(&database.path).expect("ledger");
@@ -605,7 +665,7 @@ mod tests {
                 .expect("load second")
                 .expect("second attempt")
                 .state(),
-            DurablePaymentState::Reserved
+            DurablePaymentState::Pending
         );
     }
 

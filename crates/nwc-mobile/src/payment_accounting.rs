@@ -210,7 +210,9 @@ impl PaymentAttempt {
     /// Returns whether an observed settlement may be attributed and disclosed.
     #[must_use]
     pub const fn may_disclose_settlement(&self) -> bool {
-        self.was_initiated() && !self.legacy_initiation_ambiguous
+        self.was_initiated()
+            && !self.legacy_initiation_ambiguous
+            && !matches!(self.state, DurablePaymentState::Reserved)
     }
 
     /// Returns when the reservation was first committed.
@@ -271,6 +273,16 @@ struct ConnectionBudget {
 }
 
 impl WakeLedger {
+    pub(crate) fn load_payment_attempt_by_event(
+        &self,
+        event_id: &EventId,
+    ) -> Result<Option<PaymentAttempt>, PaymentAccountingError> {
+        let database = self
+            .lock_connection()
+            .map_err(|_| PaymentAccountingError::DatabaseUnavailable)?;
+        load_attempt_by_event(&database, event_id)
+    }
+
     /// Atomically debits principal plus the maximum fee before any payment call.
     pub fn reserve_payment(
         &self,

@@ -213,6 +213,15 @@ impl HostError {
             HostErrorKind::Unavailable | HostErrorKind::TimedOut | HostErrorKind::AlreadyInProgress
         )
     }
+
+    /// Returns whether the wallet rejected the request before submission.
+    ///
+    /// Other errors are ambiguous at a payment boundary: cancellation or an
+    /// internal failure can be observed after the wallet accepted the payment.
+    #[must_use]
+    pub const fn confirms_payment_was_not_submitted(self) -> bool {
+        matches!(self.kind, HostErrorKind::Rejected | HostErrorKind::NotFound)
+    }
 }
 
 impl fmt::Display for HostError {
@@ -957,11 +966,16 @@ pub trait NwcWalletBackend: Send + Sync {
         context: OperationContext<'a>,
     ) -> HostFuture<'a, Result<PaymentStatus, HostError>>;
 
-    /// Starts an idempotent payment after engine-side reservation.
+    /// Starts or resumes an idempotent payment after engine-side reservation.
     ///
-    /// Any returned error is treated as an ambiguous initiation: the engine
-    /// retains the debit and queries `payment_status` on retry. Definitive
-    /// failures must be returned as `PaymentStatus::Failed`.
+    /// The engine may repeat this call with the same event-id idempotency key
+    /// after an unknown status, cancellation boundary, timeout, or process
+    /// restart. Implementations must resume or return the original payment and
+    /// must never create a second payment. `Rejected` and `NotFound` certify
+    /// that no payment was submitted and cannot later settle. Every other
+    /// error is treated as ambiguous: the engine retains the debit and queries
+    /// `payment_status` on retry. Return `PaymentStatus::Failed` when a
+    /// submitted payment definitively failed.
     fn start_payment<'a>(
         &'a self,
         request: PayInvoiceRequest,
@@ -1119,6 +1133,17 @@ mod tests {
 
         assert!(unavailable.is_retryable());
         assert!(!rejected.is_retryable());
+        assert!(rejected.confirms_payment_was_not_submitted());
+        assert!(HostError::new(HostErrorKind::NotFound).confirms_payment_was_not_submitted());
+        for ambiguous in [
+            HostErrorKind::Unavailable,
+            HostErrorKind::TimedOut,
+            HostErrorKind::Cancelled,
+            HostErrorKind::AlreadyInProgress,
+            HostErrorKind::Internal,
+        ] {
+            assert!(!HostError::new(ambiguous).confirms_payment_was_not_submitted());
+        }
         assert_eq!(unavailable.to_string(), "host capability is unavailable");
     }
 
