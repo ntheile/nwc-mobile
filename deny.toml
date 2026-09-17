@@ -60,7 +60,7 @@ allow-build-scripts = [
   "quinn-udp@0.5.10",
   "ring@0.17.14",
   "rustix@1.1.4",
-  "rustls@0.23.43",
+  "rustls@0.23.45",
   "rustversion@1.0.23",
   "secp256k1-sys@0.10.1",
   "secp256k1-sys@0.12.0",
