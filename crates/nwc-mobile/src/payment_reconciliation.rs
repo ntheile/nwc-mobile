@@ -151,6 +151,7 @@ impl<'a> PaymentReconciler<'a> {
 
         let deadline = OperationDeadline::new(budget);
         let mut report = PaymentReconciliationReport::default();
+        let mut skipped_without_query = false;
         if deadline.context(cancellation).is_none() {
             report.interrupted = true;
             report.needs_retry = true;
@@ -160,21 +161,19 @@ impl<'a> PaymentReconciler<'a> {
             .ledger
             .load_unresolved_payment_attempts(usize::from(max_attempts))?;
         for attempt in attempts {
-            report.examined += 1;
             // A prepared reservation may have crashed before the wallet call.
             // Only replay of the authenticated event has the idempotency key
             // needed to resume it safely; a hash-only lookup could attribute
             // an external payment to this request.
-            if attempt.has_ambiguous_legacy_initiation()
-                || (attempt.state() == DurablePaymentState::Reserved && attempt.was_initiated())
-            {
-                report.unresolved += 1;
+            if attempt.state() == DurablePaymentState::Reserved && attempt.was_initiated() {
+                skipped_without_query = true;
                 continue;
             }
             let Some(context) = deadline.context(cancellation) else {
                 report.interrupted = true;
                 break;
             };
+            report.examined += 1;
             let status = match self
                 .wallet
                 .payment_status(attempt.payment_hash(), context)
@@ -223,6 +222,7 @@ impl<'a> PaymentReconciler<'a> {
         }
 
         report.needs_retry = has_additional_attempts
+            || skipped_without_query
             || report.interrupted
             || report.unresolved != 0
             || report.deferred != 0;
@@ -617,8 +617,8 @@ mod tests {
         ))
         .expect("reconcile prepared payment");
 
-        assert_eq!(report.examined(), 1);
-        assert_eq!(report.unresolved(), 1);
+        assert_eq!(report.examined(), 0);
+        assert_eq!(report.unresolved(), 0);
         assert!(report.needs_retry());
         assert_eq!(wallet.status_calls.load(Ordering::SeqCst), 0);
         assert_eq!(wallet.start_calls.load(Ordering::SeqCst), 0);

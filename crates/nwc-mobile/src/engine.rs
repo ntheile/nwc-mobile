@@ -555,6 +555,7 @@ impl<'a> WakeEngine<'a> {
         .await
     }
 
+    /// Continues an authenticated durable payment attempt without re-quoting it.
     #[allow(clippy::too_many_arguments)]
     async fn continue_payment(
         &self,
@@ -644,10 +645,21 @@ impl<'a> WakeEngine<'a> {
         if let Err(disposition) = self.ensure_claim_connection_active(connection, lease) {
             return disposition;
         }
-        if matches!(
-            attempt.state(),
-            crate::DurablePaymentState::Succeeded | crate::DurablePaymentState::Failed
-        ) {
+        if attempt.state() == crate::DurablePaymentState::Failed {
+            return self
+                .payment_error(
+                    lease,
+                    connection,
+                    validated,
+                    relay,
+                    ErrorCode::PaymentFailed,
+                    RejectionCode::InvalidRequest,
+                    deadline,
+                    cancellation,
+                )
+                .await;
+        }
+        if attempt.state() == crate::DurablePaymentState::Succeeded {
             return self.retry_claim(lease, RetryReason::WalletUnavailable);
         }
         let request = PayInvoiceRequest::new(
@@ -2771,6 +2783,115 @@ mod tests {
         assert_eq!(requests[0].invoice(), requests[1].invoice());
         assert_eq!(requests[0].amount(), requests[1].amount());
         assert_eq!(requests[0].maximum_fee(), requests[1].maximum_fee());
+    }
+
+    #[test]
+    fn durable_failed_payment_replays_terminal_error_when_wallet_status_is_unknown() {
+        struct CancelAfterFailure<'a> {
+            ledger: &'a WakeLedger,
+            hash: &'a PaymentHash,
+        }
+
+        impl CancellationSignal for CancelAfterFailure<'_> {
+            fn is_cancelled(&self) -> bool {
+                self.ledger
+                    .load_payment_attempt(self.hash)
+                    .expect("attempt lookup")
+                    .is_some_and(|attempt| attempt.state() == crate::DurablePaymentState::Failed)
+            }
+        }
+
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        insert_connection(&ledger);
+        let wallet = TestWallet::default();
+        let hash = PaymentHash::from_bytes([0x49; 32]);
+        *wallet.quote.lock().expect("quote lock") = Some(PaymentQuote::new(
+            hash.clone(),
+            AmountMsat::from_msat(600_000),
+        ));
+        wallet
+            .payment_statuses
+            .lock()
+            .expect("status lock")
+            .extend([Ok(PaymentStatus::Unknown), Ok(PaymentStatus::Unknown)]);
+        wallet
+            .start_results
+            .lock()
+            .expect("start lock")
+            .push_back(Err(HostError::new(HostErrorKind::Rejected)));
+        let relay = TestRelay::default();
+        let secrets = TestSecrets::wallet();
+        let clock = FixedClock::new(100);
+        let event = request_event(
+            Request::pay_invoice(nip47::PayInvoiceRequest::new("lnbc-failed-response-retry")),
+            100,
+        );
+
+        let first = block_on(engine(&ledger, &wallet, &relay, &secrets, &clock).execute(
+            wake(&event, RELAY, true),
+            OperationBudget::new(Duration::from_secs(10)).expect("budget"),
+            &CancelAfterFailure {
+                ledger: &ledger,
+                hash: &hash,
+            },
+        ));
+        assert!(matches!(
+            first,
+            WakeDisposition::QueuedForApplication {
+                reason: QueueReason::Deadline,
+                ..
+            }
+        ));
+        assert_eq!(wallet.status_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(wallet.start_calls.load(Ordering::SeqCst), 1);
+        assert!(relay.published.lock().expect("published lock").is_empty());
+        assert_eq!(
+            ledger
+                .load_payment_attempt(&hash)
+                .expect("attempt lookup")
+                .expect("failed attempt")
+                .state(),
+            crate::DurablePaymentState::Failed
+        );
+
+        clock.set(106);
+        assert!(matches!(
+            execute(
+                &engine(&ledger, &wallet, &relay, &secrets, &clock),
+                wake(&event, RELAY, true)
+            ),
+            WakeDisposition::Rejected { .. }
+        ));
+        assert_eq!(wallet.status_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(wallet.start_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            ledger
+                .load_payment_attempt(&hash)
+                .expect("attempt lookup")
+                .expect("failed attempt")
+                .state(),
+            crate::DurablePaymentState::Failed
+        );
+
+        let published = relay.published.lock().expect("published lock");
+        let response_event = Event::from_json(published.last().expect("error response"))
+            .expect("valid response event");
+        let plaintext = nostr::nips::nip44::decrypt(
+            client_keys().secret_key(),
+            &response_event.pubkey,
+            &response_event.content,
+        )
+        .expect("decrypt response");
+        let response = Response::from_json(plaintext).expect("NIP-47 response");
+        assert!(matches!(
+            response.error,
+            Some(NIP47Error {
+                code: ErrorCode::PaymentFailed,
+                ..
+            })
+        ));
+        assert!(response.result.is_none());
     }
 
     #[test]

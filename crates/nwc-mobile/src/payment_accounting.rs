@@ -273,6 +273,7 @@ struct ConnectionBudget {
 }
 
 impl WakeLedger {
+    /// Loads the payment attempt created for one exact authenticated event.
     pub(crate) fn load_payment_attempt_by_event(
         &self,
         event_id: &EventId,
