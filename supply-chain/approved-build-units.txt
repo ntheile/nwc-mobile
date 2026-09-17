@@ -43,7 +43,7 @@ r-efi	6.0.0	proc-macro-dependency
 ring	0.17.14	custom-build
 rustc-hash	2.1.3	proc-macro-dependency
 rustix	1.1.4	custom-build,proc-macro-dependency
-rustls	0.23.43	custom-build
+rustls	0.23.45	custom-build
 rustversion	1.0.23	build-dependency,custom-build,proc-macro
 scroll_derive	0.12.1	proc-macro
 secp256k1-sys	0.10.1	custom-build
