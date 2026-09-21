@@ -1,0 +1,51 @@
+{
+  "name": "@nwc-mobile/react-native",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["example"],
+  "description": "React Native bindings for the nwc-mobile Rust engine",
+  "license": "MIT",
+  "repository": {"type": "git", "url": "https://github.com/ntheile/nwc-mobile.git"},
+  "homepage": "https://github.com/ntheile/nwc-mobile",
+  "author": "nwc-mobile contributors",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "react-native": "src/index.ts",
+  "files": ["src", "lib", "cpp", "ios/NwcMobile.h", "ios/NwcMobile.mm", "ios/generated", "android/CMakeLists.txt", "android/build.gradle", "android/cpp-adapter.cpp", "android/generated", "android/src/main", "native", "templates", "*.podspec", "NwcMobileFramework.xcframework", "react-native.config.js"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "generate": "node scripts/generate.mjs",
+    "generate:native": "node scripts/generate-native.mjs",
+    "build:ios": "node scripts/build-ios.mjs",
+    "build:android": "node scripts/build-android.mjs",
+    "codegen": "node scripts/codegen.mjs",
+    "prepack": "node scripts/verify-artifacts.mjs",
+    "typecheck:example": "tsc -p example/tsconfig.json",
+    "test:native:ios": "node scripts/test-native-ios.mjs",
+    "test": "npm run build && node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "@ubjs/core": "0.31.0-3",
+    "uniffi-bindgen-react-native": "0.31.0-3"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.0",
+    "react": "19.2.3",
+    "react-native": "0.85.0",
+    "typescript": "6.0.3"
+  },
+  "peerDependencies": {
+    "react": ">=19",
+    "react-native": ">=0.85"
+  },
+  "codegenConfig": {
+    "name": "NwcMobileSpec",
+    "type": "modules",
+    "jsSrcsDir": "src",
+    "outputDir": {"ios": "ios/generated", "android": "android/generated"},
+    "android": {"javaPackageName": "com.nwcmobile.reactnative"},
+    "includesGeneratedCode": true
+  },
+  "engines": {"node": ">=22.13.0"}
+}

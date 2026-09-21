@@ -1,0 +1,20 @@
+package org.nwc.mobile.example
+
+import android.app.Application
+import com.facebook.react.PackageList
+import com.facebook.react.ReactApplication
+import com.facebook.react.ReactHost
+import com.facebook.react.ReactNativeApplicationEntryPoint.loadReactNative
+import com.facebook.react.defaults.DefaultReactHost.getDefaultReactHost
+import org.nwc.mobile.registerMobileWalletFactory
+
+class MainApplication : Application(), ReactApplication {
+  override val reactHost: ReactHost by lazy {
+    getDefaultReactHost(applicationContext, PackageList(this).packages)
+  }
+  override fun onCreate() {
+    super.onCreate()
+    registerMobileWalletFactory(ExampleHost(this))
+    loadReactNative(this)
+  }
+}

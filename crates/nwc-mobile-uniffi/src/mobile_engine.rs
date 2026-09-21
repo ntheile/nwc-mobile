@@ -605,7 +605,7 @@ impl fmt::Debug for MobileConnectionState {
 /// Long-lived, cross-process NWC engine opened over one shared SQLite ledger.
 #[derive(uniffi::Object)]
 pub struct MobileNwcEngine {
-    service: NwcMobileService,
+    pub(crate) service: NwcMobileService,
     wallet: Arc<dyn MobileWalletBackend>,
     relays: Arc<dyn MobileRelayTransport>,
     secrets: Arc<dyn MobileSecretProvider>,
