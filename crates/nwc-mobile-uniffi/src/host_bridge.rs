@@ -1061,7 +1061,7 @@ fn mobile_direction(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use nwc_mobile::{OperationBudget, PaymentStatus};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1069,6 +1069,16 @@ mod tests {
     use std::time::Duration;
 
     const HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    pub(crate) fn application_test_engine(path: String) -> Arc<crate::MobileNwcEngine> {
+        crate::MobileNwcEngine::open(
+            path,
+            Arc::new(TestWallet::default()),
+            Arc::new(TestRelay),
+            Arc::new(TestSecrets),
+        )
+        .unwrap()
+    }
 
     #[test]
     fn registration_change_debug_redacts_provider_metadata() {

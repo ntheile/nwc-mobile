@@ -1,0 +1,29 @@
+apply plugin: 'com.android.application'
+apply plugin: 'org.jetbrains.kotlin.android'
+apply plugin: 'com.facebook.react'
+react {
+    reactNativeDir = file('../../../node_modules/react-native')
+    codegenDir = file('../../../node_modules/@react-native/codegen')
+    cliFile = file('../../../node_modules/react-native/cli.js')
+    autolinkLibrariesWithApp()
+}
+android {
+    namespace 'org.nwc.mobile.example'
+    compileSdk rootProject.ext.compileSdkVersion
+    ndkVersion rootProject.ext.ndkVersion
+    sourceSets.main.java.srcDir '../../../native/kotlin'
+    defaultConfig {
+        applicationId 'org.nwc.mobile.example'
+        minSdk 24
+        targetSdk rootProject.ext.targetSdkVersion
+        versionCode 1
+        versionName '0.1.0'
+        testInstrumentationRunner 'org.nwc.mobile.example.NativeSmokeInstrumentation'
+    }
+}
+dependencies {
+    implementation 'net.java.dev.jna:jna:5.19.1@aar'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0'
+    implementation 'com.facebook.react:react-android'
+    implementation 'com.facebook.react:hermes-android'
+}

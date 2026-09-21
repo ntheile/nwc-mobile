@@ -1,0 +1,28 @@
+name: NwcMobileExample
+options:
+  deploymentTarget:
+    iOS: '15.1'
+targets:
+  NwcMobileExample:
+    type: application
+    platform: iOS
+    sources:
+      - AppDelegate.swift
+      - ExampleHost.swift
+      - ../../native/swift/NwcMobile.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.nwc.mobile.example
+        SWIFT_VERSION: '5.0'
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsLocalNetworking: YES
+        HEADER_SEARCH_PATHS: ['$(inherited)', '$(SRCROOT)/../../native/swift']
+        OTHER_SWIFT_FLAGS: ['$(inherited)', '-Xcc', '-fmodule-map-file=$(SRCROOT)/../../native/swift/NwcMobileFFI.modulemap']
+    postCompileScripts:
+      - name: Bundle React Native code and images
+        script: |
+          export NODE_BINARY=$(command -v node)
+          export PROJECT_ROOT="$SRCROOT/.."
+          "$SRCROOT/../../node_modules/react-native/scripts/react-native-xcode.sh"
+        basedOnDependencyAnalysis: false

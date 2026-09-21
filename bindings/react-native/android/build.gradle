@@ -1,0 +1,29 @@
+apply plugin: 'com.android.library'
+apply plugin: 'org.jetbrains.kotlin.android'
+apply plugin: 'com.facebook.react'
+
+android {
+    namespace 'com.nwcmobile.reactnative'
+    compileSdk rootProject.ext.compileSdkVersion
+    ndkVersion rootProject.ext.ndkVersion
+    defaultConfig {
+        minSdk 24
+        targetSdk rootProject.ext.targetSdkVersion
+        externalNativeBuild { cmake { arguments '-DANDROID_STL=c++_shared' } }
+        // Initial native distribution supports arm64 devices only.
+        ndk { abiFilters 'arm64-v8a' }
+    }
+    buildFeatures { prefab true }
+    externalNativeBuild { cmake { path 'CMakeLists.txt' } }
+    sourceSets { main.java.srcDirs += ['generated/java'] }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+dependencies { implementation 'com.facebook.react:react-android' }
+react {
+    jsRootDir = file('../src')
+    libraryName = 'NwcMobileSpec'
+    codegenJavaPackageName = 'com.nwcmobile.reactnative'
+}
