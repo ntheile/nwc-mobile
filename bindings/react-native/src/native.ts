@@ -14,9 +14,7 @@ if (!rustInstalled) {
 // Native-only callbacks are intentionally not part of the JS entrypoint.
 export { openRegisteredMobileWallet } from './generated/nwc_mobile_uniffi';
 
-// Now import the bindings so we can:
-// - intialize them
-// - export them as namespaced objects as the default export.
+// Keep the raw namespace internal; initialize its ABI checks only.
 import * as nwc_mobile_uniffi from './generated/nwc_mobile_uniffi';
 
 // Initialize the generated bindings: mostly checksums, but also callbacks.
@@ -34,8 +32,3 @@ if (!initialized) {
 export async function uniffiInitAsync() {
   // NOOP.
 }
-
-// Export the crates as individually namespaced objects.
-export default {
-  nwc_mobile_uniffi,
-};

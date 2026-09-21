@@ -10,6 +10,8 @@ targets:
       - AppDelegate.swift
       - ExampleHost.swift
       - ../../native/swift/NwcMobile.swift
+      - path: PrivacyInfo.xcprivacy
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.nwc.mobile.example
