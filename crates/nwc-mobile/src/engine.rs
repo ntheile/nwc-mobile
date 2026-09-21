@@ -583,6 +583,25 @@ impl<'a> WakeEngine<'a> {
                 )
                 .await;
         }
+        // A definitive durable failure must replay even while the wallet is
+        // unavailable. Recheck authorization before constructing its response.
+        if attempt.state() == crate::DurablePaymentState::Failed {
+            if let Err(disposition) = self.ensure_claim_connection_active(connection, lease) {
+                return disposition;
+            }
+            return self
+                .payment_error(
+                    lease,
+                    connection,
+                    validated,
+                    relay,
+                    ErrorCode::PaymentFailed,
+                    RejectionCode::InvalidRequest,
+                    deadline,
+                    cancellation,
+                )
+                .await;
+        }
         // The durable marker is written before crossing the host boundary. If
         // that boundary was never crossed, a hash-only success may belong to
         // an external payer. Resume by the event-id key first so the adapter
@@ -644,20 +663,6 @@ impl<'a> WakeEngine<'a> {
         }
         if let Err(disposition) = self.ensure_claim_connection_active(connection, lease) {
             return disposition;
-        }
-        if attempt.state() == crate::DurablePaymentState::Failed {
-            return self
-                .payment_error(
-                    lease,
-                    connection,
-                    validated,
-                    relay,
-                    ErrorCode::PaymentFailed,
-                    RejectionCode::InvalidRequest,
-                    deadline,
-                    cancellation,
-                )
-                .await;
         }
         if attempt.state() == crate::DurablePaymentState::Succeeded {
             return self.retry_claim(lease, RetryReason::WalletUnavailable);
@@ -2787,6 +2792,16 @@ mod tests {
 
     #[test]
     fn durable_failed_payment_replays_terminal_error_when_wallet_status_is_unknown() {
+        assert_durable_failed_payment_replay(Ok(PaymentStatus::Unknown));
+    }
+
+    #[test]
+    fn durable_failed_payment_replays_terminal_error_when_wallet_status_is_unavailable() {
+        assert_durable_failed_payment_replay(Err(HostError::new(HostErrorKind::Unavailable)));
+    }
+
+    /// Checks that interrupted failure responses replay without another wallet query.
+    fn assert_durable_failed_payment_replay(replay_status: Result<PaymentStatus, HostError>) {
         struct CancelAfterFailure<'a> {
             ledger: &'a WakeLedger,
             hash: &'a PaymentHash,
@@ -2814,7 +2829,7 @@ mod tests {
             .payment_statuses
             .lock()
             .expect("status lock")
-            .extend([Ok(PaymentStatus::Unknown), Ok(PaymentStatus::Unknown)]);
+            .extend([Ok(PaymentStatus::Unknown), replay_status]);
         wallet
             .start_results
             .lock()
@@ -2863,7 +2878,7 @@ mod tests {
             ),
             WakeDisposition::Rejected { .. }
         ));
-        assert_eq!(wallet.status_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(wallet.status_calls.load(Ordering::SeqCst), 1);
         assert_eq!(wallet.start_calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             ledger
