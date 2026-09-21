@@ -32,7 +32,8 @@ swift test --package-path apple/NwcMobileApple
 - Quoting is side-effect free.
 - Amountless invoices require and preserve the selected amount.
 - Fees above the NWC maximum are rejected before payment starts.
-- Repeating the same payment hash and idempotency key starts one payment.
+- Repeating the adapter call with the same payment hash and idempotency key
+  resumes or returns one logical payment without creating a second payment.
 - Timeout after initiation returns pending or ambiguous, never definite unpaid.
 - Lookup recovers outgoing success and its real preimage after adapter restart.
 - Incoming lookup synchronizes and returns the settled preimage.

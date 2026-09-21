@@ -56,15 +56,23 @@ Treat `PayInvoiceRequest::idempotency_key()` and the invoice payment hash as
 replay inputs. Repeating the call after a timeout must resume or return the
 existing payment, never start a second payment.
 
+For a repeated call, consult durable payment state before applying validation
+that is only meaningful to a new payment, such as invoice expiry. An invoice
+may expire after its first authorized attempt while the original payment is
+still pending or already settled.
+
 Return:
 
 - `PaymentStatus::Succeeded` only with the real preimage, amount, and fee;
 - `PaymentStatus::Pending` for an ambiguous or in-progress payment; or
 - `PaymentStatus::Failed` only for a definite terminal failure.
 
-A transport error after payment initiation is ambiguous. Return a host error or
-pending result and preserve wallet-side state so `lookup_invoice` can reconcile
-it later.
+`Rejected` and `NotFound` certify that no payment was submitted and cannot later
+settle, so the engine safely releases the reservation. Every other host error
+is ambiguous at this boundary: preserve wallet-side state so the same
+idempotency key can resume it. Do not return `Rejected` or `NotFound` after
+handing the payment to the Lightning node. Return `PaymentStatus::Failed` for a
+submitted payment that definitively failed.
 
 ### Lookup invoice
 
