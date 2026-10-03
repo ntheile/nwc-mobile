@@ -18,13 +18,21 @@ use nwc_mobile::{
 };
 use nwc_mobile_tokio::{NwcMobile, NwcMobileConfig, NwcMobileSettlementStatus, NwcMobileWakeKind};
 
+mod browser_pairing;
+mod foreground_payments;
+pub use browser_pairing::MobileBrowserPairingChallenge;
 mod host_bridge;
 mod mobile_engine;
+pub use foreground_payments::MobileForegroundPayment;
+mod foreground_wallet;
+pub use foreground_wallet::open_foreground_mobile_wallet;
+
 mod native_wallet;
 mod wallet_application;
 
 pub use wallet_application::{
-    MobileClientSecretStore, MobileConnectionOptions, MobileWallet, MobileWalletConfig,
+    MobileApnsRegistrationReport, MobileClientSecretStore, MobileConnectionOptions,
+    MobileFcmRegistrationReport, MobileWallet, MobileWalletConfig,
 };
 
 pub use native_wallet::{

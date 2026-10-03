@@ -102,6 +102,13 @@ impl NwcSecretKey {
         Ok(Self(bytes))
     }
 
+    /// Derives the public identity without exposing signing material.
+    pub fn public_key(&self) -> Result<PublicKey, NostrEventError> {
+        Ok(PublicKey::from_bytes(
+            *Keys::new(self.nostr_secret()?).public_key().as_bytes(),
+        ))
+    }
+
     pub(crate) fn nostr_secret(&self) -> Result<SecretKey, NostrEventError> {
         SecretKey::from_slice(&self.0).map_err(|_| NostrEventError::InvalidSecretKey)
     }

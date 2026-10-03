@@ -10,7 +10,7 @@ use crate::invoice_notifications::{
 };
 use crate::{ConnectionId, ConnectionRevision, EventId, NwcMethod, UnixTimestamp};
 
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 19;
 const CLAIM_TOKEN_BYTES: usize = 16;
 const MAX_RESPONSE_EVENT_BYTES: usize = 128 * 1024;
 const MAX_PRUNE_BATCH: usize = 1_000;
@@ -951,6 +951,33 @@ fn migrate(connection: &mut Connection) -> Result<(), LedgerError> {
     if version == 12 {
         transaction.execute_batch(ADD_WAKE_EVENT_FRESHNESS_ACCEPTANCE)?;
         version = 13;
+    }
+    if version == 13 {
+        transaction.execute_batch(crate::foreground_payments::SCHEMA)?;
+        version = 14;
+    }
+    if version == 14 {
+        transaction.execute_batch("ALTER TABLE connections ADD COLUMN foreground_fee_policy TEXT NOT NULL DEFAULT 'capped' CHECK(foreground_fee_policy IN ('capped','wallet_managed'));
+        ALTER TABLE foreground_payment_bindings ADD COLUMN invoice TEXT;
+        ALTER TABLE foreground_payment_requests ADD COLUMN actual_amount_msat INTEGER;
+        UPDATE foreground_payment_requests SET actual_amount_msat=amount_msat WHERE state='succeeded';")?;
+        version = 15;
+    }
+    if version == 15 {
+        transaction.execute_batch("ALTER TABLE foreground_payment_requests ADD COLUMN response_published INTEGER NOT NULL DEFAULT 0 CHECK(response_published IN (0,1));")?;
+        version = 16;
+    }
+    if version == 16 {
+        transaction.execute_batch(crate::reusable_payments::SCHEMA)?;
+        version = 17;
+    }
+    if version == 17 {
+        transaction.execute_batch("CREATE TABLE connection_payer_metadata (connection_id TEXT PRIMARY KEY REFERENCES connections(connection_id) ON DELETE RESTRICT, payer_username TEXT, wallet_name TEXT) STRICT;")?;
+        version = 18;
+    }
+    if version == 18 {
+        transaction.execute_batch("ALTER TABLE connection_payer_metadata ADD COLUMN address_ciphertext TEXT;")?;
+        version = 19;
     }
     if version != SCHEMA_VERSION {
         return Err(LedgerError::UnsupportedSchema);

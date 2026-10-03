@@ -1071,10 +1071,17 @@ pub(crate) mod tests {
     const HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     pub(crate) fn application_test_engine(path: String) -> Arc<crate::MobileNwcEngine> {
+        application_test_engine_with_relay(path, Arc::new(TestRelay))
+    }
+
+    pub(crate) fn application_test_engine_with_relay(
+        path: String,
+        relay: Arc<dyn MobileRelayTransport>,
+    ) -> Arc<crate::MobileNwcEngine> {
         crate::MobileNwcEngine::open(
             path,
             Arc::new(TestWallet::default()),
-            Arc::new(TestRelay),
+            relay,
             Arc::new(TestSecrets),
         )
         .unwrap()

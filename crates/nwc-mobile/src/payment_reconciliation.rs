@@ -161,6 +161,36 @@ impl<'a> PaymentReconciler<'a> {
             .ledger
             .load_unresolved_payment_attempts(usize::from(max_attempts))?;
         for attempt in attempts {
+            if let Some(status) = self
+                .ledger
+                .foreground_payment_status(attempt.event_id())
+                .map_err(|_| PaymentAccountingError::DatabaseUnavailable)?
+            {
+                match status {
+                    PaymentStatus::Succeeded { amount, fee, .. } => {
+                        self.ledger.mark_payment_succeeded(
+                            attempt.payment_hash(),
+                            amount,
+                            fee,
+                            self.clock.now(),
+                        )?;
+                        report.succeeded += 1;
+                    }
+                    PaymentStatus::Failed { .. } => {
+                        if !attempt.was_initiated() {
+                            self.ledger
+                                .mark_payment_initiated(attempt.payment_hash(), self.clock.now())?;
+                        }
+                        self.ledger
+                            .mark_payment_failed(attempt.payment_hash(), self.clock.now())?;
+                        report.failed += 1;
+                    }
+                    _ => {
+                        skipped_without_query = true;
+                    }
+                }
+                continue;
+            }
             // A prepared reservation may have crashed before the wallet call.
             // Only replay of the authenticated event has the idempotency key
             // needed to resume it safely; a hash-only lookup could attribute

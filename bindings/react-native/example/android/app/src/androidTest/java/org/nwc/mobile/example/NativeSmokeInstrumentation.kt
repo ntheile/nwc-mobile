@@ -21,7 +21,7 @@ class NativeSmokeInstrumentation : Instrumentation() {
                 stage = "create connection"
                 val created = wallet.createConnection(MobileConnectionOptions(
                     listOf(MobileNwcMethod.GET_INFO), 0u, MobileBudgetInterval.NEVER,
-                    MobileNwcEncryption.NIP44_V2, null))
+                    MobileNwcEncryption.NIP44_V2, null, null, null))
                 try {
                     stage = "export connection"
                     check(wallet.listConnections().any { it.connectionId == created.connectionId })
@@ -56,7 +56,7 @@ class NativeSmokeInstrumentation : Instrumentation() {
                 val reviewed = nwaWallet.parseNwaRequest(requestUri)
                 val approved = nwaWallet.approveNwaRequest(reviewed.requestIdHex,
                     MobileConnectionOptions(listOf(MobileNwcMethod.GET_INFO), 0u,
-                        MobileBudgetInterval.NEVER, MobileNwcEncryption.NIP44_V2, null))
+                        MobileBudgetInterval.NEVER, MobileNwcEncryption.NIP44_V2, null, null, null))
                 try {
                     check(approved.callbackUrl == null)
                     check(nwaWallet.listConnections().any { it.connectionId == approved.connection.connectionId })

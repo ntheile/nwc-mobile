@@ -147,6 +147,7 @@ pub struct NwaParsePolicy {
     maximum_display_name_chars: usize,
     maximum_lifetime: Duration,
     maximum_budget_sat: u64,
+    foreground_only: bool,
 }
 
 impl NwaParsePolicy {
@@ -165,7 +166,14 @@ impl NwaParsePolicy {
             maximum_display_name_chars,
             maximum_lifetime,
             maximum_budget_sat,
+            foreground_only: false,
         }
+    }
+
+    pub(crate) fn for_foreground_payments(mut self) -> Self {
+        self.foreground_only = true;
+        self.maximum_lifetime = Duration::from_secs(90 * 24 * 60 * 60);
+        self
     }
 
     /// Returns the maximum encoded request size.
@@ -300,6 +308,10 @@ impl fmt::Debug for NwaCallback {
 /// A validated Nostr Wallet Auth request ready for explicit user review.
 #[derive(Clone, Eq, PartialEq)]
 pub struct NwaRequest {
+    wallet_managed_fees: bool,
+    reusable_payments: bool,
+    foreground_only: bool,
+    metadata_json: Option<String>,
     id: NwaRequestId,
     client_pubkey: PublicKey,
     display_name: String,
@@ -307,6 +319,7 @@ pub struct NwaRequest {
     relays: Vec<String>,
     requested_policy: ConnectionPolicy,
     expires_at: Option<UnixTimestamp>,
+    request_expires_at: Option<UnixTimestamp>,
     callback: Option<NwaCallback>,
 }
 
@@ -333,7 +346,7 @@ impl NwaRequest {
         let url = Url::parse(input).map_err(|_| NwaError::InvalidUrl)?;
         if !matches!(
             url.scheme(),
-            "nostr+walletauth" | "nostr+walletauth+rebelwallet"
+            "nostr+walletauth" | "nostr+walletauth+rebelwallet" | "nostr+walletauth+zapritep2p"
         ) {
             return Err(NwaError::UnsupportedScheme);
         }
@@ -381,10 +394,53 @@ impl NwaRequest {
 
         let relays = parse_relays(&query, policy)?;
         let expires_at = parse_expiration(&query, now, policy)?;
+        let request_expires_at = query.value("request_expires_at").map(|raw| {
+            if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(NwaError::InvalidExpiration);
+            }
+            let deadline = raw.parse::<u64>().map_err(|_| NwaError::InvalidExpiration)?;
+            if deadline <= now.as_secs() { return Err(NwaError::Expired); }
+            if expires_at.is_some_and(|grant| deadline > grant.as_secs()) {
+                return Err(NwaError::InvalidExpiration);
+            }
+            Ok(UnixTimestamp::from_secs(deadline))
+        }).transpose()?;
+        let reusable_payments = match query.value("payment_mode") {
+            None | Some("one_time") => false,
+            Some("confirm_each")
+                if policy.foreground_only
+                    && query.value("budget_basis") == Some("invoice_principal")
+                    && query.value("fee_policy") == Some("wallet_managed")
+                    && query.value("budget_renewal") == Some("monthly")
+                    && query.value("max_amount").is_some()
+                    && expires_at.is_some() =>
+            {
+                true
+            }
+            _ => return Err(NwaError::InvalidBudget),
+        };
+        let wallet_managed_fees = match query.value("fee_policy") {
+            None | Some("capped") => false,
+            Some("wallet_managed")
+                if reusable_payments
+                    || (policy.foreground_only
+                        && query.value("max_amount").is_none()
+                        && matches!(query.value("budget_renewal"), None | Some("never"))) =>
+            {
+                true
+            }
+            _ => return Err(NwaError::InvalidBudget),
+        };
         let budget = parse_budget(&query, policy)?;
+        if reusable_payments && budget.limit_sat() == 0 {
+            return Err(NwaError::InvalidBudget);
+        }
         let methods = parse_methods(&query)?;
         if methods.contains(&NwcMethod::PayInvoice)
-            && budget.limit_sat() <= maximum_mobile_fee_sat(budget.limit_sat())
+            && !wallet_managed_fees
+            && (budget.limit_sat() == 0
+                || (!policy.foreground_only
+                    && budget.limit_sat() <= maximum_mobile_fee_sat(budget.limit_sat())))
         {
             return Err(NwaError::InvalidBudget);
         }
@@ -404,6 +460,10 @@ impl NwaRequest {
         let icon_url = parse_icon_url(query.value("icon"));
 
         Ok(Self {
+            wallet_managed_fees,
+            reusable_payments,
+            foreground_only: policy.foreground_only,
+            metadata_json: query.value("metadata").map(str::to_owned),
             id,
             client_pubkey,
             display_name,
@@ -411,6 +471,7 @@ impl NwaRequest {
             relays,
             requested_policy,
             expires_at,
+            request_expires_at,
             callback,
         })
     }
@@ -419,6 +480,26 @@ impl NwaRequest {
     #[must_use]
     pub const fn id(&self) -> NwaRequestId {
         self.id
+    }
+
+    /// Explicit wallet-managed extra cost policy; never accepted by automatic wallets.
+    /// Whether every purchase is separately confirmed under a reusable grant.
+    pub fn reusable_payments(&self) -> bool {
+        self.reusable_payments
+    }
+
+    /// Whether extra costs are controlled by the selected wallet.
+    pub fn wallet_managed_fees(&self) -> bool {
+        self.wallet_managed_fees
+    }
+
+    pub(crate) fn foreground_only(&self) -> bool {
+        self.foreground_only
+    }
+
+    /// Returns untrusted application metadata retained with this exact request.
+    pub fn metadata_json(&self) -> Option<&str> {
+        self.metadata_json.as_deref()
     }
 
     /// Returns the requesting client's public key.
@@ -449,6 +530,12 @@ impl NwaRequest {
     #[must_use]
     pub const fn requested_policy(&self) -> &ConnectionPolicy {
         &self.requested_policy
+    }
+
+    /// Returns the exclusive deadline for approving this request, separate from grant expiry.
+    #[must_use]
+    pub const fn request_expires_at(&self) -> Option<UnixTimestamp> {
+        self.request_expires_at
     }
 
     /// Returns the validated expiration timestamp.
@@ -771,6 +858,21 @@ mod tests {
     }
 
     #[test]
+    fn wallet_managed_policy_requires_foreground_and_omitted_total_cap() {
+        let uri = format!("nostr+walletauth://{CLIENT}?relay=wss%3A%2F%2Frelay.example.com&fee_policy=wallet_managed&request_methods=pay_invoice");
+        let policy = NwaParsePolicy::default();
+        let parse = |value: &str, policy: &NwaParsePolicy| {
+            NwaRequest::parse(value, UnixTimestamp::from_secs(100), policy)
+        };
+        assert!(parse(&uri, &policy).is_err());
+        let policy = policy.for_foreground_payments();
+        assert!(parse(&uri, &policy).unwrap().wallet_managed_fees());
+        assert!(parse(&format!("{uri}&max_amount=1000"), &policy).is_err());
+        assert!(parse(&format!("{uri}&budget_renewal=daily"), &policy).is_err());
+        assert!(parse(&uri.replace("wallet_managed", "unknown"), &policy).is_err());
+    }
+
+    #[test]
     fn omitted_methods_and_budget_are_read_only_and_zero_spend() {
         let request = parse(&format!(
             "nostr+walletauth://{CLIENT}?relay=wss%3A%2F%2Frelay.example.com"
@@ -780,6 +882,24 @@ mod tests {
         assert!(request.requested_policy().allows(NwcMethod::GetInfo));
         assert!(!request.requested_policy().allows(NwcMethod::PayInvoice));
         assert_eq!(request.requested_policy().budget().limit_sat(), 0);
+    }
+
+    #[test]
+    fn approval_deadline_is_optional_decimal_future_and_bounded_by_grant() {
+        let base = format!("nostr+walletauth://{CLIENT}?relay=wss%3A%2F%2Frelay.example.com");
+        assert_eq!(parse(&base).unwrap().request_expires_at(), None);
+        let request = parse(&format!("{base}&expires_at=2000&request_expires_at=1100")).unwrap();
+        assert_eq!(request.request_expires_at(), Some(UnixTimestamp::from_secs(1100)));
+        assert_eq!(request.expires_at(), Some(UnixTimestamp::from_secs(2000)));
+        assert!(parse(&format!("{base}&request_expires_at=1100")).is_ok());
+        assert!(parse(&format!("{base}&expires_at=1100&request_expires_at=1100")).is_ok());
+        for bad in ["", "%2B1100", "-1100", "1100.0", "abc", "18446744073709551616", "2001"] {
+            assert_eq!(parse(&format!("{base}&expires_at=2000&request_expires_at={bad}")), Err(NwaError::InvalidExpiration));
+        }
+        for expired in ["0", "999", "1000"] {
+            assert_eq!(parse(&format!("{base}&request_expires_at={expired}")), Err(NwaError::Expired));
+        }
+        assert_eq!(parse(&format!("{base}&request_expires_at=1100&request_expires_at=1200")), Err(NwaError::DuplicateParameter));
     }
 
     #[test]
@@ -799,6 +919,20 @@ mod tests {
             }
         );
         assert_eq!(request.expires_at(), Some(UnixTimestamp::from_secs(2_000)));
+    }
+
+    #[test]
+    fn mobile_scheme_allowlist_accepts_registered_wallet_and_rejects_other_suffixes() {
+        assert!(parse(&format!(
+            "nostr+walletauth+zapritep2p://{CLIENT}?relay=wss%3A%2F%2Frelay.example.com"
+        ))
+        .is_ok());
+        assert_eq!(
+            parse(&format!(
+                "nostr+walletauth+untrusted://{CLIENT}?relay=wss%3A%2F%2Frelay.example.com"
+            )),
+            Err(NwaError::UnsupportedScheme)
+        );
     }
 
     #[test]

@@ -59,6 +59,7 @@ impl From<rusqlite::Error> for RegistryError {
 /// A validated authorization snapshot ready to insert into the registry.
 #[derive(Clone, Eq, PartialEq)]
 pub struct NewConnection {
+    foreground_wallet_managed: bool,
     id: ConnectionId,
     client_pubkey: PublicKey,
     wallet_service_pubkey: PublicKey,
@@ -131,6 +132,7 @@ impl NewConnection {
             return Err(RegistryError::InvalidConnection);
         }
         Ok(Self {
+            foreground_wallet_managed: false,
             id,
             client_pubkey,
             wallet_service_pubkey,
@@ -139,6 +141,19 @@ impl NewConnection {
             encryption,
             expires_at: None,
         })
+    }
+
+    pub(crate) fn with_foreground_wallet_managed(mut self) -> Self {
+        self.foreground_wallet_managed = true;
+        self.policy = ConnectionPolicy::new(
+            self.policy.methods().collect::<Vec<_>>(),
+            BudgetPolicy::new(
+                self.policy.budget().limit_sat(),
+                self.policy.budget().interval(),
+                FeePolicy::CountTowardBudget { maximum_fee_sat: 0 },
+            ),
+        );
+        self
     }
 
     /// Attaches an optional authorization expiration to the connection.
@@ -459,8 +474,8 @@ impl WakeLedger {
             "INSERT INTO connections (
                 connection_id, revision, status, client_pubkey, wallet_service_pubkey,
                 encryption, budget_limit_sat, budget_interval, fee_policy,
-                maximum_fee_sat, created_at, expires_at, updated_at, tombstoned_at
-             ) VALUES (?1, 0, 'active', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL)",
+                maximum_fee_sat, created_at, expires_at, updated_at, tombstoned_at, foreground_fee_policy
+             ) VALUES (?1, 0, 'active', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12)",
             params![
                 new_connection.id.as_str(),
                 new_connection.client_pubkey.as_bytes().as_slice(),
@@ -473,6 +488,7 @@ impl WakeLedger {
                 created_at_sql,
                 expires_at_sql,
                 now_sql,
+                if new_connection.foreground_wallet_managed { "wallet_managed" } else { "capped" },
             ],
         )?;
         for method in new_connection.policy.methods() {

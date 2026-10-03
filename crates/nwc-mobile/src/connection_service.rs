@@ -159,6 +159,8 @@ impl fmt::Debug for ApprovedNwaConnection {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum NwaApprovalError {
+    /// The request approval deadline has elapsed.
+    Expired,
     /// The approval targeted a different request or exceeded its requested authority.
     AuthorityEscalation,
     /// The already-validated callback could not encode its public result.
@@ -170,6 +172,7 @@ pub enum NwaApprovalError {
 impl fmt::Display for NwaApprovalError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::Expired => "NWA approval deadline has elapsed",
             Self::AuthorityEscalation => "NWA approval exceeds the requested authority",
             Self::InvalidCallback => "NWA approval callback could not be constructed",
             Self::Registry(_) => "NWA approval could not be persisted",
@@ -355,7 +358,16 @@ impl<'a> ConnectionManager<'a> {
             })
             .transpose()?
             .map(|url| url.to_string());
-        let connection = self.create(connection)?;
+        let connection = if request.wallet_managed_fees() {
+            connection.with_foreground_wallet_managed()
+        } else {
+            connection
+        };
+        let now = self.clock.now();
+        if request.request_expires_at().is_some_and(|deadline| deadline <= now) {
+            return Err(NwaApprovalError::Expired);
+        }
+        let connection = self.ledger.insert_connection(connection, now)?;
         Ok(ApprovedNwaConnection {
             connection,
             callback_url,
@@ -390,17 +402,26 @@ fn validate_nwa_connection_subset(
             if maximum_fee_sat == crate::maximum_mobile_fee_sat(approved_budget.limit_sat())
                 && maximum_fee_sat <= requested_maximum_fee_sat
     );
-    let payment_budget_is_usable = !approved_policy.allows(crate::NwcMethod::PayInvoice)
+    let payment_budget_is_usable = (request.foreground_only() && approved_budget.limit_sat() > 0)
+        || !approved_policy.allows(crate::NwcMethod::PayInvoice)
         || approved_budget.limit_sat() > crate::maximum_mobile_fee_sat(approved_budget.limit_sat());
     if connection.client_pubkey() != request.client_pubkey()
-        || connection.expires_at() != request.expires_at()
+        || if request.reusable_payments() {
+            match (connection.expires_at(), request.expires_at()) {
+                (Some(approved), Some(requested)) => approved > requested,
+                _ => true,
+            }
+        } else {
+            connection.expires_at() != request.expires_at()
+        }
         || connection.relays().is_empty()
         || !relays_are_requested
         || approved_policy.methods().len() == 0
         || !methods_are_requested
-        || approved_budget.limit_sat() > requested_budget.limit_sat()
+        || ((!request.wallet_managed_fees() || request.reusable_payments())
+            && approved_budget.limit_sat() > requested_budget.limit_sat())
         || approved_budget.interval() != requested_budget.interval()
-        || !fee_reserve_is_conservative
+        || (!request.wallet_managed_fees() && !fee_reserve_is_conservative)
         || !payment_budget_is_usable
     {
         return Err(NwaApprovalError::AuthorityEscalation);
@@ -674,6 +695,29 @@ mod tests {
             NwcEncryption::LegacyNip04,
             Some("wallet@example.com".to_owned()),
         )
+    }
+
+    #[test]
+    fn retained_nwa_deadline_is_rechecked_at_native_authority_creation() {
+        for (approval_time, allowed) in [(101, true), (102, false), (103, false)] {
+            let database = TestDatabase::new();
+            let ledger = WakeLedger::open(&database.path).unwrap();
+            let request = NwaRequest::parse(
+                &format!("nostr+walletauth://{CLIENT}?relay=wss%3A%2F%2Frelay.example%2Fnwc&max_amount=1000000&budget_renewal=daily&request_methods=get_info&expires_at=2000&request_expires_at=102"),
+                UnixTimestamp::from_secs(100), &NwaParsePolicy::default(),
+            ).unwrap();
+            let approval = nwa_approval(&request, [NwcMethod::GetInfo]);
+            let clock = FixedClock(UnixTimestamp::from_secs(approval_time));
+            let result = ConnectionManager::new(&ledger, &clock)
+                .approve_nwa(request, approval, WakePolicy::default());
+            if allowed {
+                assert_eq!(result.unwrap().connection().expires_at(), Some(UnixTimestamp::from_secs(2000)));
+            } else {
+                assert_eq!(result, Err(NwaApprovalError::Expired));
+                let count: i64 = ledger.lock_connection().unwrap().query_row("SELECT COUNT(*) FROM connections", [], |row| row.get(0)).unwrap();
+                assert_eq!(count, 0, "expired approval must not persist authority");
+            }
+        }
     }
 
     #[test]

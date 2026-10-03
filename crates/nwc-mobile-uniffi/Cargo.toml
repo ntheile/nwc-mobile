@@ -11,6 +11,9 @@ publish = false
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [dependencies]
+nwc-mobile-http = { version = "=0.1.0", path = "../nwc-mobile-http" }
+nwc-mobile-bolt11 = { version = "=0.1.0", path = "../nwc-mobile-bolt11" }
+nwc-mobile-nostr = { version = "=0.1.0", path = "../nwc-mobile-nostr" }
 async-trait = "=0.1.92"
 nwc-mobile = { version = "=0.1.0", path = "../nwc-mobile" }
 nwc-mobile-tokio = { version = "=0.1.0", path = "../nwc-mobile-tokio" }

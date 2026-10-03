@@ -33,7 +33,7 @@ struct NativeSmoke {
         let opened = try openRegisteredMobileWallet(walletId: "primary")
         let created = try opened.createConnection(options: MobileConnectionOptions(
             methods: [.getInfo], budgetLimitSat: 0, budgetInterval: .never,
-            encryption: .nip44V2, expiresAt: nil))
+            encryption: .nip44V2, expiresAt: nil, payerUsername: nil, walletName: nil))
         let initialConnections = try opened.listConnections()
         precondition(initialConnections.count == 1)
         let uri = try opened.exportConnectionUri(connectionId: created.connectionId)
@@ -67,7 +67,7 @@ struct NativeSmoke {
         let reviewed = try opened.parseNwaRequest(uri: requestUri)
         let approved = try opened.approveNwaRequest(requestId: reviewed.requestIdHex,
             options: MobileConnectionOptions(methods: [.getInfo], budgetLimitSat: 0,
-                budgetInterval: .never, encryption: .nip44V2, expiresAt: nil))
+                budgetInterval: .never, encryption: .nip44V2, expiresAt: nil, payerUsername: nil, walletName: nil))
         precondition(approved.callbackUrl == nil)
         let authorized = try opened.listConnections()
         precondition(authorized.count == 1)

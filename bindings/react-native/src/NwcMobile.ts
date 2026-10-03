@@ -28,6 +28,8 @@ export class NwcMobile {
     return new NwcMobile(wallet);
   }
 
+  async servicePublicKey() { return this.wallet.servicePublicKey(); }
+
   async listConnections() {
     return this.wallet.listConnections();
   }
@@ -64,6 +66,13 @@ export class NwcMobile {
     return this.wallet.approveNwaRequest(requestId, approval);
   }
 
+  async parseBrowserPairingChallenge(connectionId: string, signedEncryptedEventJson: string) { return this.wallet.parseBrowserPairingChallenge(connectionId, signedEncryptedEventJson); }
+  async approveBrowserPairing(challengeId: string) { return this.wallet.approveBrowserPairing(challengeId); }
+  async cancelBrowserPairing(challengeId: string) { return this.wallet.cancelBrowserPairing(challengeId); }
+  async approveNwaReusablePayment(requestId: string, approval: MobileConnectionOptions, walletId: string) { return this.wallet.approveNwaReusablePayment(requestId, approval, walletId); }
+  async beginPaymentWithConsent(eventId: string, walletId: string, customerDataJson: string) { return this.wallet.beginPaymentWithConsent(eventId, walletId, customerDataJson); }
+  async approveNwaWalletManagedPayment(requestId: string, approval: MobileConnectionOptions, walletId: string, invoice: string, paymentHashHex: string, invoiceAmountMsat: bigint) { return this.wallet.approveNwaWalletManagedPayment(requestId, approval, walletId, invoice, paymentHashHex, invoiceAmountMsat); }
+
   async cancelNwaRequest() {
     return this.wallet.cancelNwaRequest();
   }
@@ -72,4 +81,15 @@ export class NwcMobile {
   async refreshWakeRegistrations(enabled: boolean) {
     return this.wallet.refreshWakeRegistrations(enabled);
   }
+  async processFcmWakeRegistrations(serverUrl: string, pushToken: string, appId: string, installId: string) { return this.wallet.processFcmWakeRegistrations(serverUrl, pushToken, appId, installId); }
+  async processApnsWakeRegistrations(serverUrl: string, pushToken: string, appId: string, installId: string, environment: 'sandbox' | 'production') { return this.wallet.processApnsWakeRegistrations(serverUrl, pushToken, appId, installId, environment); }
+  async bindConnectionPayment(connectionId: string, walletId: string, paymentHashHex: string, amountMsat: bigint, maximumFeeSat: bigint) { return this.wallet.bindConnectionPayment(connectionId, walletId, paymentHashHex, amountMsat, maximumFeeSat); }
+  async pollRequests(executionMilliseconds: bigint = 25_000n) { return this.wallet.pollRequests(executionMilliseconds); }
+  async listPendingPayments() { return this.wallet.listPendingPayments(); }
+  async beginPayment(eventIdHex: string, walletId: string) { return this.wallet.beginPayment(eventIdHex, walletId); }
+  async completePayment(eventIdHex: string, preimageHex: string, amountMsat: bigint, feeMsat: bigint) { return this.wallet.completePayment(eventIdHex, preimageHex, amountMsat, feeMsat); }
+  async rejectPayment(eventIdHex: string) { return this.wallet.rejectPayment(eventIdHex); }
+  async failPayment(eventIdHex: string) { return this.wallet.failPayment(eventIdHex); }
+  async resumePayment(eventIdHex: string, executionMilliseconds: bigint = 25_000n) { return this.wallet.resumePayment(eventIdHex, executionMilliseconds); }
+
 }

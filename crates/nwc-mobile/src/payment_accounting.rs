@@ -557,7 +557,14 @@ impl WakeLedger {
             params![attempt.connection_id.as_str()],
             |row| row.get(0),
         )?;
-        let charged_sat = if count_fees {
+        let reusable: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM foreground_reusable_bindings WHERE connection_id=?1)",
+            [attempt.connection_id.as_str()],
+            |r| r.get(0),
+        )?;
+        let charged_sat = if reusable {
+            attempt.principal_sat
+        } else if count_fees {
             actual_principal_sat
                 .checked_add(actual_fee_sat)
                 .ok_or(PaymentAccountingError::ValueOutOfRange)?
@@ -576,8 +583,11 @@ impl WakeLedger {
             charged_sat,
             now_sql,
         )?;
-        let authorization_exceeded = actual_principal_sat > attempt.principal_sat
-            || (count_fees && actual_fee_sat > attempt.fee_reserve_sat);
+        let wallet_managed: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM connections c JOIN foreground_payment_bindings b USING(connection_id) WHERE c.connection_id=?1 AND c.foreground_fee_policy='wallet_managed' AND b.payment_hash=?2 AND b.invoice IS NOT NULL)", params![attempt.connection_id.as_str(),payment_hash.as_bytes().as_slice()], |r| r.get(0))?;
+        let authorization_exceeded = !reusable
+            && !wallet_managed
+            && (actual_principal_sat > attempt.principal_sat
+                || (count_fees && actual_fee_sat > attempt.fee_reserve_sat));
         transaction.execute(
             "UPDATE payment_attempts
              SET state = 'succeeded', actual_principal_sat = ?2,
