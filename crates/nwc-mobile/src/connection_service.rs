@@ -364,7 +364,10 @@ impl<'a> ConnectionManager<'a> {
             connection
         };
         let now = self.clock.now();
-        if request.request_expires_at().is_some_and(|deadline| deadline <= now) {
+        if request
+            .request_expires_at()
+            .is_some_and(|deadline| deadline <= now)
+        {
             return Err(NwaApprovalError::Expired);
         }
         let connection = self.ledger.insert_connection(connection, now)?;
@@ -708,13 +711,23 @@ mod tests {
             ).unwrap();
             let approval = nwa_approval(&request, [NwcMethod::GetInfo]);
             let clock = FixedClock(UnixTimestamp::from_secs(approval_time));
-            let result = ConnectionManager::new(&ledger, &clock)
-                .approve_nwa(request, approval, WakePolicy::default());
+            let result = ConnectionManager::new(&ledger, &clock).approve_nwa(
+                request,
+                approval,
+                WakePolicy::default(),
+            );
             if allowed {
-                assert_eq!(result.unwrap().connection().expires_at(), Some(UnixTimestamp::from_secs(2000)));
+                assert_eq!(
+                    result.unwrap().connection().expires_at(),
+                    Some(UnixTimestamp::from_secs(2000))
+                );
             } else {
                 assert_eq!(result, Err(NwaApprovalError::Expired));
-                let count: i64 = ledger.lock_connection().unwrap().query_row("SELECT COUNT(*) FROM connections", [], |row| row.get(0)).unwrap();
+                let count: i64 = ledger
+                    .lock_connection()
+                    .unwrap()
+                    .query_row("SELECT COUNT(*) FROM connections", [], |row| row.get(0))
+                    .unwrap();
                 assert_eq!(count, 0, "expired approval must not persist authority");
             }
         }

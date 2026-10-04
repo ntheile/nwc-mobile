@@ -20,6 +20,12 @@ class ExampleHost(context: Context) : MobileWalletFactory, MobileWalletBackend,
     private val alias = "org.nwc.mobile.example.clients"
     private val publicKey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 
+    init {
+        val key = "nwc-mobile/foreground/service-key"
+        // Public offline example identity only; production uses its native service key.
+        if (load(key) == null) store(key, "0".repeat(63) + "1")
+    }
+
     override fun openWallet(walletId: String): MobileWallet {
         if (walletId != "primary") throw MobileEngineException.NotFound()
         return MobileWallet(MobileNwcEngine.open(database, this, this, this),

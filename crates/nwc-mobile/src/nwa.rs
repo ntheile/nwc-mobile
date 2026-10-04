@@ -394,17 +394,24 @@ impl NwaRequest {
 
         let relays = parse_relays(&query, policy)?;
         let expires_at = parse_expiration(&query, now, policy)?;
-        let request_expires_at = query.value("request_expires_at").map(|raw| {
-            if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
-                return Err(NwaError::InvalidExpiration);
-            }
-            let deadline = raw.parse::<u64>().map_err(|_| NwaError::InvalidExpiration)?;
-            if deadline <= now.as_secs() { return Err(NwaError::Expired); }
-            if expires_at.is_some_and(|grant| deadline > grant.as_secs()) {
-                return Err(NwaError::InvalidExpiration);
-            }
-            Ok(UnixTimestamp::from_secs(deadline))
-        }).transpose()?;
+        let request_expires_at = query
+            .value("request_expires_at")
+            .map(|raw| {
+                if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err(NwaError::InvalidExpiration);
+                }
+                let deadline = raw
+                    .parse::<u64>()
+                    .map_err(|_| NwaError::InvalidExpiration)?;
+                if deadline <= now.as_secs() {
+                    return Err(NwaError::Expired);
+                }
+                if expires_at.is_some_and(|grant| deadline > grant.as_secs()) {
+                    return Err(NwaError::InvalidExpiration);
+                }
+                Ok(UnixTimestamp::from_secs(deadline))
+            })
+            .transpose()?;
         let reusable_payments = match query.value("payment_mode") {
             None | Some("one_time") => false,
             Some("confirm_each")
@@ -889,17 +896,39 @@ mod tests {
         let base = format!("nostr+walletauth://{CLIENT}?relay=wss%3A%2F%2Frelay.example.com");
         assert_eq!(parse(&base).unwrap().request_expires_at(), None);
         let request = parse(&format!("{base}&expires_at=2000&request_expires_at=1100")).unwrap();
-        assert_eq!(request.request_expires_at(), Some(UnixTimestamp::from_secs(1100)));
+        assert_eq!(
+            request.request_expires_at(),
+            Some(UnixTimestamp::from_secs(1100))
+        );
         assert_eq!(request.expires_at(), Some(UnixTimestamp::from_secs(2000)));
         assert!(parse(&format!("{base}&request_expires_at=1100")).is_ok());
         assert!(parse(&format!("{base}&expires_at=1100&request_expires_at=1100")).is_ok());
-        for bad in ["", "%2B1100", "-1100", "1100.0", "abc", "18446744073709551616", "2001"] {
-            assert_eq!(parse(&format!("{base}&expires_at=2000&request_expires_at={bad}")), Err(NwaError::InvalidExpiration));
+        for bad in [
+            "",
+            "%2B1100",
+            "-1100",
+            "1100.0",
+            "abc",
+            "18446744073709551616",
+            "2001",
+        ] {
+            assert_eq!(
+                parse(&format!("{base}&expires_at=2000&request_expires_at={bad}")),
+                Err(NwaError::InvalidExpiration)
+            );
         }
         for expired in ["0", "999", "1000"] {
-            assert_eq!(parse(&format!("{base}&request_expires_at={expired}")), Err(NwaError::Expired));
+            assert_eq!(
+                parse(&format!("{base}&request_expires_at={expired}")),
+                Err(NwaError::Expired)
+            );
         }
-        assert_eq!(parse(&format!("{base}&request_expires_at=1100&request_expires_at=1200")), Err(NwaError::DuplicateParameter));
+        assert_eq!(
+            parse(&format!(
+                "{base}&request_expires_at=1100&request_expires_at=1200"
+            )),
+            Err(NwaError::DuplicateParameter)
+        );
     }
 
     #[test]

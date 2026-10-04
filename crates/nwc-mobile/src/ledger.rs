@@ -976,7 +976,9 @@ fn migrate(connection: &mut Connection) -> Result<(), LedgerError> {
         version = 18;
     }
     if version == 18 {
-        transaction.execute_batch("ALTER TABLE connection_payer_metadata ADD COLUMN address_ciphertext TEXT;")?;
+        transaction.execute_batch(
+            "ALTER TABLE connection_payer_metadata ADD COLUMN address_ciphertext TEXT;",
+        )?;
         version = 19;
     }
     if version != SCHEMA_VERSION {

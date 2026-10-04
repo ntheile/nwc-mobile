@@ -73,8 +73,7 @@ pub struct MobileConnectionOptions {
 }
 
 /// Non-sensitive durable FCM registration pass result.
-#[derive(Clone, Copy, Debug, uniffi::Record)]
-#[derive(serde::Serialize)]
+#[derive(Clone, Copy, Debug, uniffi::Record, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MobileFcmRegistrationReport {
     /// Successfully applied changes.
@@ -86,8 +85,7 @@ pub struct MobileFcmRegistrationReport {
 }
 
 /// Non-sensitive durable APNs registration pass result.
-#[derive(Clone, Copy, Debug, uniffi::Record)]
-#[derive(serde::Serialize)]
+#[derive(Clone, Copy, Debug, uniffi::Record, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MobileApnsRegistrationReport {
     /// Successfully applied changes.
@@ -114,20 +112,19 @@ impl MobileWallet {
             self.secrets
                 .0
                 .load("nwc-mobile/foreground/service-key".into())?
-                .ok_or(MobileEngineError::InvalidArgument)?,
+                .ok_or(MobileEngineError::NotFound)?,
         );
         let (public_key, bytes) = nwc_mobile::service_secret_identity(&encoded)
-            .map_err(|_| MobileEngineError::InvalidArgument)?;
+            .map_err(|_| MobileEngineError::CorruptData)?;
         let bytes = zeroize::Zeroizing::new(bytes);
         if public_key != self.config.wallet_service_public_key_hex {
-            return Err(MobileEngineError::InvalidArgument);
+            return Err(MobileEngineError::CorruptData);
         }
         let bytes: [u8; 32] = bytes
             .as_slice()
             .try_into()
-            .map_err(|_| MobileEngineError::InvalidArgument)?;
-        nwc_mobile::Nip98SigningKey::from_bytes(bytes)
-            .map_err(|_| MobileEngineError::InvalidArgument)
+            .map_err(|_| MobileEngineError::CorruptData)?;
+        nwc_mobile::Nip98SigningKey::from_bytes(bytes).map_err(|_| MobileEngineError::CorruptData)
     }
 }
 
@@ -209,6 +206,9 @@ impl MobileWallet {
 
     /// Construct in native bootstrap with an engine, public defaults, and an
     /// OS-protected client-secret store. No JavaScript callback is required.
+    /// Before processing wake registrations, the host must provision its service
+    /// secret as hex at `nwc-mobile/foreground/service-key` in this store.
+    /// A missing key returns NotFound; a malformed or mismatched key returns CorruptData.
     #[uniffi::constructor]
     pub fn new(
         engine: Arc<MobileNwcEngine>,
@@ -408,8 +408,9 @@ fn approve_nwa_internal(
     options: MobileConnectionOptions,
     expected_policy: &str,
 ) -> Result<MobileNwaApprovalResult, MobileEngineError> {
-    let metadata = nwc_mobile::ConnectionPayerMetadata::new(options.payer_username, options.wallet_name)
-        .map_err(MobileEngineError::from)?;
+    let metadata =
+        nwc_mobile::ConnectionPayerMetadata::new(options.payer_username, options.wallet_name)
+            .map_err(MobileEngineError::from)?;
     let request = wallet
         .engine
         .pending_nwa_request()?
@@ -440,12 +441,24 @@ fn approve_nwa_internal(
         ))
         .map_err(workflow_error)?;
     let connection = approved.approval().connection();
-    if let Err(error) = wallet.engine.service.ledger().set_connection_payer_metadata(connection.id().as_str(), &metadata) {
+    if let Err(error) = wallet
+        .engine
+        .service
+        .ledger()
+        .set_connection_payer_metadata(connection.id().as_str(), &metadata)
+    {
         let _ = wallet.revoke_connection(connection.id().as_str().into());
         return Err(error.into());
     }
     if let Some(address) = options.payer_address_json {
-        let stored = wallet.pairing_secret().and_then(|secret| wallet.engine.service.ledger().set_connection_address(connection.id().as_str(), &address, &secret).map_err(Into::into));
+        let stored = wallet.pairing_secret().and_then(|secret| {
+            wallet
+                .engine
+                .service
+                .ledger()
+                .set_connection_address(connection.id().as_str(), &address, &secret)
+                .map_err(Into::into)
+        });
         if let Err(error) = stored {
             let _ = wallet.revoke_connection(connection.id().as_str().into());
             return Err(error);
@@ -554,6 +567,29 @@ mod tests {
         );
         test(wallet, store);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn registration_signing_key_requires_matching_native_credential() {
+        with_wallet(|wallet, store| {
+            assert!(matches!(
+                wallet.wake_registration_signing_key(),
+                Err(MobileEngineError::NotFound)
+            ));
+            let key = "nwc-mobile/foreground/service-key".to_owned();
+            store.store(key.clone(), "invalid".into()).unwrap();
+            assert!(matches!(
+                wallet.wake_registration_signing_key(),
+                Err(MobileEngineError::CorruptData)
+            ));
+            store.store(key.clone(), "02".repeat(32)).unwrap();
+            assert!(matches!(
+                wallet.wake_registration_signing_key(),
+                Err(MobileEngineError::CorruptData)
+            ));
+            store.store(key, "01".repeat(32)).unwrap();
+            assert!(wallet.wake_registration_signing_key().is_ok());
+        });
     }
 
     #[test]
@@ -774,9 +810,9 @@ mod tests {
                 budget_interval: MobileBudgetInterval::Monthly,
                 encryption: MobileNwcEncryption::Nip44V2,
                 expires_at: Some(now + 90 * 86400),
-            payer_address_json: None,
-            payer_username: None,
-            wallet_name: None,
+                payer_address_json: None,
+                payer_username: None,
+                wallet_name: None,
             };
             assert!(wallet
                 .approve_nwa_reusable_payment(
@@ -788,9 +824,9 @@ mod tests {
             let approval = MobileConnectionOptions {
                 budget_limit_sat: 400_000,
                 expires_at: Some(now + 30 * 86400),
-            payer_address_json: None,
-            payer_username: None,
-            wallet_name: None,
+                payer_address_json: None,
+                payer_username: None,
+                wallet_name: None,
                 ..approval
             };
             assert!(wallet
@@ -834,9 +870,9 @@ mod tests {
                 budget_interval: MobileBudgetInterval::Never,
                 encryption: MobileNwcEncryption::Nip44V2,
                 expires_at: None,
-            payer_address_json: None,
-            payer_username: None,
-            wallet_name: None,
+                payer_address_json: None,
+                payer_username: None,
+                wallet_name: None,
             };
             assert!(wallet
                 .approve_nwa_request(request.request_id_hex.clone(), options.clone())
@@ -906,9 +942,9 @@ mod tests {
                         budget_interval: MobileBudgetInterval::Never,
                         encryption: MobileNwcEncryption::Nip44V2,
                         expires_at: None,
-            payer_address_json: None,
-            payer_username: None,
-            wallet_name: None,
+                        payer_address_json: None,
+                        payer_username: None,
+                        wallet_name: None,
                     },
                 )
                 .unwrap();

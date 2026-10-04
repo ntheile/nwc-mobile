@@ -1253,17 +1253,31 @@ impl<'a> WakeEngine<'a> {
             }
         };
         if response.error.is_none() && response.result_type == Method::GetInfo {
-            match self.ledger.connection_payer_metadata(connection.id().as_str()) {
+            match self
+                .ledger
+                .connection_payer_metadata(connection.id().as_str())
+            {
                 Ok(Some(metadata)) => {
-                    let Ok(mut value) = nostr::serde_json::from_str::<nostr::serde_json::Value>(&response_json) else {
+                    let Ok(mut value) =
+                        nostr::serde_json::from_str::<nostr::serde_json::Value>(&response_json)
+                    else {
                         return self.release_to_application(lease, QueueReason::LedgerBusy);
                     };
-                    if let Some(username) = metadata.payer_username() { value["result"]["payer_username"] = username.into(); }
-                    if let Some(name) = metadata.wallet_name() { value["result"]["alias"] = name.into(); }
-                    match self.ledger.connection_address(connection.id().as_str(), &secret) {
+                    if let Some(username) = metadata.payer_username() {
+                        value["result"]["payer_username"] = username.into();
+                    }
+                    if let Some(name) = metadata.wallet_name() {
+                        value["result"]["alias"] = name.into();
+                    }
+                    match self
+                        .ledger
+                        .connection_address(connection.id().as_str(), &secret)
+                    {
                         Ok(Some(address)) => value["result"]["payer_address"] = address,
-                        Ok(None) => {},
-                        Err(_) => return self.release_to_application(lease, QueueReason::LedgerBusy),
+                        Ok(None) => {}
+                        Err(_) => {
+                            return self.release_to_application(lease, QueueReason::LedgerBusy)
+                        }
                     }
                     response_json = value.to_string();
                 }
@@ -2801,6 +2815,127 @@ mod tests {
     }
 
     #[test]
+    fn rejected_payment_response_recovers_after_expiry_without_spending() {
+        use nostr::hashes::{sha256, Hash};
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).unwrap();
+        let connection = insert_connection(&ledger);
+        ledger.enable_foreground_payments().unwrap();
+        let preimage = crate::PaymentPreimage::from_bytes([7; 32]);
+        let hash = PaymentHash::from_bytes(sha256::Hash::hash(preimage.as_bytes()).to_byte_array());
+        ledger
+            .bind_foreground_payment(connection.id().as_str(), "wallet-a", &hash, 600_000, 10)
+            .unwrap();
+        let wallet = TestWallet::default();
+        *wallet.quote.lock().unwrap() = Some(PaymentQuote::new(
+            hash.clone(),
+            AmountMsat::from_msat(600_000),
+        ));
+        let relay = TestRelay::default();
+        let secrets = TestSecrets::wallet();
+        let before = FixedClock::new(100);
+        let request = request_event(
+            Request::pay_invoice(nip47::PayInvoiceRequest::new("lnbc-expiring")),
+            100,
+        );
+        let input = wake(&request, RELAY, true);
+        let event = input.event_id().clone();
+        assert!(matches!(
+            execute(&engine(&ledger, &wallet, &relay, &secrets, &before), input),
+            WakeDisposition::QueuedForApplication { .. }
+        ));
+        ledger
+            .reject_foreground_payment(&event, false, UnixTimestamp::from_secs(100))
+            .unwrap();
+        ledger
+            .lock_connection()
+            .unwrap()
+            .execute(
+                "UPDATE connections SET expires_at=101 WHERE connection_id=?1",
+                [connection.id().as_str()],
+            )
+            .unwrap();
+        let after = FixedClock::new(102);
+        relay.fail_next_publish.store(true, Ordering::SeqCst);
+        let retained = ledger
+            .foreground_payment_wake(&event, UnixTimestamp::from_secs(102))
+            .unwrap();
+        assert!(matches!(
+            execute(
+                &engine(&ledger, &wallet, &relay, &secrets, &after),
+                retained
+            ),
+            WakeDisposition::RetryAfter { .. }
+        ));
+        assert_eq!(
+            ledger
+                .foreground_recovery_events(connection.id().as_str())
+                .unwrap(),
+            vec![event.clone()]
+        );
+        let retained = ledger
+            .foreground_payment_wake(&event, UnixTimestamp::from_secs(102))
+            .unwrap();
+        assert!(matches!(
+            execute(
+                &engine(&ledger, &wallet, &relay, &secrets, &after),
+                retained
+            ),
+            WakeDisposition::Completed { .. }
+        ));
+        assert!(ledger
+            .foreground_recovery_events(connection.id().as_str())
+            .unwrap()
+            .is_empty());
+        assert_eq!(wallet.start_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn address_only_consent_is_encrypted_and_immutable() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).unwrap();
+        let connection = insert_connection(&ledger);
+        ledger
+            .set_connection_payer_metadata(
+                connection.id().as_str(),
+                &crate::ConnectionPayerMetadata::new(None, None).unwrap(),
+            )
+            .unwrap();
+        assert!(ledger
+            .connection_payer_metadata(connection.id().as_str())
+            .unwrap()
+            .is_none());
+        let secret = crate::NwcSecretKey::from_bytes(
+            wallet_keys()
+                .secret_key()
+                .as_secret_bytes()
+                .try_into()
+                .unwrap(),
+        )
+        .unwrap();
+        let address = nostr::serde_json::json!({"line1":"123 Example Street","city":"Austin","zipCode":"78701","countryCode":"US"});
+        ledger
+            .set_connection_address(connection.id().as_str(), &address.to_string(), &secret)
+            .unwrap();
+        let reopened = WakeLedger::open(&database.path).unwrap();
+        assert_eq!(
+            reopened
+                .connection_address(connection.id().as_str(), &secret)
+                .unwrap(),
+            Some(address.clone())
+        );
+        assert!(reopened
+            .connection_payer_metadata(connection.id().as_str())
+            .unwrap()
+            .unwrap()
+            .payer_username()
+            .is_none());
+        assert!(reopened
+            .set_connection_address(connection.id().as_str(), &address.to_string(), &secret)
+            .is_err());
+    }
+
+    #[test]
     fn expired_authority_only_recovers_exact_previously_initiated_foreground_payment() {
         use nostr::hashes::{sha256, Hash};
         let database = TestDatabase::new();
@@ -3147,16 +3282,44 @@ mod tests {
         let database = TestDatabase::new();
         let ledger = WakeLedger::open(&database.path).unwrap();
         let connection = insert_connection(&ledger);
-        ledger.lock_connection().unwrap().execute_batch("DROP TABLE connection_payer_metadata; PRAGMA user_version=17;").unwrap();
+        ledger
+            .lock_connection()
+            .unwrap()
+            .execute_batch("DROP TABLE connection_payer_metadata; PRAGMA user_version=17;")
+            .unwrap();
         drop(ledger);
         let upgraded = WakeLedger::open(&database.path).unwrap();
-        assert!(upgraded.connection_payer_metadata(connection.id().as_str()).unwrap().is_none());
-        let rows: i64 = upgraded.lock_connection().unwrap().query_row("SELECT COUNT(*) FROM connections WHERE connection_id=?1 AND status='active'", [connection.id().as_str()], |row| row.get(0)).unwrap();
+        assert!(upgraded
+            .connection_payer_metadata(connection.id().as_str())
+            .unwrap()
+            .is_none());
+        let rows: i64 = upgraded
+            .lock_connection()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM connections WHERE connection_id=?1 AND status='active'",
+                [connection.id().as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(rows, 1);
-        upgraded.set_connection_payer_metadata(connection.id().as_str(), &crate::ConnectionPayerMetadata::new(Some("alice".into()), Some("Lexe".into())).unwrap()).unwrap();
+        upgraded
+            .set_connection_payer_metadata(
+                connection.id().as_str(),
+                &crate::ConnectionPayerMetadata::new(Some("alice".into()), Some("Lexe".into()))
+                    .unwrap(),
+            )
+            .unwrap();
         drop(upgraded);
         let reopened = WakeLedger::open(&database.path).unwrap();
-        assert_eq!(reopened.connection_payer_metadata(connection.id().as_str()).unwrap().unwrap().payer_username(), Some("alice"));
+        assert_eq!(
+            reopened
+                .connection_payer_metadata(connection.id().as_str())
+                .unwrap()
+                .unwrap()
+                .payer_username(),
+            Some("alice")
+        );
     }
 
     #[test]
@@ -3319,20 +3482,58 @@ mod tests {
                 UnixTimestamp::from_secs(102)
             )
             .is_err());
-        assert!(ledger.connection_payer_metadata(connection.id().as_str()).unwrap().is_none());
-        ledger.set_connection_payer_metadata(connection.id().as_str(), &crate::ConnectionPayerMetadata::new(Some("alice".into()), Some("My Lexe".into())).unwrap()).unwrap();
+        assert!(ledger
+            .connection_payer_metadata(connection.id().as_str())
+            .unwrap()
+            .is_none());
+        ledger
+            .set_connection_payer_metadata(
+                connection.id().as_str(),
+                &crate::ConnectionPayerMetadata::new(Some("alice".into()), Some("My Lexe".into()))
+                    .unwrap(),
+            )
+            .unwrap();
         let address = nostr::serde_json::json!({"line1":"123 Example Street","city":"Austin","zipCode":"78701","countryCode":"US"});
-        assert!(ledger.connection_address(connection.id().as_str(), &secret).unwrap().is_none());
-        ledger.set_connection_address(connection.id().as_str(), &address.to_string(), &secret).unwrap();
-        assert!(ledger.set_connection_address(connection.id().as_str(), &address.to_string(), &secret).is_err());
-        assert!(ledger.connection_address("other-client", &secret).unwrap().is_none());
-        let cipher: String = ledger.lock_connection().unwrap().query_row("SELECT address_ciphertext FROM connection_payer_metadata WHERE connection_id=?1", [connection.id().as_str()], |r| r.get(0)).unwrap();
+        assert!(ledger
+            .connection_address(connection.id().as_str(), &secret)
+            .unwrap()
+            .is_none());
+        ledger
+            .set_connection_address(connection.id().as_str(), &address.to_string(), &secret)
+            .unwrap();
+        assert!(ledger
+            .set_connection_address(connection.id().as_str(), &address.to_string(), &secret)
+            .is_err());
+        assert!(ledger
+            .connection_address("other-client", &secret)
+            .unwrap()
+            .is_none());
+        let cipher: String = ledger
+            .lock_connection()
+            .unwrap()
+            .query_row(
+                "SELECT address_ciphertext FROM connection_payer_metadata WHERE connection_id=?1",
+                [connection.id().as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert!(!cipher.contains("Example"));
         let reopened_identity = WakeLedger::open(&database.path).unwrap();
-        let identity = reopened_identity.connection_payer_metadata(connection.id().as_str()).unwrap().unwrap();
+        let identity = reopened_identity
+            .connection_payer_metadata(connection.id().as_str())
+            .unwrap()
+            .unwrap();
         assert_eq!(identity.payer_username(), Some("alice"));
-        assert!(reopened_identity.connection_payer_metadata("other-client").unwrap().is_none());
-        assert!(ledger.set_connection_payer_metadata(connection.id().as_str(), &crate::ConnectionPayerMetadata::new(Some("bob".into()), None).unwrap()).is_err());
+        assert!(reopened_identity
+            .connection_payer_metadata("other-client")
+            .unwrap()
+            .is_none());
+        assert!(ledger
+            .set_connection_payer_metadata(
+                connection.id().as_str(),
+                &crate::ConnectionPayerMetadata::new(Some("bob".into()), None).unwrap()
+            )
+            .is_err());
         let info = request_event(Request::get_info(), 100);
         assert!(matches!(
             execute(
@@ -3355,14 +3556,30 @@ mod tests {
         assert_eq!(value["result"]["payer_username"], "alice");
         assert_eq!(value["result"]["payer_address"], address);
         assert_eq!(value["result"]["alias"], "My Lexe");
-        let public_info = crate::build_nwc_info_event(&secret, Some(connection.client_pubkey()), connection.policy().methods(), connection.encryption(), UnixTimestamp::from_secs(100)).unwrap();
+        let public_info = crate::build_nwc_info_event(
+            &secret,
+            Some(connection.client_pubkey()),
+            connection.policy().methods(),
+            connection.encryption(),
+            UnixTimestamp::from_secs(100),
+        )
+        .unwrap();
         assert!(!public_info.contains("alice"));
         assert!(!public_info.contains("Example"));
         assert!(!public_info.contains("My Lexe"));
         reopened_identity.lock_connection().unwrap().execute("UPDATE connections SET status='tombstoned',tombstoned_at=101,updated_at=101 WHERE connection_id=?1", [connection.id().as_str()]).unwrap();
-        assert_eq!(reopened_identity.connection_payer_metadata(connection.id().as_str()).unwrap().unwrap().payer_username(), Some("alice"));
-        assert!(reopened_identity.connection_address(connection.id().as_str(), &secret).unwrap().is_none());
-
+        assert_eq!(
+            reopened_identity
+                .connection_payer_metadata(connection.id().as_str())
+                .unwrap()
+                .unwrap()
+                .payer_username(),
+            Some("alice")
+        );
+        assert!(reopened_identity
+            .connection_address(connection.id().as_str(), &secret)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

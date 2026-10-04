@@ -12,6 +12,11 @@ final class ExampleHost: MobileWalletFactory, MobileWalletBackend, MobileRelayTr
     init(directory: URL) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         databasePath = directory.appendingPathComponent("nwc.sqlite").path
+        let key = "nwc-mobile/foreground/service-key"
+        if try load(key: key) == nil {
+            // Public offline example identity only; production uses its native service key.
+            try store(key: key, secret: String(repeating: "0", count: 63) + "1")
+        }
     }
 
     func openWallet(walletId: String) throws -> MobileWallet {

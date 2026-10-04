@@ -59,9 +59,11 @@ intentionally does not register JavaScript callback implementations.
 
 When linking a wallet-specific Rust composition crate, use a single copy of
 the nwc-mobile UniFFI symbols in each process. Do not link a second static copy
-of the same engine into the React Native module. On Android, the generated
-Kotlin bridge must load the same Rust shared library as background workers so they
-see the same factory registry. All generated bindings and native libraries
+of the same engine into the React Native module. On Android, the Kotlin bridge
+and background workers must load the same Rust
+shared library within each process. The factory registry is process-local: each
+process, including a separate background-worker process, must register its own
+factory before handling work. All generated bindings and native libraries
 must come from the same source revision.
 
 ## Background integration
@@ -327,3 +329,13 @@ review disclosure. These immutable per-connection fields appear only in encrypte
 kind-13194 announcements. Existing connections have no username disclosure;
 migration intentionally leaves it absent because prior consent cannot be inferred.
 Revocation and browser re-pairing preserve the stored metadata and grant history.
+
+### Wake-registration signing key
+
+Before calling either wake-registration processor on a factory-created wallet,
+provision the wallet service secret as hex under
+`nwc-mobile/foreground/service-key` in its native `MobileClientSecretStore`.
+It must match `MobileWalletConfig.walletServicePublicKeyHex`. The engine
+`MobileSecretProvider` supplies per-connection secrets and is not a substitute
+for this registration credential. Missing credentials return `NotFound`; malformed
+or mismatched credentials return `CorruptData`. Keep the key native and device-protected.

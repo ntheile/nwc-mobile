@@ -77,8 +77,7 @@ impl fmt::Display for MobileEngineError {
 impl std::error::Error for MobileEngineError {}
 
 /// Fixed renewal interval for one connection's spending budget.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum, serde::Serialize, serde::Deserialize)]
 pub enum MobileBudgetInterval {
     /// The budget never renews automatically.
     Never,
@@ -144,8 +143,7 @@ impl From<MobileFeePolicy> for FeePolicy {
 }
 
 /// Authenticated encryption negotiated for a new NWC connection.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum, serde::Serialize, serde::Deserialize)]
 pub enum MobileNwcEncryption {
     /// NIP-44 version 2 authenticated encryption.
     Nip44V2,
@@ -206,8 +204,7 @@ impl fmt::Debug for MobileConnectionRequest {
 }
 
 /// Non-sensitive lifecycle state for a durable NWC connection.
-#[derive(Clone, Eq, PartialEq, uniffi::Record)]
-#[derive(serde::Serialize)]
+#[derive(Clone, Eq, PartialEq, uniffi::Record, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MobileConnectionState {
     /// Stable wallet-local connection identifier.
@@ -219,8 +216,7 @@ pub struct MobileConnectionState {
 }
 
 /// Authoritative non-sensitive connection fields stored by the shared engine.
-#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
-#[derive(serde::Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MobileConnectionPresentation {
     pub payment_mode: String,
@@ -452,8 +448,7 @@ const fn display_budget_interval(interval: MobileBudgetInterval) -> &'static str
 }
 
 /// Non-sensitive fields safe for a native NWA approval screen.
-#[derive(Clone, Eq, PartialEq, uniffi::Record)]
-#[derive(serde::Serialize)]
+#[derive(Clone, Eq, PartialEq, uniffi::Record, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MobileNwaRequestPresentation {
     pub payment_mode: String,
@@ -534,8 +529,7 @@ pub struct MobileNwaSessionState {
 }
 
 /// Result of an atomically persisted NWA approval.
-#[derive(Clone, Eq, PartialEq, uniffi::Record)]
-#[derive(serde::Serialize)]
+#[derive(Clone, Eq, PartialEq, uniffi::Record, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MobileNwaApprovalResult {
     /// Durable connection lifecycle state.
@@ -1103,7 +1097,9 @@ fn mobile_nwa_presentation(
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| MobileEngineError::CorruptData)?,
         expires_at: request.expires_at().map(nwc_mobile::UnixTimestamp::as_secs),
-        request_expires_at_seconds: request.request_expires_at().map(nwc_mobile::UnixTimestamp::as_secs),
+        request_expires_at_seconds: request
+            .request_expires_at()
+            .map(nwc_mobile::UnixTimestamp::as_secs),
     })
 }
 
@@ -1199,9 +1195,9 @@ impl From<MobileServiceError> for MobileEngineError {
                 Self::NwaAuthorityEscalation
             }
             MobileServiceError::NwaApproval(NwaApprovalError::Registry(error)) => Self::from(error),
-            MobileServiceError::NwaApproval(NwaApprovalError::InvalidCallback | NwaApprovalError::Expired) => {
-                Self::InvalidNwaRequest
-            }
+            MobileServiceError::NwaApproval(
+                NwaApprovalError::InvalidCallback | NwaApprovalError::Expired,
+            ) => Self::InvalidNwaRequest,
             MobileServiceError::Registration(WakeRegistrationError::DatabaseUnavailable) => {
                 Self::DatabaseUnavailable
             }

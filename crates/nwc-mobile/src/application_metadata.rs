@@ -76,40 +76,72 @@ pub struct ConnectionPayerMetadata {
 }
 impl ConnectionPayerMetadata {
     /// Validates optional canonical identity fields without changing their value.
-    pub fn new(payer_username: Option<String>, wallet_name: Option<String>) -> Result<Self, RegistryError> {
+    pub fn new(
+        payer_username: Option<String>,
+        wallet_name: Option<String>,
+    ) -> Result<Self, RegistryError> {
         for (value, limit) in [(&payer_username, 128), (&wallet_name, 160)] {
-            if value.as_ref().is_some_and(|value| value.is_empty() || value.trim() != value || value.chars().count() > limit || value.chars().any(char::is_control)) {
+            if value.as_ref().is_some_and(|value| {
+                value.is_empty()
+                    || value.trim() != value
+                    || value.chars().count() > limit
+                    || value.chars().any(char::is_control)
+            }) {
                 return Err(RegistryError::InvalidConnection);
             }
         }
-        if payer_username.as_ref().is_some_and(|value| value.contains('@')) {
+        if payer_username
+            .as_ref()
+            .is_some_and(|value| value.contains('@'))
+        {
             return Err(RegistryError::InvalidConnection);
         }
-        Ok(Self { payer_username, wallet_name })
+        Ok(Self {
+            payer_username,
+            wallet_name,
+        })
     }
     /// Username disclosed to this client, without a display prefix.
-    pub fn payer_username(&self) -> Option<&str> { self.payer_username.as_deref() }
+    pub fn payer_username(&self) -> Option<&str> {
+        self.payer_username.as_deref()
+    }
     /// Selected spending wallet name, independent of payer identity.
-    pub fn wallet_name(&self) -> Option<&str> { self.wallet_name.as_deref() }
+    pub fn wallet_name(&self) -> Option<&str> {
+        self.wallet_name.as_deref()
+    }
 }
 
 impl WakeLedger {
     /// Stores explicitly approved identity once; later re-pairing cannot change it.
-    pub fn set_connection_payer_metadata(&self, connection_id: &str, metadata: &ConnectionPayerMetadata) -> Result<(), LedgerError> {
-        if metadata.payer_username.is_none() && metadata.wallet_name.is_none() { return Ok(()); }
+    pub fn set_connection_payer_metadata(
+        &self,
+        connection_id: &str,
+        metadata: &ConnectionPayerMetadata,
+    ) -> Result<(), LedgerError> {
+        if metadata.payer_username.is_none() && metadata.wallet_name.is_none() {
+            return Ok(());
+        }
         let changed = self.lock_connection()?.execute(
             "INSERT INTO connection_payer_metadata(connection_id,payer_username,wallet_name) SELECT connection_id,?2,?3 FROM connections WHERE connection_id=?1 AND status='active'",
             params![connection_id, metadata.payer_username, metadata.wallet_name],
         )?;
-        if changed != 1 { return Err(LedgerError::ClaimMetadataMismatch); }
+        if changed != 1 {
+            return Err(LedgerError::ClaimMetadataMismatch);
+        }
         Ok(())
     }
-    pub(crate) fn connection_payer_metadata(&self, connection_id: &str) -> Result<Option<ConnectionPayerMetadata>, LedgerError> {
+    pub(crate) fn connection_payer_metadata(
+        &self,
+        connection_id: &str,
+    ) -> Result<Option<ConnectionPayerMetadata>, LedgerError> {
         let row = self.lock_connection()?.query_row(
             "SELECT payer_username,wallet_name FROM connection_payer_metadata WHERE connection_id=?1", [connection_id],
             |row| Ok((row.get::<_,Option<String>>(0)?, row.get::<_,Option<String>>(1)?)),
         ).optional()?;
-        row.map(|(username,name)| ConnectionPayerMetadata::new(username,name).map_err(|_| LedgerError::CorruptData)).transpose()
+        row.map(|(username, name)| {
+            ConnectionPayerMetadata::new(username, name).map_err(|_| LedgerError::CorruptData)
+        })
+        .transpose()
     }
 }
 
@@ -271,6 +303,90 @@ impl WakeLedger {
     }
 }
 
+impl WakeLedger {
+    /// Stores only the explicitly approved postal address, encrypted to this connection.
+    pub fn set_connection_address(
+        &self,
+        id: &str,
+        json: &str,
+        secret: &crate::NwcSecretKey,
+    ) -> Result<(), LedgerError> {
+        use nostr::serde_json::{json, Value};
+        if json.len() > 4096 {
+            return Err(LedgerError::ClaimMetadataMismatch);
+        }
+        let data = crate::reusable_payments::validate_customer(
+            &json!({"requested_customer_fields":[{"field":"address","required":true}]}),
+            json!({"address": nostr::serde_json::from_str::<Value>(json).map_err(|_| LedgerError::ClaimMetadataMismatch)?}),
+        )?;
+        let db = self.lock_connection()?;
+        let (client, wallet): (Vec<u8>, Vec<u8>) = db.query_row("SELECT client_pubkey,wallet_service_pubkey FROM connections WHERE connection_id=?1 AND status='active'", [id], |r| Ok((r.get(0)?,r.get(1)?)))?;
+        if secret
+            .public_key()
+            .map_err(|_| LedgerError::ClaimMetadataMismatch)?
+            .as_bytes()
+            .as_slice()
+            != wallet
+        {
+            return Err(LedgerError::ClaimMetadataMismatch);
+        }
+        let client = nostr::PublicKey::from_byte_array(
+            client.try_into().map_err(|_| LedgerError::CorruptData)?,
+        );
+        let plaintext = zeroize::Zeroizing::new(
+            json!({"connection_id":id,"address":data["address"]}).to_string(),
+        );
+        let cipher = nostr::nips::nip44::encrypt(
+            &secret
+                .nostr_secret()
+                .map_err(|_| LedgerError::CorruptData)?,
+            &client,
+            plaintext.as_bytes(),
+            nostr::nips::nip44::Version::V2,
+        )
+        .map_err(|_| LedgerError::CorruptData)?;
+        // Address-only consent has no username/wallet metadata row yet.
+        db.execute(
+            "INSERT OR IGNORE INTO connection_payer_metadata(connection_id) VALUES (?1)",
+            [id],
+        )?;
+        let changed = db.execute("UPDATE connection_payer_metadata SET address_ciphertext=?2 WHERE connection_id=?1 AND address_ciphertext IS NULL", params![id,cipher])?;
+        if changed != 1 {
+            return Err(LedgerError::ClaimMetadataMismatch);
+        }
+        Ok(())
+    }
+    pub(crate) fn connection_address(
+        &self,
+        id: &str,
+        secret: &crate::NwcSecretKey,
+    ) -> Result<Option<nostr::serde_json::Value>, LedgerError> {
+        let row: Option<(String,Vec<u8>)> = self.lock_connection()?.query_row("SELECT m.address_ciphertext,c.client_pubkey FROM connection_payer_metadata m JOIN connections c USING(connection_id) WHERE connection_id=?1 AND c.status='active' AND m.address_ciphertext IS NOT NULL", [id], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
+        let Some((cipher, client)) = row else {
+            return Ok(None);
+        };
+        let client = nostr::PublicKey::from_byte_array(
+            client.try_into().map_err(|_| LedgerError::CorruptData)?,
+        );
+        let plaintext = zeroize::Zeroizing::new(
+            nostr::nips::nip44::decrypt(
+                &secret
+                    .nostr_secret()
+                    .map_err(|_| LedgerError::CorruptData)?,
+                &client,
+                &cipher,
+            )
+            .map_err(|_| LedgerError::CorruptData)?,
+        );
+        let data: nostr::serde_json::Value =
+            nostr::serde_json::from_str(&plaintext).map_err(|_| LedgerError::CorruptData)?;
+        if data["connection_id"] != id {
+            return Err(LedgerError::CorruptData);
+        }
+        Ok(Some(data["address"].clone()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,7 +395,15 @@ mod tests {
     fn payer_metadata_accepts_only_bounded_canonical_values() {
         assert!(ConnectionPayerMetadata::new(None, None).is_ok());
         assert!(ConnectionPayerMetadata::new(Some("alice".into()), Some("Lexe".into())).is_ok());
-        for bad in ["".into(), " alice".into(), "alice ".into(), "ali\nce".into(), "alice@example".into(), "@alice".into(), "a".repeat(129)] {
+        for bad in [
+            "".into(),
+            " alice".into(),
+            "alice ".into(),
+            "ali\nce".into(),
+            "alice@example".into(),
+            "@alice".into(),
+            "a".repeat(129),
+        ] {
             assert!(ConnectionPayerMetadata::new(Some(bad), None).is_err());
         }
         assert!(ConnectionPayerMetadata::new(None, Some("x".repeat(161))).is_err());
@@ -300,35 +424,5 @@ mod tests {
             )
             .is_err());
         }
-    }
-}
-
-impl WakeLedger {
-    /// Stores only the explicitly approved postal address, encrypted to this connection.
-    pub fn set_connection_address(&self, id: &str, json: &str, secret: &crate::NwcSecretKey) -> Result<(), LedgerError> {
-        use nostr::serde_json::{json, Value};
-        if json.len() > 4096 { return Err(LedgerError::ClaimMetadataMismatch); }
-        let data = crate::reusable_payments::validate_customer(
-            &json!({"requested_customer_fields":[{"field":"address","required":true}]}),
-            json!({"address": nostr::serde_json::from_str::<Value>(json).map_err(|_| LedgerError::ClaimMetadataMismatch)?}),
-        )?;
-        let db = self.lock_connection()?;
-        let (client, wallet): (Vec<u8>, Vec<u8>) = db.query_row("SELECT client_pubkey,wallet_service_pubkey FROM connections WHERE connection_id=?1 AND status='active'", [id], |r| Ok((r.get(0)?,r.get(1)?)))?;
-        if secret.public_key().map_err(|_| LedgerError::ClaimMetadataMismatch)?.as_bytes().as_slice() != wallet { return Err(LedgerError::ClaimMetadataMismatch); }
-        let client = nostr::PublicKey::from_byte_array(client.try_into().map_err(|_| LedgerError::CorruptData)?);
-        let plaintext = zeroize::Zeroizing::new(json!({"connection_id":id,"address":data["address"]}).to_string());
-        let cipher = nostr::nips::nip44::encrypt(&secret.nostr_secret().map_err(|_| LedgerError::CorruptData)?, &client, plaintext.as_bytes(), nostr::nips::nip44::Version::V2).map_err(|_| LedgerError::CorruptData)?;
-        let changed = db.execute("UPDATE connection_payer_metadata SET address_ciphertext=?2 WHERE connection_id=?1 AND address_ciphertext IS NULL", params![id,cipher])?;
-        if changed != 1 { return Err(LedgerError::ClaimMetadataMismatch); }
-        Ok(())
-    }
-    pub(crate) fn connection_address(&self, id: &str, secret: &crate::NwcSecretKey) -> Result<Option<nostr::serde_json::Value>, LedgerError> {
-        let row: Option<(String,Vec<u8>)> = self.lock_connection()?.query_row("SELECT m.address_ciphertext,c.client_pubkey FROM connection_payer_metadata m JOIN connections c USING(connection_id) WHERE connection_id=?1 AND c.status='active' AND m.address_ciphertext IS NOT NULL", [id], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
-        let Some((cipher,client)) = row else { return Ok(None) };
-        let client = nostr::PublicKey::from_byte_array(client.try_into().map_err(|_| LedgerError::CorruptData)?);
-        let plaintext = zeroize::Zeroizing::new(nostr::nips::nip44::decrypt(&secret.nostr_secret().map_err(|_| LedgerError::CorruptData)?, &client, &cipher).map_err(|_| LedgerError::CorruptData)?);
-        let data: nostr::serde_json::Value = nostr::serde_json::from_str(&plaintext).map_err(|_| LedgerError::CorruptData)?;
-        if data["connection_id"] != id { return Err(LedgerError::CorruptData); }
-        Ok(Some(data["address"].clone()))
     }
 }

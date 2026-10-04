@@ -6,8 +6,7 @@ use nwc_mobile::{AmountMsat, Clock, EventId, PaymentPreimage, SystemClock};
 use std::sync::Arc;
 
 /// Immutable payment details and durable user-confirmation state.
-#[derive(Clone, uniffi::Record)]
-#[derive(serde::Serialize)]
+#[derive(Clone, uniffi::Record, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MobileForegroundPayment {
     pub purchase_json: Option<String>,
@@ -69,9 +68,12 @@ impl MobileWallet {
         }
         let started = std::time::Instant::now();
         let total = std::time::Duration::from_millis(execution_milliseconds);
-        self.engine
+        // Capability announcements are retryable outbox work, not a prerequisite
+        // for receiving requests on already authorized connections.
+        let _ = self
+            .engine
             .publish_pending_info_events(execution_milliseconds / 2)
-            .await?;
+            .await;
         let mut processed = 0;
         let connections = self.engine.service.active_connections()?;
         let now = SystemClock.now();

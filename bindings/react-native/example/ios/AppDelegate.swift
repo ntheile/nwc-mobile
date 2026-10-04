@@ -16,7 +16,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
                 .appendingPathComponent("NwcDemo")
             try registerMobileWalletFactory(factory: ExampleHost(directory: directory))
-            precondition(NwcMobileHostRegistry.registerHost(ReactNativeWalletHost()))
+            guard NwcMobileHostRegistry.registerHost(ReactNativeWalletHost()) else {
+                throw MobileEngineError.AlreadyExists
+            }
         } catch {
             // Keep the UI available; opening the unregistered wallet fails closed.
             // Never log native errors which could contain sensitive host details.

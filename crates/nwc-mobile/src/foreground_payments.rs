@@ -364,7 +364,7 @@ impl WakeLedger {
         connection_id: &str,
     ) -> Result<Vec<EventId>, LedgerError> {
         let db = self.lock_connection()?;
-        let mut query=db.prepare("SELECT f.event_id FROM foreground_payment_requests f JOIN payment_attempts p USING(event_id) WHERE p.connection_id=?1 AND p.initiated_at IS NOT NULL AND f.state IN ('in_flight','succeeded','failed') AND f.response_published=0 ORDER BY p.created_at LIMIT 16")?;
+        let mut query=db.prepare("SELECT f.event_id FROM foreground_payment_requests f JOIN payment_attempts p USING(event_id) WHERE p.connection_id=?1 AND p.initiated_at IS NOT NULL AND f.state IN ('in_flight','succeeded','failed','rejected') AND f.response_published=0 ORDER BY p.created_at LIMIT 16")?;
         let rows = query
             .query_map([connection_id], |r| r.get::<_, Vec<u8>>(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -384,7 +384,7 @@ impl WakeLedger {
         let Some(json) = wake.embedded_event_json() else {
             return Ok(false);
         };
-        Ok(self.lock_connection()?.query_row("SELECT EXISTS(SELECT 1 FROM foreground_payment_requests f JOIN payment_attempts p USING(event_id) JOIN connections c USING(connection_id) WHERE f.event_id=?1 AND f.relay=?2 AND f.wallet_public_key=?3 AND f.event_json=?4 AND p.initiated_at IS NOT NULL AND f.state IN ('in_flight','succeeded','failed') AND c.status='active' AND c.revision=p.connection_revision)",params![wake.event_id().as_bytes().as_slice(),wake.relay(),wake.wallet_service_pubkey().as_bytes().as_slice(),json],|r|r.get(0))?)
+        Ok(self.lock_connection()?.query_row("SELECT EXISTS(SELECT 1 FROM foreground_payment_requests f JOIN payment_attempts p USING(event_id) JOIN connections c USING(connection_id) WHERE f.event_id=?1 AND f.relay=?2 AND f.wallet_public_key=?3 AND f.event_json=?4 AND p.initiated_at IS NOT NULL AND f.state IN ('in_flight','succeeded','failed','rejected') AND c.status='active' AND c.revision=p.connection_revision)",params![wake.event_id().as_bytes().as_slice(),wake.relay(),wake.wallet_service_pubkey().as_bytes().as_slice(),json],|r|r.get(0))?)
     }
 
     pub(crate) fn acknowledge_foreground_response(

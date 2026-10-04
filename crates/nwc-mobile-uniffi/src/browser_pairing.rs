@@ -2,8 +2,7 @@ use crate::{MobileEngineError, MobileWallet};
 use nwc_mobile::{Clock, RelayTransport, StoredConnection, SystemClock};
 
 /// Verified challenge details bound to the selected existing connection.
-#[derive(Clone, Debug, uniffi::Record)]
-#[derive(serde::Serialize)]
+#[derive(Clone, Debug, uniffi::Record, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MobileBrowserPairingChallenge {
     pub challenge_id: String,

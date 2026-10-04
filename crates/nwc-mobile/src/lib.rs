@@ -61,7 +61,9 @@ pub use application_manager::{
     registration_retry_delay, ApprovedNwaApplication, NwcApplicationManager, RegistrationStart,
     MINIMUM_REGISTRATION_RETRY_DELAY, NWC_MOBILE_DATABASE_FILE,
 };
-pub use application_metadata::{ApplicationConnectionMetadata, ConnectionBudgetUsage, ConnectionPayerMetadata};
+pub use application_metadata::{
+    ApplicationConnectionMetadata, ConnectionBudgetUsage, ConnectionPayerMetadata,
+};
 pub use connection_registry::{
     ActiveConnection, ConnectionTombstone, NewConnection, RegistryError, StoredConnection,
 };
