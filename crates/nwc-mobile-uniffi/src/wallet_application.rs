@@ -74,6 +74,8 @@ pub struct MobileConnectionOptions {
 
 /// Non-sensitive durable FCM registration pass result.
 #[derive(Clone, Copy, Debug, uniffi::Record)]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MobileFcmRegistrationReport {
     /// Successfully applied changes.
     pub applied: u64,
@@ -85,6 +87,8 @@ pub struct MobileFcmRegistrationReport {
 
 /// Non-sensitive durable APNs registration pass result.
 #[derive(Clone, Copy, Debug, uniffi::Record)]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MobileApnsRegistrationReport {
     /// Successfully applied changes.
     pub applied: u64,

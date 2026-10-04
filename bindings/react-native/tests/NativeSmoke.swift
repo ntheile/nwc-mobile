@@ -33,7 +33,15 @@ struct NativeSmoke {
         let opened = try openRegisteredMobileWallet(walletId: "primary")
         let created = try opened.createConnection(options: MobileConnectionOptions(
             methods: [.getInfo], budgetLimitSat: 0, budgetInterval: .never,
-            encryption: .nip44V2, expiresAt: nil, payerUsername: nil, walletName: nil))
+            encryption: .nip44V2, expiresAt: nil, payerUsername: nil, walletName: nil, payerAddressJson: nil))
+        let encoded = try await dispatchMobileWalletJson(walletId: "primary", requestJson: "{\"method\":\"listConnections\"}")
+        let decoded = try JSONSerialization.jsonObject(with: Data(encoded.utf8)) as! [[String: Any]]
+        precondition(decoded.count == 1)
+        for forbidden in ["engine", "createConnection", "exportConnectionUri", "addConnection", "rustbufferFree"] {
+            let rejected = try await dispatchMobileWalletJson(walletId: "primary", requestJson: "{\"method\":\"\(forbidden)\"}")
+            let error = try JSONSerialization.jsonObject(with: Data(rejected.utf8)) as! [String: String]
+            precondition(error["$nwcError"] == "InvalidArgument")
+        }
         let initialConnections = try opened.listConnections()
         precondition(initialConnections.count == 1)
         let uri = try opened.exportConnectionUri(connectionId: created.connectionId)
@@ -65,14 +73,22 @@ struct NativeSmoke {
         let cancelled = try opened.pendingNwaRequest()
         precondition(cancelled == nil)
         let reviewed = try opened.parseNwaRequest(uri: requestUri)
-        let approved = try opened.approveNwaRequest(requestId: reviewed.requestIdHex,
-            options: MobileConnectionOptions(methods: [.getInfo], budgetLimitSat: 0,
-                budgetInterval: .never, encryption: .nip44V2, expiresAt: nil, payerUsername: nil, walletName: nil))
-        precondition(approved.callbackUrl == nil)
+        let command: [String: Any] = ["method": "approveNwaRequest", "requestId": reviewed.requestIdHex,
+            "options": ["methods": ["GetInfo"], "budgetLimitSat": "0",
+                        "budgetInterval": "Never", "encryption": "Nip44V2"]]
+        let approvalJson = String(data: try JSONSerialization.data(withJSONObject: command), encoding: .utf8)!
+        let approvedJson = try await dispatchMobileWalletJson(walletId: "primary", requestJson: approvalJson)
+        let approved = try JSONSerialization.jsonObject(with: Data(approvedJson.utf8)) as! [String: Any]
+        precondition(approved["$nwcError"] == nil)
+        let connection = approved["connection"] as! [String: Any]
         let authorized = try opened.listConnections()
         precondition(authorized.count == 1)
-        precondition(authorized[0].connectionId == approved.connection.connectionId)
-        _ = try opened.revokeConnection(connectionId: approved.connection.connectionId)
+        precondition(authorized[0].connectionId == connection["connectionId"] as! String)
+        // Error classification survives the message boundary for host recovery UI.
+        let noPending = try await dispatchMobileWalletJson(walletId: "primary", requestJson: approvalJson)
+        let error = try JSONSerialization.jsonObject(with: Data(noPending.utf8)) as! [String: String]
+        precondition(error["$nwcError"] == "NoPendingNwa")
+        _ = try opened.revokeConnection(connectionId: authorized[0].connectionId)
         print("Native bootstrap, secure-store callbacks, NWA approval, and async wake smoke passed without JavaScript")
     }
 }

@@ -18,8 +18,7 @@ export default function App() {
     try { await work(); }
     catch (error) {
       // Exception type only; never display raw native messages or values.
-      const category = error && typeof error === 'object' && MobileEngineError.instanceOf(error)
-        ? error.tag : error instanceof Error ? error.name : 'native error';
+      const category = error instanceof Error ? error.name : 'native error';
       setMessage(`Operation failed (${category}). Check native configuration.`);
     }
     finally { setBusy(false); }
@@ -33,14 +32,6 @@ export default function App() {
       setWallet(opened);
       setConnections(await opened.listConnections());
       setMessage('Connected to native Rust engine.');
-    })} />
-    <Button disabled={busy || !wallet} title="Create read-only connection" onPress={() => action(async () => {
-      if (!wallet) return;
-      await wallet.createConnection({ methods: [MobileNwcMethod.GetInfo, MobileNwcMethod.GetBalance],
-        budgetLimitSat: 0n, budgetInterval: MobileBudgetInterval.Never,
-        encryption: MobileNwcEncryption.Nip44V2, expiresAt: undefined });
-      setConnections(await wallet.listConnections());
-      setMessage('Created read-only connection. No payment permission granted.');
     })} />
     {connections.map(connection => <View key={connection.connectionId}>
       <Text>{connection.methods.map(method => MobileNwcMethod[method]).join(', ')} — budget {connection.budgetLimitSat.toString()} sats</Text>
@@ -69,7 +60,7 @@ export default function App() {
         await wallet.approveNwaRequest(request.requestIdHex, {
           methods: request.methods.filter(method => method === MobileNwcMethod.GetInfo || method === MobileNwcMethod.GetBalance),
           budgetLimitSat: 0n, budgetInterval: request.budgetInterval,
-          encryption: MobileNwcEncryption.Nip44V2, expiresAt: request.expiresAt,
+          encryption: MobileNwcEncryption.Nip44V2, expiresAt: request.expiresAt, payerUsername: undefined, walletName: undefined, payerAddressJson: undefined,
         });
         // A real host delivers any callback through its verified native flow.
         // Never pass it blindly to Linking.openURL.

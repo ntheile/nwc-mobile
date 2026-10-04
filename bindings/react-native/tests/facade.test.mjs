@@ -1,52 +1,42 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import { NwcMobile } from '../lib/NwcMobile.js';
+import { encodeRequest, decodeResponse } from '../lib/protocol.js';
+import { MobileNwcMethod, MobileBudgetInterval } from '../lib/types.js';
 
-test('connection operations preserve bigint precision and use native authority', async () => {
-  const approval = { budgetLimitSat: 9007199254740993n };
-  const calls = [];
-  const nwc = NwcMobile.fromNativeWallet({
-    createConnection(value) { calls.push(value); return { connectionId: 'one' }; },
-    listConnections() { return [approval]; },
-    revokeConnection(id) { calls.push(id); },
-  });
-  assert.deepEqual(await nwc.createConnection(approval), { connectionId: 'one' });
-  assert.equal((await nwc.listConnections())[0].budgetLimitSat, 9007199254740993n);
-  await nwc.revokeConnection('one');
-  assert.deepEqual(calls, [approval, 'one']);
+test('public JS has no native handles, authority creation or secret export', () => {
+  for (const name of ['createConnection', 'exportConnectionUri', 'engine']) assert.equal(NwcMobile.prototype[name], undefined);
+  assert.equal(NwcMobile.fromNativeWallet, undefined);
+  const spec = readFileSync(new URL('../src/NativeNwcMobile.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(spec, /installRustCrate|cleanupRustCrate/);
+  assert.match(spec, /dispatch\(walletId: string, request: string\): Promise<string>/);
+});
+test('unsigned values fail closed rather than wrapping', () => {
+  for (const value of [-1n, 1n << 64n]) assert.throws(() => encodeRequest({ amountMsat: value }), RangeError);
+  assert.equal(JSON.parse(encodeRequest({ amountMsat: (1n << 64n) - 1n })).amountMsat, '18446744073709551615');
+  assert.equal(decodeResponse('{"amountMsat":{"$nwcU64":"18446744073709551615"}}').amountMsat, (1n << 64n) - 1n);
+  for (const digits of ['-1', '18446744073709551616', '01', '1e3']) assert.throws(() => decodeResponse(JSON.stringify({ $nwcU64: digits })));
+});
+test('enums, nullable records and digit-looking strings preserve API semantics', () => {
+  const command = JSON.parse(encodeRequest({ options: { methods: [MobileNwcMethod.GetInfo], budgetInterval: MobileBudgetInterval.Monthly } }));
+  assert.deepEqual(command.options, { methods: ['GetInfo'], budgetInterval: 'Monthly' });
+  const record = decodeResponse('{"methods":["PayInvoice"],"budgetInterval":"Monthly","expiresAt":null,"connectionId":"123"}');
+  assert.equal(record.methods[0], MobileNwcMethod.PayInvoice);
+  assert.equal(MobileNwcMethod[record.methods[0]], 'PayInvoice');
+  assert.equal(record.expiresAt, undefined);
+  assert.equal(record.connectionId, '123');
+  for (const methods of [['pay_invoice'], [-1], [1000]]) assert.throws(() => encodeRequest({ methods }));
+});
+test('both platforms exclude generated JSI from their build', () => {
+  const read = name => readFileSync(new URL('../' + name, import.meta.url), 'utf8');
+  assert.doesNotMatch(read('NwcMobile.podspec'), /cpp\/|uniffi-bindgen-react-native/);
+  assert.doesNotMatch(read('android/build.gradle'), /externalNativeBuild/);
+  assert.doesNotMatch(read('ios/NwcMobile.mm'), /installRustCrate|NativeNwcMobileUniffi/);
+  assert.doesNotMatch(read('android/src/main/java/com/nwcmobile/reactnative/NwcMobileModule.kt'), /external fun|runtimePointer|javaScriptContextHolder/);
 });
 
-test('NWA parsing never approves implicitly; approval carries the reviewed id', async () => {
-  const calls = [];
-  const nwc = NwcMobile.fromNativeWallet({
-    parseNwaRequest(uri) { calls.push(['parse', uri]); return { requestIdHex: 'reviewed' }; },
-    approveNwaRequest(...args) { calls.push(['approve', ...args]); return { callbackUrl: undefined }; },
-    cancelNwaRequest() { calls.push(['clear']); },
-  });
-  const request = await nwc.parseNwaRequest('nostr+walletauth://example');
-  assert.equal(calls.length, 1);
-  const approval = { methods: [] };
-  await nwc.approveNwaRequest(request.requestIdHex, approval);
-  await nwc.cancelNwaRequest();
-  assert.deepEqual(calls[1], ['approve', 'reviewed', approval]);
-  assert.deepEqual(calls[2], ['clear']);
-});
-
-test('native rejection is propagated without retrying or approving', async () => {
-  let attempts = 0;
-  const rejection = new Error('native rejection');
-  const nwc = NwcMobile.fromNativeWallet({
-    createConnection() { attempts++; throw rejection; },
-  });
-  await assert.rejects(nwc.createConnection({}), (error) => error === rejection);
-  assert.equal(attempts, 1);
-});
-
-test('push refresh only forwards the requested native registration state', async () => {
-  const states = [];
-  const nwc = NwcMobile.fromNativeWallet({
-    refreshWakeRegistrations(enabled) { states.push(enabled); return 2n; },
-  });
-  assert.equal(await nwc.refreshWakeRegistrations(false), 2n);
-  assert.deepEqual(states, [false]);
+test('closed native errors retain the tag used by pending-NWA recovery', () => {
+  assert.throws(() => decodeResponse('{"$nwcError":"NwaAlreadyPending"}'), error => error.tag === 'NwaAlreadyPending');
+  assert.throws(() => decodeResponse('{"$nwcError":"secret-bearing host exception"}'), TypeError);
 });

@@ -37,7 +37,10 @@ pub fn open_foreground_mobile_wallet(
     let engine = MobileNwcEngine::open(
         database_path,
         Arc::new(ForegroundBackend),
-        Arc::new(NativeRelays),
+        Arc::new(NativeRelays(
+            nwc_mobile::PublicKey::from_hex(&public_key)
+                .map_err(|_| MobileEngineError::InvalidArgument)?,
+        )),
         Arc::new(NativeSecrets(secrets.clone())),
     )?;
     let wallet = MobileWallet::new(
@@ -66,7 +69,7 @@ impl MobileSecretProvider for NativeSecrets {
             .map_err(|_| MobileHostError::Rejected)
     }
 }
-struct NativeRelays;
+struct NativeRelays(nwc_mobile::PublicKey);
 #[async_trait::async_trait]
 impl MobileRelayTransport for NativeRelays {
     async fn fetch_event(
@@ -77,6 +80,7 @@ impl MobileRelayTransport for NativeRelays {
         timeout_milliseconds: u64,
         cancellation: Arc<MobileCancellation>,
     ) -> Result<Option<String>, MobileHostError> {
+        let recipient = self.0.clone();
         nwc_mobile_tokio::run_on_native_runtime(async move {
             let relay = SecureRelayUrl::parse(&relay_url)
                 .map_err(|_| nwc_mobile::HostError::new(nwc_mobile::HostErrorKind::Rejected))?;
@@ -85,9 +89,10 @@ impl MobileRelayTransport for NativeRelays {
             let budget = OperationBudget::new(Duration::from_millis(timeout_milliseconds))
                 .map_err(|_| nwc_mobile::HostError::new(nwc_mobile::HostErrorKind::Rejected))?;
             NostrRelayTransport
-                .fetch_event(
+                .fetch_event_for_recipient(
                     &relay,
                     &event,
+                    &recipient,
                     usize::try_from(maximum_event_bytes).map_err(|_| {
                         nwc_mobile::HostError::new(nwc_mobile::HostErrorKind::Rejected)
                     })?,

@@ -28,6 +28,8 @@ mod foreground_wallet;
 pub use foreground_wallet::open_foreground_mobile_wallet;
 
 mod native_wallet;
+mod react_native;
+pub use react_native::dispatch_mobile_wallet_json;
 mod wallet_application;
 
 pub use wallet_application::{

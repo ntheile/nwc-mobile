@@ -3,6 +3,8 @@ use nwc_mobile::{Clock, RelayTransport, StoredConnection, SystemClock};
 
 /// Verified challenge details bound to the selected existing connection.
 #[derive(Clone, Debug, uniffi::Record)]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MobileBrowserPairingChallenge {
     pub challenge_id: String,
     pub connection_id: String,

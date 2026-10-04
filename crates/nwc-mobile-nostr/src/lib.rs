@@ -153,6 +153,29 @@ fn next_subscription_id() -> String {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NostrRelayTransport;
 
+impl NostrRelayTransport {
+    /// Fetches one exact request scoped to the native wallet's public recipient.
+    /// Recipient filtering supports NWC relays that reject unscoped ID queries;
+    /// callers must still validate the returned event's signature and authority.
+    pub async fn fetch_event_for_recipient(
+        &self,
+        relay: &SecureRelayUrl,
+        event_id: &EventId,
+        recipient: &PublicKey,
+        maximum_event_bytes: usize,
+        context: OperationContext<'_>,
+    ) -> Result<Option<String>, HostError> {
+        if maximum_event_bytes == 0 {
+            return Err(host_error(HostErrorKind::Rejected));
+        }
+        run_with_context(
+            context,
+            fetch_relay_event(relay, event_id, maximum_event_bytes, Some(recipient)),
+        )
+        .await
+    }
+}
+
 /// Builds, signs, and publishes one bounded NIP-47 info event.
 ///
 /// This is the high-level host boundary for wallet applications. It keeps
@@ -252,7 +275,7 @@ impl RelayTransport for NostrRelayTransport {
             }
             run_with_context(
                 context,
-                fetch_relay_event(relay, event_id, maximum_event_bytes),
+                fetch_relay_event(relay, event_id, maximum_event_bytes, None),
             )
             .await
         })
@@ -274,6 +297,7 @@ async fn fetch_relay_event(
     relay: &SecureRelayUrl,
     event_id: &EventId,
     maximum_event_bytes: usize,
+    recipient: Option<&PublicKey>,
 ) -> Result<Option<String>, HostError> {
     if fetch_wire_message_limit(maximum_event_bytes)? > SESSION_MAX_BYTES {
         return Err(host_error(HostErrorKind::Rejected));
@@ -282,11 +306,11 @@ async fn fetch_relay_event(
     let socket = &mut session.socket;
     let expected_event_id = event_id.to_hex();
     let subscription_id = next_subscription_id();
-    let request = json!(["REQ", subscription_id, {
-        "ids": [expected_event_id],
-        "kinds": [NWC_REQUEST_KIND],
-        "limit": 1
-    }]);
+    let mut filter = json!({"ids": [expected_event_id], "kinds": [NWC_REQUEST_KIND], "limit": 1});
+    if let Some(recipient) = recipient {
+        filter["#p"] = json!([recipient.to_hex()]);
+    }
+    let request = json!(["REQ", subscription_id, filter]);
     socket
         .send(Message::Text(request.to_string().into()))
         .await
@@ -754,12 +778,13 @@ mod tests {
             returned_at: Instant::now(),
         });
         let id = EventId::from_hex(EVENT_ID).unwrap();
+        let recipient = PublicKey::from_hex(EVENT_ID).unwrap();
         assert_eq!(
-            ready(fetch_relay_event(&relay, &id, 131_072)).unwrap(),
+            ready(fetch_relay_event(&relay, &id, 131_072, Some(&recipient))).unwrap(),
             None
         );
         assert_eq!(
-            ready(fetch_relay_event(&relay, &id, 131_072)).unwrap(),
+            ready(fetch_relay_event(&relay, &id, 131_072, None)).unwrap(),
             None
         );
         ready(publish_relay_event(
@@ -770,6 +795,10 @@ mod tests {
         let sent = sent.lock().unwrap();
         assert_eq!(sent.len(), 5);
         assert_eq!(sent[0][0], "REQ");
+        assert_eq!(sent[0][2]["#p"], json!([recipient.to_hex()]));
+        assert_eq!(sent[0][2]["ids"], json!([EVENT_ID]));
+        assert_eq!(sent[0][2]["kinds"], json!([23194]));
+        assert!(sent[2][2].get("#p").is_none());
         assert_eq!(sent[1], json!(["CLOSE", sent[0][1]]));
         assert_eq!(sent[2][0], "REQ");
         assert_eq!(sent[3], json!(["CLOSE", sent[2][1]]));
@@ -794,7 +823,7 @@ mod tests {
             returned_at: Instant::now(),
         });
         let id = EventId::from_hex(EVENT_ID).unwrap();
-        let mut fetch = Box::pin(fetch_relay_event(&relay, &id, 131_072));
+        let mut fetch = Box::pin(fetch_relay_event(&relay, &id, 131_072, None));
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(std::future::Future::poll(fetch.as_mut(), &mut cx).is_pending());
         let mut waiter = Box::pin(slot.clone().lock_owned());

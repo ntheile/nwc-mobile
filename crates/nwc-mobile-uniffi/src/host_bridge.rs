@@ -105,6 +105,7 @@ impl From<MobileHostError> for HostError {
 
 /// NIP-47 method advertised by a native wallet backend.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum MobileNwcMethod {
     /// Return wallet information.
     GetInfo,

@@ -1,95 +1,92 @@
-import type {
-  MobileConnectionOptions,
-  MobileWalletLike,
-} from './generated/nwc_mobile_uniffi';
+import type { MobileConnectionOptions, MobileConnectionPresentation, MobileNwaRequestPresentation,
+  MobileNwaApprovalResult, MobileBrowserPairingChallenge, MobileFcmRegistrationReport,
+  MobileApnsRegistrationReport, MobileForegroundPayment } from './types';
+import { encodeRequest, decodeResponse } from './protocol';
+declare const require: (id: './NativeNwcMobile') => typeof import('./NativeNwcMobile');
 
-declare const require: (id: './native') => typeof import('./native');
-
-export interface NwcMobileConfig {
-  /** Opaque identifier resolved by the native host. Never a path or secret. */
-  walletId: string;
-}
-
-/** Connection and approval UI facade. Background processing stays native. */
+export interface NwcMobileConfig { walletId: string; }
+/** Native-configured UI operations. The host must trust its JavaScript consent UI. */
 export class NwcMobile {
-  private constructor(private readonly wallet: MobileWalletLike) {}
-
+  private constructor(private readonly walletId: string) {}
   static async open(config: NwcMobileConfig): Promise<NwcMobile> {
-    // Load only when opening: importing types or rendering an unconnected
-    // screen does not install JSI or open the wallet.
-    // Literal require is bundled by Metro without a development-server split
-    // request, while still deferring JSI initialization until the first open.
-    const native = require('./native');
-    return new NwcMobile(native.openRegisteredMobileWallet(config.walletId));
+    const wallet = new NwcMobile(config.walletId);
+    await wallet.servicePublicKey();
+    return wallet;
   }
-
-  /** Wrap an existing native wallet, e.g. an application's Rust composition. */
-  static fromNativeWallet(wallet: MobileWalletLike): NwcMobile {
-    return new NwcMobile(wallet);
+  private async request<T>(command: Record<string, unknown>): Promise<T> {
+    const native = require('./NativeNwcMobile').default;
+    return decodeResponse(await native.dispatch(this.walletId, encodeRequest(command))) as T;
   }
-
-  async servicePublicKey() { return this.wallet.servicePublicKey(); }
-
-  async listConnections() {
-    return this.wallet.listConnections();
+  async servicePublicKey(): Promise<string> {
+    return this.request({ method: "servicePublicKey" });
   }
-
-  /**
-   * Create an explicitly approved connection. Rust generates client keys and
-   * stores them using the native secure store; JS supplies only policy.
-   */
-  async createConnection(approval: MobileConnectionOptions) {
-    return this.wallet.createConnection(approval);
+  async listConnections(): Promise<MobileConnectionPresentation[]> {
+    return this.request({ method: "listConnections" });
   }
-
-  /** Secret-bearing value: only request for an explicit QR/share interaction. */
-  async exportConnectionUri(connectionId: string) {
-    return this.wallet.exportConnectionUri(connectionId);
+  async revokeConnection(connectionId: string): Promise<boolean> {
+    return this.request({ method: "revokeConnection", connectionId });
   }
-
-  async revokeConnection(connectionId: string) {
-    // Idempotent host revocation also handles already-revoked connections.
-    return this.wallet.revokeConnection(connectionId);
+  async parseNwaRequest(uri: string): Promise<MobileNwaRequestPresentation> {
+    return this.request({ method: "parseNwaRequest", uri });
   }
-
-  /** Parse and retain a request for review. Does not approve or open a URL. */
-  async parseNwaRequest(uri: string) {
-    return this.wallet.parseNwaRequest(uri);
+  async pendingNwaRequest(): Promise<MobileNwaRequestPresentation | undefined> {
+    return this.request({ method: "pendingNwaRequest" });
   }
-
-  async pendingNwaRequest() {
-    return this.wallet.pendingNwaRequest();
+  async approveNwaRequest(requestId: string, options: MobileConnectionOptions): Promise<MobileNwaApprovalResult> {
+    return this.request({ method: "approveNwaRequest", requestId, options });
   }
-
-  /** Bind explicit approval to the exact request displayed by the UI. */
-  async approveNwaRequest(requestId: string, approval: MobileConnectionOptions) {
-    return this.wallet.approveNwaRequest(requestId, approval);
+  async approveNwaReusablePayment(requestId: string, options: MobileConnectionOptions, walletId: string): Promise<MobileNwaApprovalResult> {
+    return this.request({ method: "approveNwaReusablePayment", requestId, options, walletId });
   }
-
-  async parseBrowserPairingChallenge(connectionId: string, signedEncryptedEventJson: string) { return this.wallet.parseBrowserPairingChallenge(connectionId, signedEncryptedEventJson); }
-  async approveBrowserPairing(challengeId: string) { return this.wallet.approveBrowserPairing(challengeId); }
-  async cancelBrowserPairing(challengeId: string) { return this.wallet.cancelBrowserPairing(challengeId); }
-  async approveNwaReusablePayment(requestId: string, approval: MobileConnectionOptions, walletId: string) { return this.wallet.approveNwaReusablePayment(requestId, approval, walletId); }
-  async beginPaymentWithConsent(eventId: string, walletId: string, customerDataJson: string) { return this.wallet.beginPaymentWithConsent(eventId, walletId, customerDataJson); }
-  async approveNwaWalletManagedPayment(requestId: string, approval: MobileConnectionOptions, walletId: string, invoice: string, paymentHashHex: string, invoiceAmountMsat: bigint) { return this.wallet.approveNwaWalletManagedPayment(requestId, approval, walletId, invoice, paymentHashHex, invoiceAmountMsat); }
-
-  async cancelNwaRequest() {
-    return this.wallet.cancelNwaRequest();
+  async approveNwaWalletManagedPayment(requestId: string, options: MobileConnectionOptions, walletId: string, invoice: string, paymentHashHex: string, invoiceAmountMsat: bigint): Promise<MobileNwaApprovalResult> {
+    return this.request({ method: "approveNwaWalletManagedPayment", requestId, options, walletId, invoice, paymentHashHex, invoiceAmountMsat });
   }
-
-  /** Queue updates; native maintenance delivers them to the push provider. */
-  async refreshWakeRegistrations(enabled: boolean) {
-    return this.wallet.refreshWakeRegistrations(enabled);
+  async cancelNwaRequest(): Promise<void> {
+    return this.request({ method: "cancelNwaRequest" });
   }
-  async processFcmWakeRegistrations(serverUrl: string, pushToken: string, appId: string, installId: string) { return this.wallet.processFcmWakeRegistrations(serverUrl, pushToken, appId, installId); }
-  async processApnsWakeRegistrations(serverUrl: string, pushToken: string, appId: string, installId: string, environment: 'sandbox' | 'production') { return this.wallet.processApnsWakeRegistrations(serverUrl, pushToken, appId, installId, environment); }
-  async bindConnectionPayment(connectionId: string, walletId: string, paymentHashHex: string, amountMsat: bigint, maximumFeeSat: bigint) { return this.wallet.bindConnectionPayment(connectionId, walletId, paymentHashHex, amountMsat, maximumFeeSat); }
-  async pollRequests(executionMilliseconds: bigint = 25_000n) { return this.wallet.pollRequests(executionMilliseconds); }
-  async listPendingPayments() { return this.wallet.listPendingPayments(); }
-  async beginPayment(eventIdHex: string, walletId: string) { return this.wallet.beginPayment(eventIdHex, walletId); }
-  async completePayment(eventIdHex: string, preimageHex: string, amountMsat: bigint, feeMsat: bigint) { return this.wallet.completePayment(eventIdHex, preimageHex, amountMsat, feeMsat); }
-  async rejectPayment(eventIdHex: string) { return this.wallet.rejectPayment(eventIdHex); }
-  async failPayment(eventIdHex: string) { return this.wallet.failPayment(eventIdHex); }
-  async resumePayment(eventIdHex: string, executionMilliseconds: bigint = 25_000n) { return this.wallet.resumePayment(eventIdHex, executionMilliseconds); }
-
+  async parseBrowserPairingChallenge(connectionId: string, signedEncryptedEventJson: string): Promise<MobileBrowserPairingChallenge> {
+    return this.request({ method: "parseBrowserPairingChallenge", connectionId, signedEncryptedEventJson });
+  }
+  async approveBrowserPairing(challengeId: string): Promise<boolean> {
+    return this.request({ method: "approveBrowserPairing", challengeId });
+  }
+  async cancelBrowserPairing(challengeId: string): Promise<void> {
+    return this.request({ method: "cancelBrowserPairing", challengeId });
+  }
+  async refreshWakeRegistrations(enabled: boolean): Promise<bigint> {
+    return this.request({ method: "refreshWakeRegistrations", enabled });
+  }
+  async processFcmWakeRegistrations(serverUrl: string, pushToken: string, appId: string, installId: string): Promise<MobileFcmRegistrationReport> {
+    return this.request({ method: "processFcmWakeRegistrations", serverUrl, pushToken, appId, installId });
+  }
+  async processApnsWakeRegistrations(serverUrl: string, pushToken: string, appId: string, installId: string, environment: string): Promise<MobileApnsRegistrationReport> {
+    return this.request({ method: "processApnsWakeRegistrations", serverUrl, pushToken, appId, installId, environment });
+  }
+  async bindConnectionPayment(connectionId: string, walletId: string, paymentHashHex: string, amountMsat: bigint, maximumFeeSat: bigint): Promise<void> {
+    return this.request({ method: "bindConnectionPayment", connectionId, walletId, paymentHashHex, amountMsat, maximumFeeSat });
+  }
+  async pollRequests(executionMilliseconds: bigint = 25_000n): Promise<number> {
+    return this.request({ method: "pollRequests", executionMilliseconds });
+  }
+  async listPendingPayments(): Promise<MobileForegroundPayment[]> {
+    return this.request({ method: "listPendingPayments" });
+  }
+  async beginPayment(eventIdHex: string, walletId: string): Promise<MobileForegroundPayment> {
+    return this.request({ method: "beginPayment", eventIdHex, walletId });
+  }
+  async beginPaymentWithConsent(eventIdHex: string, walletId: string, customerDataJson: string): Promise<MobileForegroundPayment> {
+    return this.request({ method: "beginPaymentWithConsent", eventIdHex, walletId, customerDataJson });
+  }
+  async completePayment(eventIdHex: string, preimageHex: string, amountMsat: bigint, feeMsat: bigint): Promise<void> {
+    return this.request({ method: "completePayment", eventIdHex, preimageHex, amountMsat, feeMsat });
+  }
+  async rejectPayment(eventIdHex: string): Promise<void> {
+    return this.request({ method: "rejectPayment", eventIdHex });
+  }
+  async failPayment(eventIdHex: string): Promise<void> {
+    return this.request({ method: "failPayment", eventIdHex });
+  }
+  async resumePayment(eventIdHex: string, executionMilliseconds: bigint = 25_000n): Promise<void> {
+    return this.request({ method: "resumePayment", eventIdHex, executionMilliseconds });
+  }
 }

@@ -9,6 +9,7 @@ targets:
     sources:
       - AppDelegate.swift
       - ExampleHost.swift
+      - ../../templates/ReactNativeWalletHost.swift
       - ../../native/swift/NwcMobile.swift
       - path: PrivacyInfo.xcprivacy
         buildPhase: resources

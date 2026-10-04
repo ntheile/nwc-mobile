@@ -1,8 +1,7 @@
 import { statSync } from 'node:fs';
 const required = [
-  'src/generated/nwc_mobile_uniffi.ts',
-  'cpp/generated/nwc_mobile_uniffi.cpp',
-  'cpp/generated/nwc_mobile_uniffi.hpp',
+  'src/protocol.ts',
+  'src/types.ts',
   'native/swift/NwcMobile.swift',
   'native/swift/NwcMobileFFI.h',
   'native/kotlin/org/nwc/mobile/nwc_mobile_uniffi.kt',

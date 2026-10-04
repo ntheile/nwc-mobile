@@ -15,6 +15,7 @@ class MainApplication : Application(), ReactApplication {
   override fun onCreate() {
     super.onCreate()
     registerMobileWalletFactory(ExampleHost(this))
+    ReactNativeWalletHost.register()
     loadReactNative(this)
   }
 }

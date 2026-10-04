@@ -1045,6 +1045,8 @@ dependencies = [
  "nwc-mobile-http",
  "nwc-mobile-nostr",
  "nwc-mobile-tokio",
+ "serde",
+ "serde_json",
  "uniffi",
  "zeroize",
 ]

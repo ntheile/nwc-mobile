@@ -1,8 +1,8 @@
 # React Native
 
 The React Native integration is under development in `bindings/react-native`.
-It uses `uniffi-bindgen-react-native` to call the existing Rust engine through
-JSI. It does not implement NIP-47 or payment policy in JavaScript.
+It sends bounded JSON commands through a string-only React Native TurboModule
+to Rust. It does not expose raw UniFFI handles or implement NIP-47 in JavaScript.
 
 ## The integration boundary
 
@@ -30,18 +30,19 @@ The native defaults contain the service public key, relays, and optional
 Lightning address. The UI passes `MobileConnectionOptions`: approved methods,
 budget, renewal interval, encryption, and expiry. Rust generates and securely
 stores client keys through the existing application workflow. The normal
-creation result contains no secret. Export a URI only for an explicit user
-QR/share interaction, and never persist that URI in application state storage.
+creation result contains no secret. Connection creation and URI export are
+available only through the native Swift/Kotlin API, not the RN dispatcher.
 
-Registration is one-time per process. Duplicate registration is an error, not
-a hot-swap operation. Opened engines keep their native dependencies alive.
-Do not register a TypeScript callback factory for a background-capable wallet.
-The generated callback interface is internal. This package removes automatic
-JS callback registration during generation because UniFFI's vtables are
-process-global: JS registration would overwrite the Swift/Kotlin implementation.
-The transformation checks the exact callback inventory and keeps all ABI
-version/checksum validation. Do not initialize an unmodified generated JS
-module alongside the native bindings.
+Register the native factory once per process. In the containing application,
+also register the message adapter in `templates/ReactNativeWalletHost.swift`
+or `.kt`. It forwards to `dispatchMobileWalletJson`, whose closed command enum
+rejects unsupported operations before opening the wallet. Do not add a generic
+native-method dispatcher or expose callback implementations to JavaScript.
+
+The application still trusts JavaScript to implement its consent UI and request
+NWA/payment approval. This boundary prevents raw memory access and native-only
+API calls; it does not authenticate user presence. A native confirmation gate is
+required if compromised JavaScript is part of the host's consent threat model.
 
 ## Wallet-specific code
 
@@ -59,7 +60,7 @@ intentionally does not register JavaScript callback implementations.
 When linking a wallet-specific Rust composition crate, use a single copy of
 the nwc-mobile UniFFI symbols in each process. Do not link a second static copy
 of the same engine into the React Native module. On Android, the generated
-Kotlin bridge and JSI wrapper must load the same Rust shared library so they
+Kotlin bridge must load the same Rust shared library as background workers so they
 see the same factory registry. All generated bindings and native libraries
 must come from the same source revision.
 
@@ -85,7 +86,7 @@ approval of the exact retained request. Callback delivery belongs to native
 code. Do not use a generic browser-opening operation for secret-bearing
 callbacks or log callback URLs, connection URIs, payment preimages, or secrets.
 
-Generated 64-bit integer fields use `bigint`, including satoshi limits,
+Public 64-bit integer fields use `bigint`, including satoshi limits,
 revisions, and timestamps. Do not silently convert them to JavaScript `number`.
 
 ## Verification status
@@ -97,7 +98,7 @@ arm64 smoke tests exercise connection export, NWA review/cancellation/approval,
 revocation, and offline wake execution without starting JavaScript. Android's
 test uses the real Keystore and can be repeated without reauthorizing a revoked
 fixture identity. TypeScript tests additionally check bigint preservation,
-explicit approval, and native callback-table ownership with ABI checks enabled.
+explicit approval, forbidden operations, strict unsigned integers and native-only callback ownership.
 
 Generated sources are deliberately excluded from Git. CI regenerates them;
 the package's prepack check requires generated bindings and native libraries.
@@ -107,7 +108,7 @@ the native tests. These checks use an offline, read-only wallet, not real funds.
 
 ## Host acceptance checks before shipping
 
-- Generate TS/C++ and Swift/Kotlin from the same Rust artifact and verify checksums.
+- Generate Swift/Kotlin from the same Rust artifact and verify checksums.
 - Compile the package and consuming native example on iOS and Android.
 - Verify connection creation, explicit NWA approval, revocation, and UI refresh.
 - With the React Native app terminated, deliver a real push and verify that

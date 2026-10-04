@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 /// Immutable payment details and durable user-confirmation state.
 #[derive(Clone, uniffi::Record)]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MobileForegroundPayment {
     pub purchase_json: Option<String>,
     /// Original Nostr event identifier.

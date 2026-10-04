@@ -12,6 +12,8 @@ android {
     compileSdk rootProject.ext.compileSdkVersion
     ndkVersion rootProject.ext.ndkVersion
     sourceSets.main.java.srcDir '../../../native/kotlin'
+    sourceSets.main.java.srcDir '../../../templates'
+    sourceSets.main.java.exclude 'NativeWalletFactory.kt', 'NativeWakeExecutor.kt'
     defaultConfig {
         applicationId 'org.nwc.mobile.example'
         minSdk 24
