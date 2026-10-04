@@ -2,8 +2,9 @@
 //!
 //! This crate validates the untrusted push envelope before it reaches the core
 //! engine and translates engine outcomes into a closed Swift/Kotlin contract.
-//! Wallet secrets, decrypted requests, invoices, and remote error text are
-//! deliberately absent from this interface.
+//! Wake/lifecycle presentation omits decrypted requests and remote error text.
+//! Wallet callbacks and explicit user-requested connection export carry
+//! sensitive values; native hosts must keep those out of logs and JS storage.
 
 #![forbid(unsafe_code)]
 
@@ -17,8 +18,28 @@ use nwc_mobile::{
 };
 use nwc_mobile_tokio::{NwcMobile, NwcMobileConfig, NwcMobileSettlementStatus, NwcMobileWakeKind};
 
+mod browser_pairing;
+mod foreground_payments;
+pub use browser_pairing::MobileBrowserPairingChallenge;
 mod host_bridge;
 mod mobile_engine;
+pub use foreground_payments::MobileForegroundPayment;
+mod foreground_wallet;
+pub use foreground_wallet::open_foreground_mobile_wallet;
+
+mod native_wallet;
+mod react_native;
+pub use react_native::dispatch_mobile_wallet_json;
+mod wallet_application;
+
+pub use wallet_application::{
+    MobileApnsRegistrationReport, MobileClientSecretStore, MobileConnectionOptions,
+    MobileFcmRegistrationReport, MobileWallet, MobileWalletConfig,
+};
+
+pub use native_wallet::{
+    open_registered_mobile_wallet, register_mobile_wallet_factory, MobileWalletFactory,
+};
 
 pub use host_bridge::{
     MobileCancellation, MobileCreatedInvoice, MobileHostError, MobileInvoiceLookup,

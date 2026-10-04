@@ -11,12 +11,17 @@ mod application_coordinator;
 mod application_icon_cache;
 mod application_manager;
 mod application_metadata;
+mod browser_pairing;
 mod connection_registry;
 mod connection_service;
 mod diagnostics;
 mod engine;
 mod error;
 mod foreground;
+mod foreground_payments;
+mod reusable_payments;
+pub use browser_pairing::BrowserPairingChallenge;
+pub use foreground_payments::ForegroundPayment;
 mod host;
 mod invoice_notifications;
 mod ledger;
@@ -56,7 +61,9 @@ pub use application_manager::{
     registration_retry_delay, ApprovedNwaApplication, NwcApplicationManager, RegistrationStart,
     MINIMUM_REGISTRATION_RETRY_DELAY, NWC_MOBILE_DATABASE_FILE,
 };
-pub use application_metadata::{ApplicationConnectionMetadata, ConnectionBudgetUsage};
+pub use application_metadata::{
+    ApplicationConnectionMetadata, ConnectionBudgetUsage, ConnectionPayerMetadata,
+};
 pub use connection_registry::{
     ActiveConnection, ConnectionTombstone, NewConnection, RegistryError, StoredConnection,
 };
@@ -111,6 +118,7 @@ pub use payment_reconciliation::{
     MAX_PAYMENT_RECONCILIATION_BATCH,
 };
 pub use policy::{BudgetInterval, BudgetPolicy, ConnectionPolicy, FeePolicy, WakePolicy};
+pub use secret_store::{generate_service_secret, service_secret_identity};
 pub use secret_store::{ProtectedSecretStore, StoredNwcSecrets, WalletServiceSigningKeyProvider};
 pub use time::{BackgroundBudget, Clock, SystemClock, UnixTimestamp};
 pub use types::{

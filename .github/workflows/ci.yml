@@ -13,6 +13,56 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  react-native:
+    name: React Native binding contract
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22.16.0'
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.90.0 --profile minimal
+      - name: Install locked JavaScript dependencies
+        working-directory: bindings/react-native
+        run: npm ci
+      - name: Regenerate TypeScript and C++ bindings
+        working-directory: bindings/react-native
+        run: npm run generate
+      - name: Regenerate native host bindings
+        working-directory: bindings/react-native
+        run: npm run generate:native
+      - name: Generate React Native platform glue
+        working-directory: bindings/react-native
+        run: npm run codegen
+      - name: Check package, example, and callback ownership
+        working-directory: bindings/react-native
+        run: |
+          npm test
+          npm run typecheck:example
+
+  react-native-native-host:
+    name: React Native Swift host without JavaScript
+    runs-on: macos-15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22.16.0'
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.90.0 --profile minimal
+      - name: Test native factory and offline wake without Hermes
+        working-directory: bindings/react-native
+        run: node scripts/test-native-ios.mjs
+
   android:
     name: Android WorkManager package
     runs-on: ubuntu-latest

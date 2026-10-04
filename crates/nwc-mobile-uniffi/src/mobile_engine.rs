@@ -77,7 +77,7 @@ impl fmt::Display for MobileEngineError {
 impl std::error::Error for MobileEngineError {}
 
 /// Fixed renewal interval for one connection's spending budget.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum, serde::Serialize, serde::Deserialize)]
 pub enum MobileBudgetInterval {
     /// The budget never renews automatically.
     Never,
@@ -143,7 +143,7 @@ impl From<MobileFeePolicy> for FeePolicy {
 }
 
 /// Authenticated encryption negotiated for a new NWC connection.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum, serde::Serialize, serde::Deserialize)]
 pub enum MobileNwcEncryption {
     /// NIP-44 version 2 authenticated encryption.
     Nip44V2,
@@ -204,7 +204,8 @@ impl fmt::Debug for MobileConnectionRequest {
 }
 
 /// Non-sensitive lifecycle state for a durable NWC connection.
-#[derive(Clone, Eq, PartialEq, uniffi::Record)]
+#[derive(Clone, Eq, PartialEq, uniffi::Record, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MobileConnectionState {
     /// Stable wallet-local connection identifier.
     pub connection_id: String,
@@ -215,8 +216,13 @@ pub struct MobileConnectionState {
 }
 
 /// Authoritative non-sensitive connection fields stored by the shared engine.
-#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MobileConnectionPresentation {
+    pub payment_mode: String,
+    pub budget_basis: String,
+    /// Explicit foreground extra-cost policy; budget is principal reservation for wallet_managed.
+    pub fee_policy: String,
     /// Stable wallet-local identifier.
     pub connection_id: String,
     /// Authorized client public key.
@@ -442,8 +448,15 @@ const fn display_budget_interval(interval: MobileBudgetInterval) -> &'static str
 }
 
 /// Non-sensitive fields safe for a native NWA approval screen.
-#[derive(Clone, Eq, PartialEq, uniffi::Record)]
+#[derive(Clone, Eq, PartialEq, uniffi::Record, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MobileNwaRequestPresentation {
+    pub payment_mode: String,
+    pub budget_basis: String,
+    /// Explicit requested extra-cost policy: capped or wallet_managed.
+    pub fee_policy: String,
+    /// Untrusted bounded application metadata from the exact retained request.
+    pub metadata_json: Option<String>,
     /// Random identity binding approval to the retained request.
     pub request_id_hex: String,
     /// Requesting client's public key.
@@ -464,8 +477,10 @@ pub struct MobileNwaRequestPresentation {
     pub budget_interval: MobileBudgetInterval,
     /// Requested NWC methods in canonical order.
     pub methods: Vec<MobileNwcMethod>,
-    /// Optional request expiration timestamp.
+    /// Optional connection expiration timestamp.
     pub expires_at: Option<u64>,
+    /// Exclusive approval deadline, separate from the connection expiration.
+    pub request_expires_at_seconds: Option<u64>,
 }
 
 impl TryFrom<nwc_mobile::NwaRequestPresentation> for MobileNwaRequestPresentation {
@@ -514,7 +529,8 @@ pub struct MobileNwaSessionState {
 }
 
 /// Result of an atomically persisted NWA approval.
-#[derive(Clone, Eq, PartialEq, uniffi::Record)]
+#[derive(Clone, Eq, PartialEq, uniffi::Record, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MobileNwaApprovalResult {
     /// Durable connection lifecycle state.
     pub connection: MobileConnectionState,
@@ -605,10 +621,115 @@ impl fmt::Debug for MobileConnectionState {
 /// Long-lived, cross-process NWC engine opened over one shared SQLite ledger.
 #[derive(uniffi::Object)]
 pub struct MobileNwcEngine {
-    service: NwcMobileService,
+    pub(crate) service: NwcMobileService,
     wallet: Arc<dyn MobileWalletBackend>,
     relays: Arc<dyn MobileRelayTransport>,
     secrets: Arc<dyn MobileSecretProvider>,
+}
+
+impl MobileNwcEngine {
+    pub(crate) async fn publish_pending_info_events(
+        &self,
+        execution_milliseconds: u64,
+    ) -> Result<(), MobileEngineError> {
+        use nwc_mobile::{Clock, OperationContext, RelayTransport, SecretProvider};
+        let started = Instant::now();
+        let total = Duration::from_millis(execution_milliseconds);
+        let cancellation = MobileCancellation::new();
+        let host = MobileHostBridge::new(
+            self.wallet.clone(),
+            self.relays.clone(),
+            self.secrets.clone(),
+            cancellation.clone(),
+        );
+        let mut eligible = 0;
+        for view in self.service.connection_presentations()? {
+            let Some(StoredConnection::Active(connection)) = self.service.connection(view.id())?
+            else {
+                continue;
+            };
+            if connection.is_expired_at(SystemClock.now()) {
+                continue;
+            }
+            if self.service.ledger().foreground_payments_enabled()?
+                && view.methods().contains(&nwc_mobile::NwcMethod::PayInvoice)
+                && !self.service.ledger().has_foreground_binding(view.id())?
+            {
+                continue;
+            }
+            // Repair an approval interrupted before display/outbox metadata was saved.
+            let pending_relays = if view.display_name().is_none() {
+                self.service.set_connection_metadata(
+                    view.id(),
+                    nwc_mobile::ApplicationConnectionMetadata::new(
+                        "NWC connection",
+                        None,
+                        view.relay_urls().to_vec(),
+                    )
+                    .map_err(MobileEngineError::from)?,
+                )?;
+                view.relay_urls().to_vec()
+            } else {
+                view.pending_info_event_relays().to_vec()
+            };
+            if pending_relays.is_empty() {
+                continue;
+            }
+            if eligible == 32 {
+                break;
+            }
+            eligible += 1;
+            for relay in pending_relays.into_iter().take(8) {
+                let remaining = total.saturating_sub(started.elapsed());
+                if remaining < Duration::from_millis(100) {
+                    return Ok(());
+                }
+                let budget = OperationBudget::new(remaining)
+                    .map_err(|_| MobileEngineError::InvalidArgument)?;
+                let Ok(secret) = host
+                    .load_nwc_secret(
+                        connection.id(),
+                        OperationContext::new(budget, cancellation.as_ref()),
+                    )
+                    .await
+                else {
+                    continue;
+                };
+                if secret.public_key().ok().as_ref() != Some(connection.wallet_service_pubkey()) {
+                    continue;
+                }
+                let event = nwc_mobile::build_nwc_info_event(
+                    &secret,
+                    Some(connection.client_pubkey()),
+                    connection.policy().methods(),
+                    connection.encryption(),
+                    SystemClock.now(),
+                )
+                .map_err(|_| MobileEngineError::CorruptData)?;
+                let relay = nwc_mobile::SecureRelayUrl::parse(&relay)
+                    .map_err(|_| MobileEngineError::CorruptData)?;
+                let remaining = total.saturating_sub(started.elapsed());
+                if remaining < Duration::from_millis(100) {
+                    return Ok(());
+                }
+                let budget = OperationBudget::new(remaining)
+                    .map_err(|_| MobileEngineError::InvalidArgument)?;
+                if host
+                    .publish_event(
+                        &relay,
+                        &event,
+                        OperationContext::new(budget, cancellation.as_ref()),
+                    )
+                    .await
+                    .is_ok()
+                {
+                    self.service
+                        .acknowledge_nwc_info_event(view.id(), relay.as_str())?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[uniffi::export]
@@ -938,6 +1059,27 @@ fn mobile_nwa_presentation(
     request: nwc_mobile::NwaRequestPresentation,
 ) -> Result<MobileNwaRequestPresentation, MobileEngineError> {
     Ok(MobileNwaRequestPresentation {
+        payment_mode: if request.reusable_payments() {
+            "confirm_each"
+        } else {
+            "one_time"
+        }
+        .into(),
+        budget_basis: if request.reusable_payments() {
+            "invoice_principal"
+        } else if request.wallet_managed_fees() {
+            "wallet_managed_total"
+        } else {
+            "total"
+        }
+        .into(),
+        fee_policy: if request.wallet_managed_fees() {
+            "wallet_managed"
+        } else {
+            "capped"
+        }
+        .into(),
+        metadata_json: request.metadata_json().map(str::to_owned),
         request_id_hex: request.id_hex().to_owned(),
         client_public_key_hex: request.client_pubkey_hex().to_owned(),
         display_name: request.display_name().to_owned(),
@@ -955,6 +1097,9 @@ fn mobile_nwa_presentation(
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| MobileEngineError::CorruptData)?,
         expires_at: request.expires_at().map(nwc_mobile::UnixTimestamp::as_secs),
+        request_expires_at_seconds: request
+            .request_expires_at()
+            .map(nwc_mobile::UnixTimestamp::as_secs),
     })
 }
 
@@ -962,6 +1107,21 @@ fn mobile_connection_presentation(
     connection: nwc_mobile::ConnectionPresentation,
 ) -> Result<MobileConnectionPresentation, MobileEngineError> {
     Ok(MobileConnectionPresentation {
+        payment_mode: if connection.reusable_payments() {
+            "confirm_each"
+        } else {
+            "one_time"
+        }
+        .into(),
+        budget_basis: if connection.reusable_payments() {
+            "invoice_principal"
+        } else if connection.foreground_fee_policy() == "wallet_managed" {
+            "wallet_managed_total"
+        } else {
+            "total"
+        }
+        .into(),
+        fee_policy: connection.foreground_fee_policy().into(),
         connection_id: connection.id().to_owned(),
         client_public_key_hex: connection.client_pubkey_hex().to_owned(),
         wallet_service_public_key_hex: connection.wallet_service_pubkey_hex().to_owned(),
@@ -1035,9 +1195,9 @@ impl From<MobileServiceError> for MobileEngineError {
                 Self::NwaAuthorityEscalation
             }
             MobileServiceError::NwaApproval(NwaApprovalError::Registry(error)) => Self::from(error),
-            MobileServiceError::NwaApproval(NwaApprovalError::InvalidCallback) => {
-                Self::InvalidNwaRequest
-            }
+            MobileServiceError::NwaApproval(
+                NwaApprovalError::InvalidCallback | NwaApprovalError::Expired,
+            ) => Self::InvalidNwaRequest,
             MobileServiceError::Registration(WakeRegistrationError::DatabaseUnavailable) => {
                 Self::DatabaseUnavailable
             }

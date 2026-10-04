@@ -84,6 +84,12 @@ impl<'a> WakeEngine<'a> {
             return queued(QueueReason::Deadline);
         }
         let authorization_time = self.clock.now();
+        // Only byte-for-byte retained, already initiated foreground work can recover
+        // after expiry. This never grants new payment or direct-method authority.
+        let recovery = match self.ledger.is_foreground_recovery_wake(&wake) {
+            Ok(value) => value,
+            Err(_) => return queued(QueueReason::LedgerBusy),
+        };
         let relay = match SecureRelayUrl::parse(wake.relay()) {
             Ok(relay) => relay,
             Err(_) => return rejected(RejectionCode::InvalidWakePayload),
@@ -94,7 +100,8 @@ impl<'a> WakeEngine<'a> {
             authorization_time,
         ) {
             Ok(true) => {}
-            Ok(false) => return rejected(RejectionCode::RelayNotAllowed),
+            Ok(false) if !recovery => return rejected(RejectionCode::RelayNotAllowed),
+            Ok(false) => {}
             Err(_) => return queued(QueueReason::LedgerBusy),
         }
 
@@ -131,7 +138,7 @@ impl<'a> WakeEngine<'a> {
             Ok(None) => return rejected(RejectionCode::ConnectionUnavailable),
             Err(_) => return queued(QueueReason::LedgerBusy),
         };
-        if connection.is_expired_at(authorization_time) {
+        if connection.is_expired_at(authorization_time) && !recovery {
             return rejected(RejectionCode::ConnectionUnavailable);
         }
         if !connection.allows_relay(&relay) {
@@ -164,6 +171,7 @@ impl<'a> WakeEngine<'a> {
                 diagnostic_stage("terminal_response_replayed");
                 return self
                     .republish_terminal(
+                        validated.id(),
                         &connection,
                         &relay,
                         terminal.response_event_json(),
@@ -195,7 +203,7 @@ impl<'a> WakeEngine<'a> {
             }
         }
 
-        let request = {
+        let (request, purchase_json) = {
             let Some(context) = deadline.context(cancellation) else {
                 return self.release_to_application(&lease, QueueReason::Deadline);
             };
@@ -207,7 +215,35 @@ impl<'a> WakeEngine<'a> {
                 }
             };
             match validated.decrypt(&secret).and_then(|plaintext| {
+                let value: nostr::serde_json::Value =
+                    nostr::serde_json::from_str(plaintext.as_json())
+                        .map_err(|_| crate::NostrEventError::MalformedEvent)?;
+                if value["method"] == "authorize_browser"
+                    && self
+                        .ledger
+                        .is_reusable_foreground(connection.id().as_str())
+                        .unwrap_or(false)
+                {
+                    self.ledger
+                        .parse_browser_pairing_challenge(
+                            &connection,
+                            &event_json,
+                            &secret,
+                            self.clock.now(),
+                        )
+                        .map_err(|_| crate::NostrEventError::MalformedEvent)?;
+                    return Ok((None, None));
+                }
                 Request::from_json(plaintext.as_json())
+                    .map(|request| {
+                        (
+                            Some(request),
+                            value
+                                .get("params")
+                                .and_then(|p| p.get("purchase"))
+                                .map(|p| p.to_string()),
+                        )
+                    })
                     .map_err(|_| crate::NostrEventError::MalformedEvent)
             }) {
                 Ok(request) => request,
@@ -217,6 +253,11 @@ impl<'a> WakeEngine<'a> {
             }
         };
 
+        let Some(request) = request else {
+            // Browser repair is never acknowledged automatically. The explicit
+            // foreground challenge API separately verifies and approves it.
+            return self.release_to_application(&lease, QueueReason::UnsupportedInBackground);
+        };
         diagnostic_request(
             "request_parsed",
             request.method,
@@ -268,6 +309,19 @@ impl<'a> WakeEngine<'a> {
             let RequestParams::PayInvoice(payment) = request.params else {
                 return self.reject_claim(&lease, RejectionCode::InvalidRequest);
             };
+            match self.ledger.foreground_payments_enabled() {
+                Ok(true) => {
+                    if self
+                        .ledger
+                        .retain_foreground_wake(&wake, &event_json)
+                        .is_err()
+                    {
+                        return self.release_to_application(&lease, QueueReason::LedgerBusy);
+                    }
+                }
+                Ok(false) => {}
+                Err(_) => return self.release_to_application(&lease, QueueReason::LedgerBusy),
+            }
             return self
                 .execute_payment(
                     &lease,
@@ -275,6 +329,7 @@ impl<'a> WakeEngine<'a> {
                     &validated,
                     &relay,
                     payment,
+                    purchase_json.as_deref(),
                     &deadline,
                     cancellation,
                 )
@@ -362,6 +417,7 @@ impl<'a> WakeEngine<'a> {
         validated: &crate::ValidatedNwcEvent,
         relay: &SecureRelayUrl,
         payment: nip47::PayInvoiceRequest,
+        purchase_json: Option<&str>,
         deadline: &OperationDeadline,
         cancellation: &dyn CancellationSignal,
     ) -> WakeDisposition {
@@ -448,6 +504,68 @@ impl<'a> WakeEngine<'a> {
                     .await;
             }
         };
+        if self.ledger.foreground_payments_enabled().unwrap_or(true)
+            && !self
+                .ledger
+                .has_foreground_binding(connection.id().as_str())
+                .unwrap_or(false)
+        {
+            return self.release_to_application(lease, QueueReason::UnsupportedInBackground);
+        }
+        let reusable = self
+            .ledger
+            .is_reusable_foreground(connection.id().as_str())
+            .unwrap_or(false);
+        if reusable
+            && purchase_json.is_none_or(|json| {
+                self.ledger
+                    .retain_purchase(
+                        validated.id(),
+                        json,
+                        quote.payment_hash(),
+                        quote.principal(),
+                    )
+                    .is_err()
+            })
+        {
+            return self
+                .payment_error(
+                    lease,
+                    connection,
+                    validated,
+                    relay,
+                    ErrorCode::Restricted,
+                    RejectionCode::InvalidRequest,
+                    deadline,
+                    cancellation,
+                )
+                .await;
+        }
+        if !reusable
+            && self.ledger.foreground_payments_enabled().unwrap_or(true)
+            && !self
+                .ledger
+                .matches_foreground_binding(
+                    connection.id().as_str(),
+                    quote.payment_hash(),
+                    quote.principal(),
+                    &payment.invoice,
+                )
+                .unwrap_or(false)
+        {
+            return self
+                .payment_error(
+                    lease,
+                    connection,
+                    validated,
+                    relay,
+                    ErrorCode::Restricted,
+                    RejectionCode::InvalidRequest,
+                    deadline,
+                    cancellation,
+                )
+                .await;
+        }
         let Some(principal_sat) = msat_to_sat_ceil(quote.principal().as_msat()) else {
             return self
                 .payment_error(
@@ -475,6 +593,13 @@ impl<'a> WakeEngine<'a> {
                     cancellation,
                 )
                 .await;
+        }
+        if self
+            .ledger
+            .quote_foreground_payment(validated.id(), &payment.invoice, quote.principal())
+            .is_err()
+        {
+            return self.release_to_application(lease, QueueReason::LedgerBusy);
         }
         let reservation = match self.ledger.reserve_payment(
             validated.id(),
@@ -569,6 +694,37 @@ impl<'a> WakeEngine<'a> {
         deadline: &OperationDeadline,
         cancellation: &dyn CancellationSignal,
     ) -> WakeDisposition {
+        match self.ledger.foreground_payment_status(validated.id()) {
+            Ok(Some(PaymentStatus::Pending)) => {
+                return self.release_to_application(lease, QueueReason::UnsupportedInBackground);
+            }
+            Ok(Some(status)) => {
+                // Rejection before submission still needs a terminal accounting marker.
+                if !attempt.was_initiated()
+                    && self
+                        .ledger
+                        .mark_payment_initiated(attempt.payment_hash(), self.clock.now())
+                        .is_err()
+                {
+                    return self.release_to_application(lease, QueueReason::LedgerBusy);
+                }
+                return self
+                    .finish_payment_status(
+                        lease,
+                        connection,
+                        validated,
+                        relay,
+                        invoice,
+                        attempt.payment_hash(),
+                        status,
+                        deadline,
+                        cancellation,
+                    )
+                    .await;
+            }
+            Ok(None) => {}
+            Err(_) => return self.release_to_application(lease, QueueReason::LedgerBusy),
+        }
         if attempt.has_ambiguous_legacy_initiation() {
             return self
                 .payment_error(
@@ -983,7 +1139,17 @@ impl<'a> WakeEngine<'a> {
                     || parse_lookup_request(request).map_err(HostError::new),
                     |invoice| Ok(InvoiceLookup::PaymentHash(invoice.payment_hash().clone())),
                 )?;
-                let transaction = self.wallet.lookup_invoice(lookup, context).await?;
+                let transaction = if self
+                    .ledger
+                    .foreground_payments_enabled()
+                    .map_err(|_| HostError::new(HostErrorKind::Unavailable))?
+                {
+                    self.ledger
+                        .lookup_foreground_payment(connection.id().as_str(), &lookup)
+                        .map_err(|_| HostError::new(HostErrorKind::Unavailable))?
+                } else {
+                    self.wallet.lookup_invoice(lookup, context).await?
+                };
                 let response = transaction
                     .or_else(|| {
                         tracked
@@ -1076,7 +1242,7 @@ impl<'a> WakeEngine<'a> {
         let notification = request_method.map_or(NotificationHint::Completed, |method| {
             NotificationHint::Request { method }
         });
-        let response_json = response.as_json();
+        let mut response_json = response.as_json();
         let Some(context) = deadline.context(cancellation) else {
             return self.release_to_application(lease, QueueReason::Deadline);
         };
@@ -1086,6 +1252,70 @@ impl<'a> WakeEngine<'a> {
                 return self.release_to_application(lease, QueueReason::SecureStorageUnavailable)
             }
         };
+        if response.error.is_none() && response.result_type == Method::GetInfo {
+            match self
+                .ledger
+                .connection_payer_metadata(connection.id().as_str())
+            {
+                Ok(Some(metadata)) => {
+                    let Ok(mut value) =
+                        nostr::serde_json::from_str::<nostr::serde_json::Value>(&response_json)
+                    else {
+                        return self.release_to_application(lease, QueueReason::LedgerBusy);
+                    };
+                    if let Some(username) = metadata.payer_username() {
+                        value["result"]["payer_username"] = username.into();
+                    }
+                    if let Some(name) = metadata.wallet_name() {
+                        value["result"]["alias"] = name.into();
+                    }
+                    match self
+                        .ledger
+                        .connection_address(connection.id().as_str(), &secret)
+                    {
+                        Ok(Some(address)) => value["result"]["payer_address"] = address,
+                        Ok(None) => {}
+                        Err(_) => {
+                            return self.release_to_application(lease, QueueReason::LedgerBusy)
+                        }
+                    }
+                    response_json = value.to_string();
+                }
+                Ok(None) => {}
+                Err(_) => return self.release_to_application(lease, QueueReason::LedgerBusy),
+            }
+        }
+        if response.error.is_none()
+            && self
+                .ledger
+                .is_reusable_foreground(connection.id().as_str())
+                .unwrap_or(false)
+        {
+            let mut value: nostr::serde_json::Value =
+                match nostr::serde_json::from_str(&response_json) {
+                    Ok(value) => value,
+                    Err(_) => return self.reject_claim(lease, RejectionCode::InvalidRequest),
+                };
+            if response.result_type == Method::GetInfo {
+                let result = &mut value["result"];
+                result["payment_mode"] = "confirm_each".into();
+                result["budget_basis"] = "invoice_principal".into();
+                result["fee_policy"] = "wallet_managed".into();
+                result["purchase_versions"] = nostr::serde_json::json!([1]);
+                result["browser_pairing_versions"] = nostr::serde_json::json!([1]);
+                result["budget_limit_msats"] = (connection.policy().budget().limit_sat() * 1000)
+                    .to_string()
+                    .into();
+                result["budget_renewal"] = "monthly".into();
+                result["expires_at"] = connection.expires_at().map(|t| t.as_secs()).into();
+            } else if response.result_type == Method::PayInvoice {
+                match self.ledger.purchase_response(validated.id(), &secret) {
+                    Ok(Some(purchase)) => value["result"]["purchase"] = purchase,
+                    _ => return self.release_to_application(lease, QueueReason::LedgerBusy),
+                }
+            }
+            response_json = value.to_string();
+        }
         let event_json =
             match validated.build_response_event(&secret, &response_json, self.clock.now()) {
                 Ok(event) => event,
@@ -1114,6 +1344,7 @@ impl<'a> WakeEngine<'a> {
             Err(error) => return self.completion_failed(lease, error),
         }
         self.republish_terminal(
+            validated.id(),
             connection,
             relay,
             Some(&event_json),
@@ -1124,8 +1355,10 @@ impl<'a> WakeEngine<'a> {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn republish_terminal(
         &self,
+        event_id: &crate::EventId,
         connection: &ActiveConnection,
         relay: &SecureRelayUrl,
         event_json: Option<&str>,
@@ -1146,7 +1379,16 @@ impl<'a> WakeEngine<'a> {
             return retry(ENGINE_RETRY_DELAY, RetryReason::ResponsePublishFailed);
         };
         match self.relays.publish_event(relay, event_json, context).await {
-            Ok(()) => completed(notification),
+            Ok(()) => {
+                if self
+                    .ledger
+                    .acknowledge_foreground_response(event_id)
+                    .is_err()
+                {
+                    return queued(QueueReason::LedgerBusy);
+                }
+                completed(notification)
+            }
             Err(_) => {
                 self.record_diagnostic(WakeDiagnosticCode::ResponsePublishFailed);
                 retry(ENGINE_RETRY_DELAY, RetryReason::ResponsePublishFailed)
@@ -1923,12 +2165,15 @@ mod tests {
     }
 
     fn request_event(request: Request, created_at: u64) -> Event {
+        request_json_event(&request.as_json(), created_at)
+    }
+    fn request_json_event(request: &str, created_at: u64) -> Event {
         let client = client_keys();
         let wallet = wallet_keys();
         let encrypted = nostr::nips::nip44::encrypt(
             client.secret_key(),
             &wallet.public_key(),
-            request.as_json(),
+            request,
             nostr::nips::nip44::Version::V2,
         )
         .expect("encrypt request");
@@ -2567,6 +2812,1092 @@ mod tests {
             ledger.load_connection(active.id()).expect("connection"),
             Some(crate::StoredConnection::Tombstoned(_))
         ));
+    }
+
+    #[test]
+    fn rejected_payment_response_recovers_after_expiry_without_spending() {
+        use nostr::hashes::{sha256, Hash};
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).unwrap();
+        let connection = insert_connection(&ledger);
+        ledger.enable_foreground_payments().unwrap();
+        let preimage = crate::PaymentPreimage::from_bytes([7; 32]);
+        let hash = PaymentHash::from_bytes(sha256::Hash::hash(preimage.as_bytes()).to_byte_array());
+        ledger
+            .bind_foreground_payment(connection.id().as_str(), "wallet-a", &hash, 600_000, 10)
+            .unwrap();
+        let wallet = TestWallet::default();
+        *wallet.quote.lock().unwrap() = Some(PaymentQuote::new(
+            hash.clone(),
+            AmountMsat::from_msat(600_000),
+        ));
+        let relay = TestRelay::default();
+        let secrets = TestSecrets::wallet();
+        let before = FixedClock::new(100);
+        let request = request_event(
+            Request::pay_invoice(nip47::PayInvoiceRequest::new("lnbc-expiring")),
+            100,
+        );
+        let input = wake(&request, RELAY, true);
+        let event = input.event_id().clone();
+        assert!(matches!(
+            execute(&engine(&ledger, &wallet, &relay, &secrets, &before), input),
+            WakeDisposition::QueuedForApplication { .. }
+        ));
+        ledger
+            .reject_foreground_payment(&event, false, UnixTimestamp::from_secs(100))
+            .unwrap();
+        ledger
+            .lock_connection()
+            .unwrap()
+            .execute(
+                "UPDATE connections SET expires_at=101 WHERE connection_id=?1",
+                [connection.id().as_str()],
+            )
+            .unwrap();
+        let after = FixedClock::new(102);
+        relay.fail_next_publish.store(true, Ordering::SeqCst);
+        let retained = ledger
+            .foreground_payment_wake(&event, UnixTimestamp::from_secs(102))
+            .unwrap();
+        assert!(matches!(
+            execute(
+                &engine(&ledger, &wallet, &relay, &secrets, &after),
+                retained
+            ),
+            WakeDisposition::RetryAfter { .. }
+        ));
+        assert_eq!(
+            ledger
+                .foreground_recovery_events(connection.id().as_str())
+                .unwrap(),
+            vec![event.clone()]
+        );
+        let retained = ledger
+            .foreground_payment_wake(&event, UnixTimestamp::from_secs(102))
+            .unwrap();
+        assert!(matches!(
+            execute(
+                &engine(&ledger, &wallet, &relay, &secrets, &after),
+                retained
+            ),
+            WakeDisposition::Completed { .. }
+        ));
+        assert!(ledger
+            .foreground_recovery_events(connection.id().as_str())
+            .unwrap()
+            .is_empty());
+        assert_eq!(wallet.start_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn address_only_consent_is_encrypted_and_immutable() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).unwrap();
+        let connection = insert_connection(&ledger);
+        ledger
+            .set_connection_payer_metadata(
+                connection.id().as_str(),
+                &crate::ConnectionPayerMetadata::new(None, None).unwrap(),
+            )
+            .unwrap();
+        assert!(ledger
+            .connection_payer_metadata(connection.id().as_str())
+            .unwrap()
+            .is_none());
+        let secret = crate::NwcSecretKey::from_bytes(
+            wallet_keys()
+                .secret_key()
+                .as_secret_bytes()
+                .try_into()
+                .unwrap(),
+        )
+        .unwrap();
+        let address = nostr::serde_json::json!({"line1":"123 Example Street","city":"Austin","zipCode":"78701","countryCode":"US"});
+        ledger
+            .set_connection_address(connection.id().as_str(), &address.to_string(), &secret)
+            .unwrap();
+        let reopened = WakeLedger::open(&database.path).unwrap();
+        assert_eq!(
+            reopened
+                .connection_address(connection.id().as_str(), &secret)
+                .unwrap(),
+            Some(address.clone())
+        );
+        assert!(reopened
+            .connection_payer_metadata(connection.id().as_str())
+            .unwrap()
+            .unwrap()
+            .payer_username()
+            .is_none());
+        assert!(reopened
+            .set_connection_address(connection.id().as_str(), &address.to_string(), &secret)
+            .is_err());
+    }
+
+    #[test]
+    fn expired_authority_only_recovers_exact_previously_initiated_foreground_payment() {
+        use nostr::hashes::{sha256, Hash};
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).unwrap();
+        let connection = insert_connection(&ledger);
+        ledger.enable_foreground_payments().unwrap();
+        let preimage = crate::PaymentPreimage::from_bytes([7; 32]);
+        let hash = PaymentHash::from_bytes(sha256::Hash::hash(preimage.as_bytes()).to_byte_array());
+        ledger
+            .bind_foreground_payment(connection.id().as_str(), "wallet-a", &hash, 600_000, 10)
+            .unwrap();
+        let wallet = TestWallet::default();
+        *wallet.quote.lock().unwrap() = Some(PaymentQuote::new(
+            hash.clone(),
+            AmountMsat::from_msat(600_000),
+        ));
+        let relay = TestRelay::default();
+        let secrets = TestSecrets::wallet();
+        let before = FixedClock::new(100);
+        let request = request_event(
+            Request::pay_invoice(nip47::PayInvoiceRequest::new("lnbc-expiring")),
+            100,
+        );
+        let input = wake(&request, RELAY, true);
+        let event = input.event_id().clone();
+        assert!(matches!(
+            execute(&engine(&ledger, &wallet, &relay, &secrets, &before), input),
+            WakeDisposition::QueuedForApplication { .. }
+        ));
+        ledger
+            .lock_connection()
+            .unwrap()
+            .execute(
+                "UPDATE connections SET expires_at=101 WHERE connection_id=?1",
+                [connection.id().as_str()],
+            )
+            .unwrap();
+        let after = FixedClock::new(102);
+        // Retention alone does not authorize work after expiry.
+        assert!(matches!(
+            execute(
+                &engine(&ledger, &wallet, &relay, &secrets, &after),
+                wake(&request, RELAY, true)
+            ),
+            WakeDisposition::Rejected { .. }
+        ));
+        ledger
+            .begin_foreground_payment(&event, "wallet-a", UnixTimestamp::from_secs(100))
+            .unwrap();
+        assert_eq!(
+            ledger
+                .foreground_recovery_events(connection.id().as_str())
+                .unwrap(),
+            vec![event.clone()]
+        );
+        let fresh = request_event(
+            Request::pay_invoice(nip47::PayInvoiceRequest::new("lnbc-expiring")),
+            102,
+        );
+        assert!(matches!(
+            execute(
+                &engine(&ledger, &wallet, &relay, &secrets, &after),
+                wake(&fresh, RELAY, true)
+            ),
+            WakeDisposition::Rejected { .. }
+        ));
+        assert!(matches!(
+            execute(
+                &engine(&ledger, &wallet, &relay, &secrets, &after),
+                ledger
+                    .foreground_payment_wake(&event, UnixTimestamp::from_secs(102))
+                    .unwrap()
+            ),
+            WakeDisposition::QueuedForApplication { .. }
+        ));
+        let fresh_info = request_event(Request::get_info(), 102);
+        assert!(matches!(
+            execute(
+                &engine(&ledger, &wallet, &relay, &secrets, &after),
+                wake(&fresh_info, RELAY, true)
+            ),
+            WakeDisposition::Rejected { .. }
+        ));
+        assert!(ledger
+            .begin_foreground_payment(&event, "wallet-a", UnixTimestamp::from_secs(102))
+            .is_err());
+        ledger
+            .complete_foreground_payment(
+                &event,
+                &preimage,
+                AmountMsat::from_msat(600_000),
+                AmountMsat::from_msat(1000),
+                UnixTimestamp::from_secs(102),
+            )
+            .unwrap();
+        relay.fail_next_publish.store(true, Ordering::SeqCst);
+        let retained = ledger
+            .foreground_payment_wake(&event, UnixTimestamp::from_secs(102))
+            .unwrap();
+        assert!(matches!(
+            execute(
+                &engine(&ledger, &wallet, &relay, &secrets, &after),
+                retained
+            ),
+            WakeDisposition::RetryAfter { .. }
+        ));
+        assert_eq!(
+            ledger
+                .foreground_recovery_events(connection.id().as_str())
+                .unwrap(),
+            vec![event.clone()]
+        );
+        let retained = ledger
+            .foreground_payment_wake(&event, UnixTimestamp::from_secs(102))
+            .unwrap();
+        assert!(matches!(
+            execute(
+                &engine(&ledger, &wallet, &relay, &secrets, &after),
+                retained
+            ),
+            WakeDisposition::Completed { .. }
+        ));
+        assert!(ledger
+            .foreground_recovery_events(connection.id().as_str())
+            .unwrap()
+            .is_empty());
+        assert_eq!(wallet.start_calls.load(Ordering::SeqCst), 0);
+        let retained = ledger
+            .foreground_payment_wake(&event, UnixTimestamp::from_secs(102))
+            .unwrap();
+        assert!(matches!(
+            execute(
+                &engine(&ledger, &wallet, &relay, &secrets, &after),
+                retained
+            ),
+            WakeDisposition::Completed { .. }
+        ));
+    }
+
+    #[test]
+    fn reusable_budget_reservations_are_atomic_across_concurrent_requests() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).unwrap();
+        let initial = insert_connection(&ledger);
+        ledger.enable_foreground_payments().unwrap();
+        ledger.lock_connection().unwrap().execute("UPDATE connections SET foreground_fee_policy='wallet_managed',budget_interval='monthly',expires_at=1000 WHERE connection_id=?1",[initial.id().as_str()]).unwrap();
+        ledger
+            .bind_reusable_foreground_wallet(initial.id().as_str(), "wallet-a")
+            .unwrap();
+        let connection = ledger
+            .load_active_connection(initial.id())
+            .unwrap()
+            .unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        let results = std::thread::scope(|scope| {
+            let threads = [1_u8, 2].map(|id| {
+                let path = &database.path;
+                let connection = &connection;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    let local = WakeLedger::open(path).unwrap();
+                    barrier.wait();
+                    local.reserve_payment(
+                        &crate::EventId::from_bytes([id; 32]),
+                        &PaymentHash::from_bytes([id; 32]),
+                        connection,
+                        600,
+                        UnixTimestamp::from_secs(100),
+                    )
+                })
+            });
+            threads.map(|thread| thread.join().unwrap())
+        });
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(PaymentAccountingError::BudgetExceeded)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            ledger
+                .lock_connection()
+                .unwrap()
+                .query_row("SELECT SUM(used_sat) FROM budget_periods", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            600
+        );
+    }
+
+    #[test]
+    fn browser_pairing_requires_explicit_approval_and_never_changes_authority() {
+        use nostr::serde_json::json;
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).unwrap();
+        let initial = insert_connection(&ledger);
+        ledger.enable_foreground_payments().unwrap();
+        ledger.lock_connection().unwrap().execute("UPDATE connections SET foreground_fee_policy='wallet_managed',budget_interval='monthly',expires_at=1000 WHERE connection_id=?1",[initial.id().as_str()]).unwrap();
+        ledger
+            .bind_reusable_foreground_wallet(initial.id().as_str(), "wallet-a")
+            .unwrap();
+        let connection = ledger
+            .load_active_connection(initial.id())
+            .unwrap()
+            .unwrap();
+        ledger
+            .reserve_payment(
+                &crate::EventId::from_bytes([77; 32]),
+                &PaymentHash::from_bytes([77; 32]),
+                &connection,
+                300,
+                UnixTimestamp::from_secs(100),
+            )
+            .unwrap();
+        let secret = crate::NwcSecretKey::from_bytes(
+            wallet_keys()
+                .secret_key()
+                .as_secret_bytes()
+                .try_into()
+                .unwrap(),
+        )
+        .unwrap();
+        let params = json!({"version":1,"challenge_id":"challenge-one","nonce":"ab".repeat(32),"audience":"https://pay.example","expires_at":200,"client_pubkey":client_keys().public_key().to_hex(),"wallet_pubkey":wallet_keys().public_key().to_hex()});
+        let event = request_json_event(
+            &json!({"method":"authorize_browser","params":params}).to_string(),
+            100,
+        );
+        let wallet = TestWallet::default();
+        let relay = TestRelay::default();
+        let secrets = TestSecrets::wallet();
+        let clock = FixedClock::new(100);
+        assert!(matches!(
+            execute(
+                &engine(&ledger, &wallet, &relay, &secrets, &clock),
+                wake(&event, RELAY, true)
+            ),
+            WakeDisposition::QueuedForApplication { .. }
+        ));
+        assert!(relay.published.lock().unwrap().is_empty());
+        assert_eq!(
+            ledger.browser_pairing_connection("challenge-one").unwrap(),
+            connection.id().as_str()
+        );
+        let details = ledger
+            .parse_browser_pairing_challenge(
+                &connection,
+                &event.as_json(),
+                &secret,
+                UnixTimestamp::from_secs(100),
+            )
+            .unwrap();
+        assert_eq!(details.nonce, "ab".repeat(32));
+        let proof = ledger
+            .approve_browser_pairing(
+                &connection,
+                "challenge-one",
+                &secret,
+                UnixTimestamp::from_secs(100),
+            )
+            .unwrap();
+        assert_eq!(
+            proof,
+            ledger
+                .approve_browser_pairing(
+                    &connection,
+                    "challenge-one",
+                    &secret,
+                    UnixTimestamp::from_secs(101)
+                )
+                .unwrap()
+        );
+        let response = Event::from_json(&proof).unwrap();
+        response.verify().unwrap();
+        let plain = nostr::nips::nip44::decrypt(
+            client_keys().secret_key(),
+            &wallet_keys().public_key(),
+            &response.content,
+        )
+        .unwrap();
+        let value: nostr::serde_json::Value = nostr::serde_json::from_str(&plain).unwrap();
+        assert_eq!(value["result"]["approved"], true);
+        assert_eq!(value["result"]["nonce"], params["nonce"]);
+        assert_eq!(value["result"]["audience"], params["audience"]);
+        assert!(ledger
+            .approve_browser_pairing(
+                &connection,
+                "challenge-one",
+                &secret,
+                UnixTimestamp::from_secs(200)
+            )
+            .is_err());
+        let mut swapped = params.clone();
+        swapped["audience"] = "https://attacker.example".into();
+        let other = request_json_event(
+            &json!({"method":"authorize_browser","params":swapped}).to_string(),
+            100,
+        );
+        assert!(ledger
+            .parse_browser_pairing_challenge(
+                &connection,
+                &other.as_json(),
+                &secret,
+                UnixTimestamp::from_secs(100)
+            )
+            .is_err());
+        assert_eq!(
+            ledger
+                .lock_connection()
+                .unwrap()
+                .query_row("SELECT SUM(used_sat) FROM budget_periods", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            300
+        );
+        let unchanged = ledger
+            .load_active_connection(connection.id())
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.revision(), connection.revision());
+        assert_eq!(unchanged.policy(), connection.policy());
+        assert_eq!(unchanged.expires_at(), connection.expires_at());
+        ledger
+            .tombstone_connection(
+                connection.id(),
+                connection.revision(),
+                UnixTimestamp::from_secs(110),
+            )
+            .unwrap();
+        assert!(ledger
+            .approve_browser_pairing(
+                &connection,
+                "challenge-one",
+                &secret,
+                UnixTimestamp::from_secs(111)
+            )
+            .is_err());
+        assert_eq!(wallet.start_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn payer_metadata_upgrade_keeps_existing_authority_without_inventing_disclosure() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).unwrap();
+        let connection = insert_connection(&ledger);
+        ledger
+            .lock_connection()
+            .unwrap()
+            .execute_batch("DROP TABLE connection_payer_metadata; PRAGMA user_version=17;")
+            .unwrap();
+        drop(ledger);
+        let upgraded = WakeLedger::open(&database.path).unwrap();
+        assert!(upgraded
+            .connection_payer_metadata(connection.id().as_str())
+            .unwrap()
+            .is_none());
+        let rows: i64 = upgraded
+            .lock_connection()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM connections WHERE connection_id=?1 AND status='active'",
+                [connection.id().as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1);
+        upgraded
+            .set_connection_payer_metadata(
+                connection.id().as_str(),
+                &crate::ConnectionPayerMetadata::new(Some("alice".into()), Some("Lexe".into()))
+                    .unwrap(),
+            )
+            .unwrap();
+        drop(upgraded);
+        let reopened = WakeLedger::open(&database.path).unwrap();
+        assert_eq!(
+            reopened
+                .connection_payer_metadata(connection.id().as_str())
+                .unwrap()
+                .unwrap()
+                .payer_username(),
+            Some("alice")
+        );
+    }
+
+    #[test]
+    fn reusable_purchases_keep_consent_and_charge_only_requested_principal() {
+        use crate::PaymentPreimage;
+        use nostr::hashes::{sha256, Hash};
+        use nostr::serde_json::json;
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).unwrap();
+        let connection = insert_connection(&ledger);
+        ledger.enable_foreground_payments().unwrap();
+        ledger.lock_connection().unwrap().execute("UPDATE connections SET foreground_fee_policy='wallet_managed',budget_interval='monthly',budget_limit_sat=1200,expires_at=1000 WHERE connection_id=?1",[connection.id().as_str()]).unwrap();
+        ledger
+            .bind_reusable_foreground_wallet(connection.id().as_str(), "wallet-a")
+            .unwrap();
+        let wallet = TestWallet::default();
+        let relay = TestRelay::default();
+        let secrets = TestSecrets::wallet();
+        let secret = crate::NwcSecretKey::from_bytes(
+            wallet_keys()
+                .secret_key()
+                .as_secret_bytes()
+                .try_into()
+                .unwrap(),
+        )
+        .unwrap();
+        let clock = FixedClock::new(100);
+        let reopened = WakeLedger::open(&database.path).unwrap();
+        for sequence in 0..2_u8 {
+            let now = 100;
+            let preimage = PaymentPreimage::from_bytes([sequence + 7; 32]);
+            let hash =
+                PaymentHash::from_bytes(sha256::Hash::hash(preimage.as_bytes()).to_byte_array());
+            *wallet.quote.lock().unwrap() = Some(PaymentQuote::new(
+                hash.clone(),
+                AmountMsat::from_msat(600_000),
+            ));
+            let purchase = json!({"version":1,"id":format!("purchase-{sequence}"),"merchant":{"id":"merchant","name":"Merchant","origin":"https://merchant.example"},"invoice_binding":{"payment_hash":hash.to_hex(),"principal_msats":"600000"},"requested_customer_fields":[{"field":"email","required":true}]});
+            let request=request_json_event(&json!({"method":"pay_invoice","params":{"invoice":format!("lnbc-reusable-{sequence}"),"purchase":purchase}}).to_string(),now);
+            let input = wake(&request, RELAY, true);
+            let event = input.event_id().clone();
+            assert!(matches!(
+                execute(&engine(&ledger, &wallet, &relay, &secrets, &clock), input),
+                WakeDisposition::QueuedForApplication { .. }
+            ));
+            assert!(ledger
+                .begin_foreground_payment(&event, "wallet-a", UnixTimestamp::from_secs(now))
+                .is_err());
+            assert!(ledger
+                .begin_foreground_payment_with_consent(
+                    &event,
+                    "wallet-a",
+                    "{}",
+                    &secret,
+                    UnixTimestamp::from_secs(now)
+                )
+                .is_err());
+            assert!(ledger
+                .begin_foreground_payment_with_consent(
+                    &event,
+                    "wallet-b",
+                    r#"{"email":"payer@example.com"}"#,
+                    &secret,
+                    UnixTimestamp::from_secs(now)
+                )
+                .is_err());
+            assert!(ledger
+                .begin_foreground_payment_with_consent(
+                    &event,
+                    "wallet-a",
+                    r#"{"email":"payer@example.com","phone":"+15555550123"}"#,
+                    &secret,
+                    UnixTimestamp::from_secs(now)
+                )
+                .is_err());
+            ledger
+                .begin_foreground_payment_with_consent(
+                    &event,
+                    "wallet-a",
+                    r#"{"email":"payer@example.com"}"#,
+                    &secret,
+                    UnixTimestamp::from_secs(now),
+                )
+                .unwrap();
+            let cipher: String = ledger
+                .lock_connection()
+                .unwrap()
+                .query_row(
+                    "SELECT consent_ciphertext FROM foreground_payment_requests WHERE event_id=?1",
+                    [event.as_bytes().as_slice()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(!cipher.contains("payer@example.com"));
+            assert!(reopened
+                .begin_foreground_payment_with_consent(
+                    &event,
+                    "wallet-a",
+                    r#"{"email":"changed@example.com"}"#,
+                    &secret,
+                    UnixTimestamp::from_secs(now)
+                )
+                .is_err());
+            reopened
+                .complete_foreground_payment(
+                    &event,
+                    &preimage,
+                    AmountMsat::from_msat(650_000),
+                    AmountMsat::from_msat(20_000),
+                    UnixTimestamp::from_secs(now),
+                )
+                .unwrap();
+            assert_eq!(
+                reopened
+                    .load_payment_attempt(&hash)
+                    .unwrap()
+                    .unwrap()
+                    .charged_sat(),
+                Some(600)
+            );
+            let retained = reopened
+                .foreground_payment_wake(&event, UnixTimestamp::from_secs(now))
+                .unwrap();
+            assert!(matches!(
+                execute(
+                    &engine(&reopened, &wallet, &relay, &secrets, &clock),
+                    retained
+                ),
+                WakeDisposition::Completed { .. }
+            ));
+            let published = relay.published.lock().unwrap();
+            let response = Event::from_json(published.last().unwrap()).unwrap();
+            let plain = nostr::nips::nip44::decrypt(
+                client_keys().secret_key(),
+                &wallet_keys().public_key(),
+                &response.content,
+            )
+            .unwrap();
+            let value: nostr::serde_json::Value = nostr::serde_json::from_str(&plain).unwrap();
+            assert_eq!(
+                value["result"]["purchase"],
+                json!({"id":format!("purchase-{sequence}"),"customer_data":{"email":"payer@example.com"}})
+            );
+            assert_eq!(value["result"]["fees_paid"], 20_000);
+            drop(published);
+        }
+        assert_eq!(wallet.start_calls.load(Ordering::SeqCst), 0);
+        let used: i64 = ledger
+            .lock_connection()
+            .unwrap()
+            .query_row("SELECT SUM(used_sat) FROM budget_periods", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(used, 1200);
+        assert!(ledger
+            .reserve_payment(
+                &crate::EventId::from_bytes([88; 32]),
+                &PaymentHash::from_bytes([88; 32]),
+                &connection,
+                1,
+                UnixTimestamp::from_secs(102)
+            )
+            .is_err());
+        assert!(ledger
+            .connection_payer_metadata(connection.id().as_str())
+            .unwrap()
+            .is_none());
+        ledger
+            .set_connection_payer_metadata(
+                connection.id().as_str(),
+                &crate::ConnectionPayerMetadata::new(Some("alice".into()), Some("My Lexe".into()))
+                    .unwrap(),
+            )
+            .unwrap();
+        let address = nostr::serde_json::json!({"line1":"123 Example Street","city":"Austin","zipCode":"78701","countryCode":"US"});
+        assert!(ledger
+            .connection_address(connection.id().as_str(), &secret)
+            .unwrap()
+            .is_none());
+        ledger
+            .set_connection_address(connection.id().as_str(), &address.to_string(), &secret)
+            .unwrap();
+        assert!(ledger
+            .set_connection_address(connection.id().as_str(), &address.to_string(), &secret)
+            .is_err());
+        assert!(ledger
+            .connection_address("other-client", &secret)
+            .unwrap()
+            .is_none());
+        let cipher: String = ledger
+            .lock_connection()
+            .unwrap()
+            .query_row(
+                "SELECT address_ciphertext FROM connection_payer_metadata WHERE connection_id=?1",
+                [connection.id().as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!cipher.contains("Example"));
+        let reopened_identity = WakeLedger::open(&database.path).unwrap();
+        let identity = reopened_identity
+            .connection_payer_metadata(connection.id().as_str())
+            .unwrap()
+            .unwrap();
+        assert_eq!(identity.payer_username(), Some("alice"));
+        assert!(reopened_identity
+            .connection_payer_metadata("other-client")
+            .unwrap()
+            .is_none());
+        assert!(ledger
+            .set_connection_payer_metadata(
+                connection.id().as_str(),
+                &crate::ConnectionPayerMetadata::new(Some("bob".into()), None).unwrap()
+            )
+            .is_err());
+        let info = request_event(Request::get_info(), 100);
+        assert!(matches!(
+            execute(
+                &engine(&ledger, &wallet, &relay, &secrets, &clock),
+                wake(&info, RELAY, true)
+            ),
+            WakeDisposition::Completed { .. }
+        ));
+        let published = relay.published.lock().unwrap();
+        let response = Event::from_json(published.last().unwrap()).unwrap();
+        let plain = nostr::nips::nip44::decrypt(
+            client_keys().secret_key(),
+            &wallet_keys().public_key(),
+            &response.content,
+        )
+        .unwrap();
+        let value: nostr::serde_json::Value = nostr::serde_json::from_str(&plain).unwrap();
+        assert_eq!(value["result"]["payment_mode"], "confirm_each");
+        assert_eq!(value["result"]["budget_limit_msats"], "1200000");
+        assert_eq!(value["result"]["payer_username"], "alice");
+        assert_eq!(value["result"]["payer_address"], address);
+        assert_eq!(value["result"]["alias"], "My Lexe");
+        let public_info = crate::build_nwc_info_event(
+            &secret,
+            Some(connection.client_pubkey()),
+            connection.policy().methods(),
+            connection.encryption(),
+            UnixTimestamp::from_secs(100),
+        )
+        .unwrap();
+        assert!(!public_info.contains("alice"));
+        assert!(!public_info.contains("Example"));
+        assert!(!public_info.contains("My Lexe"));
+        reopened_identity.lock_connection().unwrap().execute("UPDATE connections SET status='tombstoned',tombstoned_at=101,updated_at=101 WHERE connection_id=?1", [connection.id().as_str()]).unwrap();
+        assert_eq!(
+            reopened_identity
+                .connection_payer_metadata(connection.id().as_str())
+                .unwrap()
+                .unwrap()
+                .payer_username(),
+            Some("alice")
+        );
+        assert!(reopened_identity
+            .connection_address(connection.id().as_str(), &secret)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn foreground_handoff_survives_restart_and_never_calls_native_payment() {
+        exercise_foreground_handoff(false, 1000, false);
+    }
+
+    #[test]
+    fn wallet_managed_handoff_keeps_exact_invoice_and_honest_extra_cost_after_restart() {
+        exercise_foreground_handoff(true, 1000, false);
+    }
+
+    #[test]
+    fn capped_over_fee_success_survives_crash_and_is_accounted_as_violation() {
+        exercise_foreground_handoff(false, 11_000, false);
+    }
+
+    #[test]
+    fn foreground_v14_success_backfills_actual_amount_and_keeps_idempotent_completion() {
+        exercise_foreground_handoff(false, 1000, true);
+    }
+
+    fn exercise_foreground_handoff(wallet_managed: bool, fee_msat: u64, migrate: bool) {
+        use crate::PaymentPreimage;
+        use nostr::hashes::{sha256, Hash};
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        let connection = insert_connection(&ledger);
+        let preimage = PaymentPreimage::from_bytes([7; 32]);
+        let hash = PaymentHash::from_bytes(sha256::Hash::hash(preimage.as_bytes()).to_byte_array());
+        ledger.enable_foreground_payments().expect("gate");
+        if wallet_managed {
+            ledger.lock_connection().unwrap().execute("UPDATE connections SET foreground_fee_policy='wallet_managed',maximum_fee_sat=0,budget_limit_sat=600 WHERE connection_id=?1",[connection.id().as_str()]).unwrap();
+            assert!(ledger
+                .bind_foreground_payment(connection.id().as_str(), "wallet-a", &hash, 600_000, 0)
+                .is_err());
+            ledger
+                .bind_wallet_managed_foreground_payment(
+                    connection.id().as_str(),
+                    "wallet-a",
+                    &hash,
+                    600_000,
+                    "lnbc-foreground",
+                )
+                .unwrap();
+            assert!(!ledger
+                .matches_foreground_binding(
+                    connection.id().as_str(),
+                    &hash,
+                    AmountMsat::from_msat(600_000),
+                    "lnbc-substituted"
+                )
+                .unwrap());
+            assert!(!ledger
+                .matches_foreground_binding(
+                    connection.id().as_str(),
+                    &hash,
+                    AmountMsat::from_msat(600_001),
+                    "lnbc-foreground"
+                )
+                .unwrap());
+            assert!(!ledger
+                .matches_foreground_binding(
+                    connection.id().as_str(),
+                    &PaymentHash::from_bytes([9; 32]),
+                    AmountMsat::from_msat(600_000),
+                    "lnbc-foreground"
+                )
+                .unwrap());
+        } else {
+            assert!(ledger
+                .bind_wallet_managed_foreground_payment(
+                    connection.id().as_str(),
+                    "wallet-a",
+                    &hash,
+                    600_000,
+                    "lnbc-foreground"
+                )
+                .is_err());
+            ledger
+                .bind_foreground_payment(connection.id().as_str(), "wallet-a", &hash, 600_000, 10)
+                .unwrap();
+        }
+        let wallet = TestWallet::default();
+        *wallet.quote.lock().expect("quote") = Some(PaymentQuote::new(
+            hash.clone(),
+            AmountMsat::from_msat(600_000),
+        ));
+        let relay = TestRelay::default();
+        let secrets = TestSecrets::wallet();
+        let clock = FixedClock::new(100);
+        let request = request_event(
+            Request::pay_invoice(nip47::PayInvoiceRequest::new("lnbc-foreground")),
+            100,
+        );
+        let input = wake(&request, RELAY, true);
+        let event = input.event_id().clone();
+        assert!(matches!(
+            execute(&engine(&ledger, &wallet, &relay, &secrets, &clock), input),
+            WakeDisposition::QueuedForApplication { .. }
+        ));
+        assert_eq!(wallet.start_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            ledger.foreground_payments().expect("pending")[0].amount_msat,
+            600_000
+        );
+        assert!(ledger
+            .begin_foreground_payment(&event, "wallet-b", UnixTimestamp::from_secs(100))
+            .is_err());
+        ledger
+            .begin_foreground_payment(&event, "wallet-a", UnixTimestamp::from_secs(100))
+            .expect("begin once");
+        let reopened = WakeLedger::open(&database.path).expect("reopen");
+        assert!(reopened
+            .begin_foreground_payment(&event, "wallet-a", UnixTimestamp::from_secs(100))
+            .is_err());
+        assert!(reopened
+            .reject_foreground_payment(&event, false, UnixTimestamp::from_secs(100))
+            .is_err());
+        assert!(reopened
+            .complete_foreground_payment(
+                &event,
+                &PaymentPreimage::from_bytes([8; 32]),
+                AmountMsat::from_msat(600_000),
+                AmountMsat::from_msat(fee_msat),
+                UnixTimestamp::from_secs(100)
+            )
+            .is_err());
+        assert!(reopened
+            .complete_foreground_payment(
+                &event,
+                &preimage,
+                AmountMsat::from_msat(599_999),
+                AmountMsat::from_msat(fee_msat),
+                UnixTimestamp::from_secs(100)
+            )
+            .is_err());
+        let actual_amount = if wallet_managed { 650_000 } else { 600_000 };
+        if fee_msat > 10_000 {
+            // Simulate process death after durable success evidence, before accounting.
+            reopened.lock_connection().unwrap().execute("UPDATE foreground_payment_requests SET state='succeeded',preimage=?2,actual_amount_msat=?3,fee_msat=?4 WHERE event_id=?1",rusqlite::params![event.as_bytes().as_slice(),preimage.as_bytes().as_slice(),actual_amount,fee_msat]).unwrap();
+            let after_crash = WakeLedger::open(&database.path).unwrap();
+            let report = block_on(
+                crate::PaymentReconciler::new(&after_crash, &wallet, &clock).reconcile(
+                    10,
+                    OperationBudget::new(Duration::from_secs(2)).unwrap(),
+                    &crate::NeverCancelled,
+                ),
+            )
+            .unwrap();
+            assert_eq!(report.succeeded(), 1);
+        }
+        reopened
+            .complete_foreground_payment(
+                &event,
+                &preimage,
+                AmountMsat::from_msat(actual_amount),
+                AmountMsat::from_msat(fee_msat),
+                UnixTimestamp::from_secs(100),
+            )
+            .expect("complete");
+        reopened
+            .complete_foreground_payment(
+                &event,
+                &preimage,
+                AmountMsat::from_msat(actual_amount),
+                AmountMsat::from_msat(fee_msat),
+                UnixTimestamp::from_secs(100),
+            )
+            .unwrap();
+        assert!(reopened
+            .complete_foreground_payment(
+                &event,
+                &preimage,
+                AmountMsat::from_msat(actual_amount + 1),
+                AmountMsat::from_msat(fee_msat),
+                UnixTimestamp::from_secs(100)
+            )
+            .is_err());
+        let pending = &reopened.foreground_payments().unwrap()[0];
+        assert_eq!(pending.amount_msat, 600_000);
+        assert_eq!(pending.actual_amount_msat, Some(actual_amount));
+        assert_eq!(pending.fee_msat, Some(fee_msat));
+        assert_eq!(
+            pending.maximum_fee_sat,
+            if wallet_managed { None } else { Some(10) }
+        );
+        assert_eq!(
+            reopened
+                .load_payment_attempt(&hash)
+                .unwrap()
+                .unwrap()
+                .authorization_exceeded(),
+            !wallet_managed && fee_msat > 10_000
+        );
+        let resumed = reopened
+            .foreground_payment_wake(&event, UnixTimestamp::from_secs(100))
+            .expect("retained wake");
+        let result = execute(
+            &engine(&reopened, &wallet, &relay, &secrets, &clock),
+            resumed,
+        );
+        assert!(
+            matches!(result, WakeDisposition::Completed { .. }),
+            "{result:?}"
+        );
+        assert_eq!(wallet.start_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            reopened
+                .load_payment_attempt(&hash)
+                .expect("attempt")
+                .expect("present")
+                .state(),
+            crate::DurablePaymentState::Succeeded
+        );
+        assert!(matches!(
+            execute(
+                &engine(&reopened, &wallet, &relay, &secrets, &clock),
+                wake(&request, RELAY, true)
+            ),
+            WakeDisposition::Completed { .. }
+        ));
+        assert_eq!(wallet.start_calls.load(Ordering::SeqCst), 0);
+        if migrate {
+            reopened.lock_connection().unwrap().execute_batch("DROP TABLE connection_payer_metadata; DROP TABLE browser_pairing_challenges; DROP TABLE foreground_reusable_bindings; ALTER TABLE foreground_payment_requests DROP COLUMN purchase_json; ALTER TABLE foreground_payment_requests DROP COLUMN consent_ciphertext; ALTER TABLE foreground_payment_requests DROP COLUMN response_published; ALTER TABLE foreground_payment_requests DROP COLUMN actual_amount_msat; ALTER TABLE foreground_payment_bindings DROP COLUMN invoice; ALTER TABLE connections DROP COLUMN foreground_fee_policy; PRAGMA user_version=14;").unwrap();
+            let upgraded = WakeLedger::open(&database.path).unwrap();
+            assert_eq!(
+                upgraded.foreground_payments().unwrap()[0].actual_amount_msat,
+                Some(600_000)
+            );
+            upgraded
+                .complete_foreground_payment(
+                    &event,
+                    &preimage,
+                    AmountMsat::from_msat(600_000),
+                    AmountMsat::from_msat(fee_msat),
+                    UnixTimestamp::from_secs(100),
+                )
+                .unwrap();
+            // Later openings do not overwrite already populated actual evidence.
+            upgraded.lock_connection().unwrap().execute("UPDATE foreground_payment_requests SET actual_amount_msat=600001 WHERE event_id=?1",rusqlite::params![event.as_bytes().as_slice()]).unwrap();
+            let reopened_again = WakeLedger::open(&database.path).unwrap();
+            assert_eq!(
+                reopened_again.foreground_payments().unwrap()[0].actual_amount_msat,
+                Some(600001)
+            );
+        }
+    }
+
+    #[test]
+    fn foreground_rejection_refunds_and_unbound_request_can_resume() {
+        let database = TestDatabase::new();
+        let ledger = WakeLedger::open(&database.path).expect("ledger");
+        let connection = insert_connection(&ledger);
+        let hash = PaymentHash::from_bytes([5; 32]);
+        ledger.enable_foreground_payments().expect("gate");
+        let wallet = TestWallet::default();
+        *wallet.quote.lock().expect("quote") = Some(PaymentQuote::new(
+            hash.clone(),
+            AmountMsat::from_msat(600_000),
+        ));
+        let relay = TestRelay::default();
+        let secrets = TestSecrets::wallet();
+        let clock = FixedClock::new(100);
+        let request = request_event(
+            Request::pay_invoice(nip47::PayInvoiceRequest::new("lnbc-decline")),
+            100,
+        );
+        let input = wake(&request, RELAY, true);
+        let event = input.event_id().clone();
+        assert!(matches!(
+            execute(&engine(&ledger, &wallet, &relay, &secrets, &clock), input),
+            WakeDisposition::QueuedForApplication { .. }
+        ));
+        assert!(ledger.load_payment_attempt(&hash).expect("load").is_none());
+        ledger
+            .bind_foreground_payment(connection.id().as_str(), "wallet-a", &hash, 600_000, 10)
+            .expect("binding after request");
+        let resumed = ledger
+            .foreground_payment_wake(&event, UnixTimestamp::from_secs(100))
+            .expect("wake");
+        assert!(matches!(
+            execute(&engine(&ledger, &wallet, &relay, &secrets, &clock), resumed),
+            WakeDisposition::QueuedForApplication { .. }
+        ));
+        assert_eq!(
+            ledger
+                .load_payment_attempt(&hash)
+                .expect("load")
+                .expect("present")
+                .reserved_sat(),
+            610
+        );
+        ledger
+            .reject_foreground_payment(&event, false, UnixTimestamp::from_secs(100))
+            .expect("reject");
+        assert!(ledger
+            .begin_foreground_payment(&event, "wallet-a", UnixTimestamp::from_secs(100))
+            .is_err());
+        let used: u64 = ledger
+            .lock_connection()
+            .expect("db")
+            .query_row("SELECT used_sat FROM budget_periods", [], |r| r.get(0))
+            .expect("budget");
+        assert_eq!(used, 0);
+        let resumed = ledger
+            .foreground_payment_wake(&event, UnixTimestamp::from_secs(100))
+            .expect("wake");
+        execute(&engine(&ledger, &wallet, &relay, &secrets, &clock), resumed);
+        assert_eq!(wallet.start_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            ledger
+                .load_payment_attempt(&hash)
+                .expect("load")
+                .expect("present")
+                .state(),
+            crate::DurablePaymentState::Failed
+        );
     }
 
     #[test]

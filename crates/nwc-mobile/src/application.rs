@@ -614,6 +614,8 @@ fn application_client_pubkey_from_id(connection_id: &str) -> Option<String> {
 /// Non-sensitive authoritative connection data safe for application state.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ConnectionPresentation {
+    foreground_fee_policy: String,
+    reusable_payments: bool,
     id: String,
     client_pubkey_hex: String,
     wallet_service_pubkey_hex: String,
@@ -655,6 +657,8 @@ impl ConnectionPresentation {
         last_used_at: Option<UnixTimestamp>,
         metadata: Option<crate::ApplicationConnectionMetadata>,
         usage: crate::ConnectionBudgetUsage,
+        foreground_fee_policy: String,
+        reusable_payments: bool,
     ) -> Self {
         let (display_name, icon_url, pending_info_event_relays) = metadata.map_or_else(
             || (None, None, Vec::new()),
@@ -667,6 +671,8 @@ impl ConnectionPresentation {
             },
         );
         Self {
+            foreground_fee_policy,
+            reusable_payments,
             id: connection.id().as_str().to_owned(),
             client_pubkey_hex: connection.client_pubkey().to_hex(),
             wallet_service_pubkey_hex: connection.wallet_service_pubkey().to_hex(),
@@ -687,6 +693,17 @@ impl ConnectionPresentation {
             budget_period_started_at: usage.period_started_at(),
             pending_info_event_relays,
         }
+    }
+
+    /// Explicit foreground extra-cost policy, separate from the internal reservation.
+    /// Whether every purchase is separately confirmed under a reusable grant.
+    pub fn reusable_payments(&self) -> bool {
+        self.reusable_payments
+    }
+
+    /// Explicit foreground extra-cost policy.
+    pub fn foreground_fee_policy(&self) -> &str {
+        &self.foreground_fee_policy
     }
 
     /// Returns the stable connection identifier.

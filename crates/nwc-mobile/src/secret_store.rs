@@ -108,6 +108,24 @@ const fn unavailable() -> HostError {
     HostError::new(HostErrorKind::Unavailable)
 }
 
+/// Creates a random signing key for immediate persistence in protected native storage.
+/// Never expose this value through a JavaScript application API.
+pub fn generate_service_secret() -> String {
+    nostr::Keys::generate().secret_key().to_secret_hex()
+}
+
+/// Validates a stored service secret and derives its public identity and bytes.
+/// The caller must zeroize the returned secret buffer after use.
+pub fn service_secret_identity(encoded: &str) -> Result<(String, Vec<u8>), HostError> {
+    let secret =
+        nostr::SecretKey::parse(encoded).map_err(|_| HostError::new(HostErrorKind::Rejected))?;
+    let keys = nostr::Keys::new(secret);
+    Ok((
+        keys.public_key().to_hex(),
+        keys.secret_key().to_secret_bytes().to_vec(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;

@@ -1,0 +1,20 @@
+name: react-native-nwc-mobile
+rust:
+  directory: ../../crates/nwc-mobile-uniffi
+  manifestPath: Cargo.toml
+bindings:
+  cpp: cpp/generated
+  ts: src/generated
+android:
+  directory: android
+  apiLevel: 24
+  jniLibs: src/main/jniLibs
+  useSharedLibrary: true
+ios:
+  directory: ios
+  frameworkName: NwcMobileFramework
+turboModule:
+  cpp: cpp
+  ts: src
+  spec: NativeNwcMobile
+  entrypoint: src/native.ts

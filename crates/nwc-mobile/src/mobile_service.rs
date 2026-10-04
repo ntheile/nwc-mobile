@@ -86,6 +86,9 @@ impl From<WakeRegistrationError> for MobileServiceError {
 /// must not label callback-derived values as verified application identity.
 #[derive(Clone, Eq, PartialEq)]
 pub struct NwaRequestPresentation {
+    wallet_managed_fees: bool,
+    reusable_payments: bool,
+    metadata_json: Option<String>,
     id_hex: String,
     client_pubkey_hex: String,
     display_name: String,
@@ -97,6 +100,7 @@ pub struct NwaRequestPresentation {
     budget_interval: BudgetInterval,
     methods: Vec<NwcMethod>,
     expires_at: Option<UnixTimestamp>,
+    request_expires_at: Option<UnixTimestamp>,
 }
 
 impl fmt::Debug for NwaRequestPresentation {
@@ -126,6 +130,9 @@ impl NwaRequestPresentation {
         let callback = request.callback();
         let policy = request.requested_policy();
         Self {
+            wallet_managed_fees: request.wallet_managed_fees(),
+            reusable_payments: request.reusable_payments(),
+            metadata_json: request.metadata_json().map(str::to_owned),
             id_hex: request.id().to_hex(),
             client_pubkey_hex: request.client_pubkey().to_hex(),
             display_name: request.display_name().to_owned(),
@@ -140,7 +147,24 @@ impl NwaRequestPresentation {
             budget_interval: policy.budget().interval(),
             methods: policy.methods().collect(),
             expires_at: request.expires_at(),
+            request_expires_at: request.request_expires_at(),
         }
+    }
+
+    /// Whether the request explicitly delegates extra cost to the wallet.
+    /// Whether every purchase is separately confirmed under a reusable grant.
+    pub fn reusable_payments(&self) -> bool {
+        self.reusable_payments
+    }
+
+    /// Whether extra costs are controlled by the selected wallet.
+    pub fn wallet_managed_fees(&self) -> bool {
+        self.wallet_managed_fees
+    }
+
+    /// Untrusted metadata from the exact retained request; the host must validate its schema.
+    pub fn metadata_json(&self) -> Option<&str> {
+        self.metadata_json.as_deref()
     }
 
     /// Returns the random identity binding approval to this presentation.
@@ -209,7 +233,13 @@ impl NwaRequestPresentation {
         &self.methods
     }
 
-    /// Returns when the request stops accepting approval.
+    /// Returns the exclusive approval deadline, when supplied by the requester.
+    #[must_use]
+    pub const fn request_expires_at(&self) -> Option<UnixTimestamp> {
+        self.request_expires_at
+    }
+
+    /// Returns the requested connection expiration.
     #[must_use]
     pub const fn expires_at(&self) -> Option<UnixTimestamp> {
         self.expires_at
@@ -440,6 +470,10 @@ impl NwcMobileService {
                     last_used_at,
                     metadata,
                     usage,
+                    self.ledger
+                        .foreground_fee_policy(connection.id().as_str())?,
+                    self.ledger
+                        .is_reusable_foreground(connection.id().as_str())?,
                 ))
             })
             .collect()
@@ -501,7 +535,12 @@ impl NwcMobileService {
         if pending.is_some() {
             return Err(MobileServiceError::NwaAlreadyPending);
         }
-        let request = NwaRequest::parse(input, now, &self.nwa_policy)?;
+        let policy = if self.ledger.foreground_payments_enabled()? {
+            self.nwa_policy.clone().for_foreground_payments()
+        } else {
+            self.nwa_policy.clone()
+        };
+        let request = NwaRequest::parse(input, now, &policy)?;
         let presentation = NwaRequestPresentation::from_request(&request);
         *pending = Some(request);
         Ok(presentation)

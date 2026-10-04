@@ -227,6 +227,7 @@ impl ApnsWakeRegistrationConfig {
             environment: environment.to_owned(),
             install_id: install_id.to_owned(),
             enabled: self.enabled,
+            push_service: "apns",
         })
     }
 }
@@ -244,6 +245,7 @@ impl fmt::Debug for ApnsWakeRegistrationConfig {
 /// Validated APNs registration configuration safe to pass to the transport.
 #[derive(Clone)]
 pub struct ReadyApnsWakeRegistrationConfig {
+    push_service: &'static str,
     server_url: SecureWakeServerUrl,
     push_token: String,
     app_id: String,
@@ -267,6 +269,41 @@ impl fmt::Debug for ReadyApnsWakeRegistrationConfig {
             .field("server_url", &self.server_url)
             .finish_non_exhaustive()
     }
+}
+
+/// Validated FCM routing configuration. Debug output excludes device identifiers.
+#[derive(Clone, Debug)]
+pub struct ReadyFcmWakeRegistrationConfig(ReadyApnsWakeRegistrationConfig);
+
+impl ReadyFcmWakeRegistrationConfig {
+    /// Validates public HTTPS endpoint, native device token, app and installation IDs.
+    pub fn new(
+        server_url: String,
+        push_token: String,
+        app_id: String,
+        install_id: String,
+    ) -> Result<Self, WakeHttpConfigError> {
+        let mut config = ApnsWakeRegistrationConfig::new(
+            Some(server_url),
+            Some(push_token),
+            app_id,
+            "production".into(),
+            install_id,
+            true,
+        )
+        .ready()?;
+        config.push_service = "fcm";
+        Ok(Self(config))
+    }
+}
+
+/// Runs one bounded FCM registration/removal pass with native NIP-98 authorization.
+pub async fn run_fcm_registration_worker(
+    ledger: &WakeLedger,
+    config: ReadyFcmWakeRegistrationConfig,
+    signing_key: Nip98SigningKey,
+) -> Result<RegistrationPass, WakeHttpRegistrationError> {
+    run_registration_worker(ledger, config.0, signing_key).await
 }
 
 /// Validated public routing values used to schedule invoice settlement checks.
@@ -579,7 +616,7 @@ impl NwcPushTransport {
                 id: &self.config.install_id,
                 connection_id: change.connection_id().as_str(),
                 connection_revision: change.connection_revision().value(),
-                push_service: "apns",
+                push_service: self.config.push_service,
                 push_token: &self.config.push_token,
                 app_id: &self.config.app_id,
                 environment: &self.config.environment,
@@ -706,6 +743,27 @@ struct InvoiceSettlementMonitorPayload<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fcm_config_preserves_provider_and_redacts_token() {
+        let ready = ReadyFcmWakeRegistrationConfig::new(
+            "https://wake.example".into(),
+            "private-token".into(),
+            "com.example".into(),
+            "installation".into(),
+        )
+        .expect("FCM config");
+        assert_eq!(ready.0.push_service, "fcm");
+        assert_eq!(ready.0.environment, "production");
+        assert!(!format!("{ready:?}").contains("private-token"));
+        assert!(ReadyFcmWakeRegistrationConfig::new(
+            "http://wake.example".into(),
+            "token".into(),
+            "app".into(),
+            "install".into()
+        )
+        .is_err());
+    }
 
     #[test]
     fn icon_download_targets_must_be_globally_routable() {

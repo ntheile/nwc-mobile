@@ -142,6 +142,7 @@ focused references as needed:
 - [Documentation index](docs/README.md)
 - [Architecture and responsibility boundaries](docs/architecture.md)
 - [Configuring `NwcMobile`](docs/integration/nwc-mobile.md)
+- [React Native integration (in development)](docs/integration/react-native.md)
 - [Implementing `NwcLightningNode`](docs/integration/lightning-node.md)
 - [Integrating Nostr Wallet Auth](docs/integration/nwa.md)
 - [Building NWA and NWC screens](docs/integration/nwc-ui.md)

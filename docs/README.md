@@ -22,6 +22,7 @@ overview; implementation details live here.
 ## Integration guides
 
 - [Configuring `NwcMobile`](integration/nwc-mobile.md)
+- [React Native integration (in development)](integration/react-native.md)
 - [Implementing `NwcLightningNode`](integration/lightning-node.md)
 - [Nostr Wallet Auth](integration/nwa.md)
 - [NWA and NWC screens](integration/nwc-ui.md)
