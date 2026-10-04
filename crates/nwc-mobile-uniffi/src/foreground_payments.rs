@@ -234,7 +234,7 @@ impl MobileWallet {
         let mut request = self
             .list_pending_payments()?
             .into_iter()
-            .find(|p| p.event_id_hex == event_id_hex)
+            .find(|p| p.event_id_hex == event.to_hex())
             .ok_or(MobileEngineError::NotFound)?;
         let invoice = nwc_mobile_bolt11::parse_invoice(&request.invoice)
             .map_err(|_| MobileEngineError::InvalidArgument)?;

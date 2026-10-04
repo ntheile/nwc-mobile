@@ -206,8 +206,9 @@ impl MobileWallet {
 
     /// Construct in native bootstrap with an engine, public defaults, and an
     /// OS-protected client-secret store. No JavaScript callback is required.
-    /// Before processing wake registrations, the host must provision its service
-    /// secret as hex at `nwc-mobile/foreground/service-key` in this store.
+    /// Before processing wake registrations or storing an NWA payer address,
+    /// the host must provision its service secret as hex at
+    /// `nwc-mobile/foreground/service-key` in this store.
     /// A missing key returns NotFound; a malformed or mismatched key returns CorruptData.
     #[uniffi::constructor]
     pub fn new(
@@ -424,6 +425,11 @@ fn approve_nwa_internal(
     {
         return Err(MobileEngineError::InvalidArgument);
     }
+    let address_secret = options
+        .payer_address_json
+        .as_ref()
+        .map(|_| wallet.pairing_secret())
+        .transpose()?;
     let approved = wallet
         .engine
         .service
@@ -450,15 +456,13 @@ fn approve_nwa_internal(
         let _ = wallet.revoke_connection(connection.id().as_str().into());
         return Err(error.into());
     }
-    if let Some(address) = options.payer_address_json {
-        let stored = wallet.pairing_secret().and_then(|secret| {
-            wallet
-                .engine
-                .service
-                .ledger()
-                .set_connection_address(connection.id().as_str(), &address, &secret)
-                .map_err(Into::into)
-        });
+    if let (Some(address), Some(secret)) = (options.payer_address_json, address_secret) {
+        let stored = wallet
+            .engine
+            .service
+            .ledger()
+            .set_connection_address(connection.id().as_str(), &address, &secret)
+            .map_err(MobileEngineError::from);
         if let Err(error) = stored {
             let _ = wallet.revoke_connection(connection.id().as_str().into());
             return Err(error);
@@ -637,6 +641,47 @@ mod tests {
             store.unavailable.store(false, Ordering::SeqCst);
             assert!(wallet.revoke_connection(created.connection_id).unwrap());
             assert!(store.entries.lock().unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn missing_address_key_preserves_review_for_retry() {
+        use nwc_mobile::Clock;
+        with_wallet(|wallet, store| {
+            wallet.enable_foreground_payments().unwrap();
+            let now = nwc_mobile::SystemClock.now().as_secs();
+            let client = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
+            let request = wallet.parse_nwa_request(format!("nostr+walletauth://{client}?relay=wss%3A%2F%2Frelay.example&payment_mode=confirm_each&budget_basis=invoice_principal&fee_policy=wallet_managed&max_amount=100000&budget_renewal=monthly&expires_at={}&request_methods=get_info%20pay_invoice", now + 86400)).unwrap();
+            let approval = MobileConnectionOptions {
+                methods: vec![MobileNwcMethod::GetInfo, MobileNwcMethod::PayInvoice],
+                expires_at: Some(now + 86400),
+                budget_interval: MobileBudgetInterval::Monthly,
+                payer_address_json: Some(r#"{"line1":"123 Test St","city":"Austin","zipCode":"78701","countryCode":"US"}"#.into()),
+                ..options()
+            };
+            assert!(approve_nwa_internal(
+                &wallet,
+                request.request_id_hex.clone(),
+                approval.clone(),
+                "reusable"
+            )
+            .is_err());
+            assert!(wallet.list_connections().unwrap().is_empty());
+            assert_eq!(
+                wallet
+                    .pending_nwa_request()
+                    .unwrap()
+                    .unwrap()
+                    .request_id_hex,
+                request.request_id_hex
+            );
+            store
+                .store("nwc-mobile/foreground/service-key".into(), "01".repeat(32))
+                .unwrap();
+            assert!(
+                approve_nwa_internal(&wallet, request.request_id_hex, approval, "reusable").is_ok()
+            );
+            assert!(wallet.pending_nwa_request().unwrap().is_none());
         });
     }
 
